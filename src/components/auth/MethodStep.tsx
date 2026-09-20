@@ -24,6 +24,7 @@ import {
   Badge,
   Divider,
   EASE_OUT,
+  FieldError,
   FOCUS_RING,
   GPU,
   LiveRegion,
@@ -188,7 +189,11 @@ function GoogleButton({ flow }: { flow: FlowController }) {
           </>
         )}
       </motion.button>
-      <p className="text-center text-[10.5px] font-semibold text-emerald-900/55">{t.method.googleNote}</p>
+      {flow.googleError ? (
+        <FieldError>{flow.googleError}</FieldError>
+      ) : (
+        <p className="text-center text-[10.5px] font-semibold text-emerald-900/55">{t.method.googleNote}</p>
+      )}
     </div>
   );
 }

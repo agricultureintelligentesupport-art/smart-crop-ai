@@ -117,8 +117,11 @@ export function createDemoGateway(): AuthGateway {
     demoOtp: DEMO_OTP,
 
     /**
-     * Firebase: `signInWithPopup(auth, new GoogleAuthProvider())`
-     * then `setDoc(doc(db, "users", cred.user.uid), { ...profile }, { merge: true })`.
+     * Firebase: the shared provider (`prompt: select_account` so Google always
+     * shows the account chooser) via `signInWithPopup(auth, googleProvider)`,
+     * falling back to `signInWithRedirect(auth, googleProvider)` when the
+     * popup is blocked or on mobile; then `syncUserDoc()` merges
+     * `users/{uid}`. See `docs/firebase-adapter.md` §7.
      */
     async signInWithGoogle() {
       const users = readUsers();

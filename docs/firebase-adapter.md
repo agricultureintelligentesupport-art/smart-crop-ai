@@ -71,6 +71,15 @@ const app = getApps().length ? getApp() : initializeApp({ /* NEXT_PUBLIC_FIREBAS
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+/**
+ * One shared Google provider for popup AND redirect. `prompt:
+ * select_account` forces the Google account chooser on every sign-in, so the
+ * account selection screen is always shown instead of silently re-using the
+ * previously signed-in account.
+ */
+const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: "select_account" });
+
 /** The demo challenge carries the ConfirmationResult that Firebase returns. */
 type FirebaseChallenge = OtpChallenge & { result: ConfirmationResult };
 
@@ -107,7 +116,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
     async signInWithGoogle() {
       try {
         await setPersistence(auth, browserLocalPersistence);
-        const cred = await signInWithPopup(auth, new GoogleAuthProvider());
+        const cred = await signInWithPopup(auth, googleProvider);
         const data = await loadProfile(cred.user.uid);
         return {
           uid: cred.user.uid,
@@ -266,3 +275,36 @@ gateway =
 account later, call `linkWithCredential()` during `handleGoogleAuth` /
 `handleVerifyOTP` — the `SessionUser` shape is identical, so the dashboard
 needs no changes.
+
+## 7. Google: account chooser, popup blocked and mobile
+
+`handleGoogleAuth` (in `useAuthFlow.ts`) implements the whole real-world
+Google flow around the shared `googleProvider` from §2/§3:
+
+1. **Account chooser** — the provider always carries
+   `setCustomParameters({ prompt: "select_account" })`, so clicking
+   "Continue with Google" opens the Google *account selection* screen.
+2. **Popup first (desktop)** — `signInWithPopup(auth, googleProvider)`.
+3. **Redirect fallback** — on `auth/popup-blocked`,
+   `auth/operation-not-supported-in-this-environment` (or *first* on mobile
+   browsers, detected via `isMobileBrowser()` in `src/lib/auth/platform.ts`)
+   the flow calls `signInWithRedirect(auth, googleProvider)` instead. The
+   result comes back with the next page load, where a mount effect calls
+   `getRedirectResult(auth)` (resolves to `null` on normal loads) and runs
+   the same post-sign-in work.
+4. **User cancellation** — `auth/popup-closed-by-user`,
+   `auth/cancelled-popup-request`, `auth/cancelled-redirect` and
+   `auth/redirect-cancelled-by-user` never trigger a redirect; the user sees
+   the localised "popup closed" copy under the button and can retry.
+5. **Setup problems** — `auth/unauthorized-domain` (the current origin is not
+   in *Firebase Console → Authentication → Settings → Authorized domains*)
+   is reported with that exact instruction instead of retrying into the same
+   failure.
+6. **Profile document** — after *both* the popup and the redirect result,
+   `syncUserDoc()` (in `src/lib/auth/userDoc.ts`) creates/merges
+   `users/{uid}` with retries and backoff; a final failure is logged
+   (`logAuthError`) and surfaced as a notice without killing the session.
+7. **Logging** — every failure path goes through
+   `logAuthError(scope, error)` (`src/lib/auth/logging.ts`), which prints the
+   Firebase code, the page origin and an actionable hint (see the
+   `HINTS` table), so the console alone explains what happened.

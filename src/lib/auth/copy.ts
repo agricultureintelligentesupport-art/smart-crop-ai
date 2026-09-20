@@ -51,6 +51,7 @@ export interface AuthCopy {
     google: string;
     googleBusy: string;
     googleNote: string;
+    googleRedirecting: string;
     divider: string;
     channelsAria: string;
     channelPhone: string;
@@ -120,6 +121,10 @@ export interface AuthCopy {
     wrongPassword: string;
     tooMany: string;
     popupClosed: string;
+    popupBlocked: string;
+    unauthorizedDomain: string;
+    operationNotSupported: string;
+    profileSave: string;
     network: string;
     unknown: string;
   };
@@ -212,6 +217,7 @@ const AR: AuthCopy = {
     google: "المتابعة بحساب Google",
     googleBusy: "جارٍ الاتصال بـ Google…",
     googleNote: "لا نصل إلى كلمة مرورك ولا نخزّنها",
+    googleRedirecting: "أعدنا تحويلك إلى Google لإكمال تسجيل الدخول…",
     divider: "أو",
     channelsAria: "طريقة التحقق",
     channelPhone: "الهاتف",
@@ -281,6 +287,11 @@ const AR: AuthCopy = {
     wrongPassword: "كلمة المرور غير صحيحة",
     tooMany: "محاولات كثيرة، انتظر قليلاً ثم أعد المحاولة",
     popupClosed: "أُغلقت نافذة Google قبل إكمال الدخول",
+    popupBlocked: "تعذّر فتح نافذة Google المنبثقة (حظر النوافذ المنبثقة أو متصفح الجوال) — أعد المحاولة",
+    unauthorizedDomain:
+      "نطاق هذا الموقع غير مصرّح به في Firebase — أضِفه إلى Authorized domains في لوحة Firebase ثم أعد المحاولة",
+    operationNotSupported: "هذا المتصفح لا يدعم نافذة الدخول ولا التحويل — جرّب متصفحًا آخر",
+    profileSave: "تم تسجيل الدخول، لكن تعذّر حفظ الملف على السحابة — تفصيلة في سجل المتصفح (console)",
     network: "تعذّر الاتصال، تحقّق من شبكتك",
     unknown: "حدث خطأ غير متوقع، أعد المحاولة",
   },
@@ -392,6 +403,7 @@ const FR: AuthCopy = {
     google: "Continuer avec Google",
     googleBusy: "Connexion à Google…",
     googleNote: "Nous n'accédons jamais à votre mot de passe",
+    googleRedirecting: "Redirection vers Google pour terminer la connexion…",
     divider: "ou",
     channelsAria: "Méthode de vérification",
     channelPhone: "Téléphone",
@@ -461,6 +473,14 @@ const FR: AuthCopy = {
     wrongPassword: "Mot de passe incorrect",
     tooMany: "Trop de tentatives, réessayez dans un instant",
     popupClosed: "La fenêtre Google a été fermée avant la fin",
+    popupBlocked:
+      "La fenêtre Google n'a pas pu s'ouvrir (pop-up bloquée ou navigateur mobile) — réessayez",
+    unauthorizedDomain:
+      "Ce domaine n'est pas autorisé dans Firebase — ajoutez-le aux « Authorized domains » de la console, puis réessayez",
+    operationNotSupported:
+      "Ce navigateur ne supporte ni la fenêtre popup ni la redirection — essayez un autre navigateur",
+    profileSave:
+      "Connexion réussie, mais l'enregistrement du profil a échoué — détails dans la console du navigateur",
     network: "Connexion impossible, vérifiez votre réseau",
     unknown: "Une erreur inattendue est survenue, réessayez",
   },
