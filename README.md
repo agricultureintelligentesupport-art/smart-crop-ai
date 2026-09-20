@@ -1,57 +1,153 @@
-# محصولي الذكي · Smart Crop AI — Pre-Auth Onboarding
+# محصولي الذكي · Smart Crop AI
 
-Full-screen, mobile-first, 3-step pre-authentication onboarding flow (Arabic RTL default, French LTR option) built with **Next.js (App Router) + Tailwind CSS v4 + Framer Motion + Lucide React**.
+Mobile-first, bilingual (Arabic RTL default · French LTR) precision-agriculture
+app for Algeria: **Next.js (App Router) + React 19 + Tailwind CSS v4 + Framer
+Motion + Lucide React**.
 
 ```bash
 npm install
 npm run dev   # http://localhost:3000
 ```
 
+## Routes
+
+| Route | What it is |
+| --- | --- |
+| `/` | 3-slide pre-auth onboarding carousel (swipe, dots, skip) |
+| `/auth` | Full authentication workflow, sign-in tab |
+| `/login` | Same workflow, sign-in tab (explicit entry point) |
+| `/register` | Same workflow, create-account tab |
+| `/guest` | Guest dashboard — live on first paint, no account needed |
+| `/dashboard` | Member dashboard (redirects to `/auth` without a session) |
+
+Every route is interactive end to end. There are no "coming soon" screens:
+`/guest` renders the dashboard immediately, and every CTA leads to a working
+destination.
+
+## The auth workflow
+
+```
+Step 1 · method     Google · Algerian phone (+213) with SMS OTP · e-mail + password
+                    ↳ tab toggle: sign in / create account, show-hide password,
+                      live password-strength meter, forgot-password
+Step 2 · role       Farmer · Agronomist · Investor (radio cards, perks expand)
+Step 3 · wilaya     Searchable list of all 58 wilayas + climate preview
+        ↓
+   success panel → /dashboard
+```
+
+- **State machine**: `src/components/auth/useAuthFlow.ts` owns validation, step
+  navigation, OTP countdowns and error mapping. The four Firebase-facing
+  handlers are named for what they will do:
+  `handleGoogleAuth`, `handleSendOTP`, `handleVerifyOTP`, `handleEmailAuth`.
+- **Gateway**: all identity work goes through the `AuthGateway` interface
+  (`src/lib/auth/types.ts`), implemented today by an on-device demo gateway
+  (`src/lib/auth/gateway.ts`) so every button really works before the backend
+  exists. The demo SMS code is `123456` and is shown in the UI while
+  `gateway.isDemo` is true.
+- **Firebase**: drop-in adapter + step-by-step wiring in
+  [`docs/firebase-adapter.md`](docs/firebase-adapter.md). Flipping
+  `NEXT_PUBLIC_AUTH_BACKEND=firebase` is the only behavioural switch.
+- **Persistence**: `src/lib/auth/profile.ts` keeps the session on-device
+  (`localStorage`, mirroring `users/{uid}`), plus device preferences (role +
+  wilaya) that survive signing out, so a returning farmer skips the setup steps.
+
+## The dashboard
+
+One component, two modes (`DashboardView`): `/guest` for visitors, `/dashboard`
+for members. Every number is derived from the wilaya baseline (temperature,
+humidity, wind, rainfall, soil, crops) through `src/lib/agronomy.ts`, which is
+deterministic and offline — no hydration mismatch, no fake "live" data.
+
+- **Weather + water need**: hourly and 7-day views, ET₀, agronomic advice line.
+- **Irrigation calculator**: crop × area × soil × system → L/ha, m³/day, m³/week
+  and water saved versus furrow (FAO-56 style: `ET₀ × Kc × soil ÷ efficiency`).
+- **Leaf scan**: file picker / drag & drop / camera capture, local preview,
+  progress, diagnosis with confidence, severity and numbered field steps.
+- **Vegetation index**: NDVI reading, 8-week sparkline, stress share.
+- **Field tasks**: checklist derived from the same weather and irrigation
+  numbers, with progress.
+- **Guest → account**: conversion card linking to `/register` and `/login`.
+
+Values are labelled as decision-support estimates, not measurements.
+
 ## Structure
 
 ```
 src/
 ├── app/
-│   ├── layout.tsx            # Cairo (AR) + Plus Jakarta Sans (FR) via next/font, theme-color, viewport lock
-│   ├── globals.css           # Tailwind theme, art palette vars (light/dark), glass/screen-h/safe-area utilities
-│   ├── page.tsx              # renders <OnboardingScreen/>
-│   ├── register/page.tsx     # CTA stub → "Créer un compte" destination
-│   └── guest/page.tsx        # CTA stub → "Continuer comme invité" destination
-├── components/onboarding/
-│   ├── OnboardingScreen.tsx  # carousel orchestration: swipe/drag, RTL direction math, dots, dynamic CTA, backdrop
-│   ├── HeaderBar.tsx         # brand badge + AR/FR language pill + skip button (fixed slot, 48px targets)
-│   └── graphics/
-│       ├── LeafScannerArt.tsx  # slide 1 — glowing leaf + camera viewfinder + scanline + AI result chips
-│       ├── IrrigationArt.tsx   # slide 2 — smart water drop + weather widget + irrigation schedule card
-│       └── SatelliteArt.tsx    # slide 3 — satellite NDVI heatmap map + live downlink + legend
-├── lib/content.ts            # all AR/FR copy (one source of truth for both languages)
-├── e2e/
-│   └── onboarding.spec.ts    # Playwright suite (22 tests × 2 projects)
-└── playwright.config.ts      # mobile (Pixel 7) + desktop Chromium projects
+│   ├── layout.tsx              # Cairo (AR) + Plus Jakarta Sans (FR), viewport lock
+│   ├── globals.css             # theme, glass + field primitives, focus ring, a11y fallbacks
+│   ├── page.tsx                # onboarding carousel
+│   ├── auth|login|register/page.tsx
+│   ├── guest/page.tsx          # guest dashboard
+│   └── dashboard/page.tsx      # member dashboard
+├── components/
+│   ├── AmbientBackdrop.tsx     # shared GPU-isolated gradient + glow layer
+│   ├── onboarding/             # carousel, header, 3 animated SVG scenes
+│   ├── auth/
+│   │   ├── AuthFlow.tsx        # step router (method → role → wilaya → success)
+│   │   ├── AuthShell.tsx       # gradient canvas, header, progress ladder, scroll contract
+│   │   ├── StepLadder.tsx      # progress + backwards navigation
+│   │   ├── MethodStep.tsx      # Google · phone+OTP · e-mail form
+│   │   ├── OtpInput.tsx        # 6-digit field with SMS autofill + paste
+│   │   ├── RoleStep.tsx        # farmer · agronomist · investor
+│   │   ├── WilayaStep.tsx      # searchable 58-wilaya picker + climate preview
+│   │   ├── SuccessStep.tsx     # recap → dashboard
+│   │   ├── useAuthFlow.ts      # the state machine + SDK-ready handlers
+│   │   └── ui.tsx              # buttons, fields, strength meter, notice, badges
+│   └── dashboard/              # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
+│                               # FieldTasksCard, UpgradeCard, WilayaSelect, parts
+├── lib/
+│   ├── content.ts              # onboarding copy (AR/FR)
+│   ├── wilayas.ts              # 58 wilayas + climate/soil/crop baselines, fuzzy search
+│   ├── agronomy.ts             # weather, ET₀, irrigation, NDVI, demo diagnosis
+│   ├── use-lang.ts             # persisted AR/FR state, keeps <html lang/dir> in sync
+│   ├── auth/                   # types, gateway, validation, profile, copy
+│   └── dashboard/copy.ts       # dashboard copy (AR/FR)
+├── docs/firebase-adapter.md    # how to bind Firebase Auth
+└── e2e/                        # Playwright suites
 ```
 
 ## Tests
 
 ```bash
 npx playwright install chromium   # one-time browser download
-npm run test:e2e                  # boots `next dev` automatically (reuses one already running)
+npm run test:e2e                  # boots `next dev` automatically
 ```
 
-Covers: viewport stability (zero page scroll on 412/390/320 widths, 48px+ touch targets), RTL defaults, swipe/pointer-drag navigation with RTL semantics, dot jumps, skip → final step, AR⇄FR switching (dir + strings + mirrored header), CTA routing to `/register` & `/guest`, and a zero-console-errors health check.
+Two projects (Pixel 7 + Desktop Chrome, 66 tests) covering:
 
+- **Onboarding** (`e2e/onboarding.spec.ts`): zero page scroll at 320/412 widths,
+  48px+ targets, RTL mirroring, swipe semantics, dot jumps, AR⇄FR switching,
+  CTA routing, no console errors.
+- **Auth + dashboard** (`e2e/auth-flow.spec.ts`): field-level validation,
+  password toggle + strength meter, phone validation, wrong/expired OTP, resend
+  rate limit, changing the number, role requirement, wilaya search in Arabic and
+  French (accent-insensitive), guest mode, irrigation reactivity, leaf scan,
+  personalisation persistence, and a full register → setup → dashboard walk.
+
+Set `PW_CHROMIUM_PATH=/path/to/chromium` to reuse an already-installed browser
+instead of downloading one (handy in sandboxes and slim CI images).
 
 ## Behaviour notes
 
-- **Viewport lock**: root uses `h-screen` upgraded to `100dvh` (`.screen-h`), `overflow-hidden` on `html/body` + `overscroll-behavior: none` → zero page scrolling from 320×568 up.
-- **RTL/LTR**: switching AR↔FR flips `dir` on the whole screen *and* on `<html>`. The carousel inverts swipe semantics too (in RTL, dragging content to the right advances the slide). Brand badge sits at the start (right in AR), skip at the end (left in AR).
-- **Skip**: jumps straight to the final action step (sign-up CTAs); auto-hides once there.
-- **Slides**: 3 animated SVG scenes (Framer Motion loops), spring-driven enter/exit + drag-to-dismiss with velocity flick support; keyboard arrows work too.
-- **Bottom controls**: glowing animated page dots (clickable) + CTA that morphs on the last step into "إنشاء حساب" (emerald) and "متابعة كزائر" (glassmorphism). The swap zone has a fixed height, so the layout never jumps.
-- **Touch**: every button is ≥48px tall; safe-area insets respected (`pt-safe`/`pb-safe`).
-- **Dark mode**: follows the OS automatically; SVG art adapts through CSS variables in `globals.css`.
-
-## Next steps (suggested)
-
-- Replace `/register` & `/guest` stubs with the real auth flow.
-- Persist "seen onboarding" in a cookie/localStorage and skip this screen on return visits.
-- Optional: `next-intl` if the app grows past two languages (copy already isolated in `lib/content.ts`).
+- **Viewport lock**: `100dvh` via `.screen-h`, `overflow-hidden` on
+  `html/body`, `overscroll-behavior: none`. Each screen owns exactly one scroll
+  container, so the header and step ladder stay pinned on 320px phones with the
+  keyboard open.
+- **RTL/LTR**: AR⇄FR flips `dir` on the screen and on `<html>`. Physical values
+  (carousel swipe vectors, enter/exit offsets, phone-country ordering, SVG HUD
+  labels) are pinned LTR where the content is Latin/numeric.
+- **Motion**: one spring language (`SPRING`/`EASE_OUT` in `components/auth/ui.tsx`),
+  GPU-isolated panels (`transform-gpu` + `will-change-transform`) and `my-auto`
+  centring that never clips a tall step. `prefers-reduced-motion` is honoured
+  globally in `globals.css`.
+- **Accessibility**: WCAG AA contrast on the emerald palette, visible focus
+  rings, full keyboard operability (roving tabindex on the channel tabs, arrow
+  keys on role cards and the parcel slider, direction-agnostic range keys),
+  labelled inputs, `role="alert"` errors, `aria-live` notices, and opaque
+  fallbacks for glass under `prefers-reduced-transparency` / `prefers-contrast`
+  / missing `backdrop-filter`.
+- **Fonts**: Cairo + Plus Jakarta Sans via `next/font`. `next build` needs
+  network access to fetch them; `next dev` falls back to system fonts offline.

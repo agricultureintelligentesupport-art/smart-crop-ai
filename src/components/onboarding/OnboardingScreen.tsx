@@ -4,7 +4,9 @@ import { AnimatePresence, motion, useWillChange } from "framer-motion";
 import { ArrowLeft, ArrowRight, MoveHorizontal, UserPlus, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { memo, useCallback, useEffect, useState, type ComponentType } from "react";
-import { COPY, SLIDES, type Copy, type Lang, type SlideId } from "@/lib/content";
+import { COPY, SLIDES, type Copy, type SlideId } from "@/lib/content";
+import { useLang } from "@/lib/use-lang";
+import AmbientBackdrop from "@/components/AmbientBackdrop";
 import HeaderBar from "./HeaderBar";
 import IrrigationArt from "./graphics/IrrigationArt";
 import LeafScannerArt from "./graphics/LeafScannerArt";
@@ -26,7 +28,8 @@ type DragInfo = { offset: { x: number; y: number }; velocity: { x: number; y: nu
 
 export default function OnboardingScreen() {
   const router = useRouter();
-  const [lang, setLang] = useState<Lang>("ar");
+  // Shared language state: the <html lang/dir> sync and persistence live in the hook.
+  const { lang, setLang } = useLang("ar");
   const [[slide, dir], setSlide] = useState<[number, number]>([0, 0]);
 
   const t = COPY[lang];
@@ -35,13 +38,6 @@ export default function OnboardingScreen() {
   const fdir = rtl ? -1 : 1;
   const last = SLIDES.length - 1;
   const isLast = slide === last;
-
-  // Keep <html lang/dir> in sync with the active language.
-  useEffect(() => {
-    const el = document.documentElement;
-    el.lang = lang;
-    el.dir = t.dir;
-  }, [lang, t.dir]);
 
   const goTo = useCallback(
     (index: number) => {
@@ -93,7 +89,7 @@ export default function OnboardingScreen() {
         background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 55%, #DCF5E6 100%)",
       }}
     >
-      <Backdrop />
+      <AmbientBackdrop />
 
       <HeaderBar t={t} lang={lang} onLangChange={setLang} showSkip={!isLast} onSkip={handleSkip} />
 
@@ -335,43 +331,6 @@ const PageDots = memo(function PageDots({
           </button>
         );
       })}
-    </div>
-  );
-});
-
-/* ------------------------------------------------------------------ */
-/*  Ambient "Sunrise over green fields" backdrop — bright & optimistic  */
-/* ------------------------------------------------------------------ */
-
-/** Memoized + GPU-isolated: the expensive blur-3xl glow stack rasterizes once
- *  into its own composite layer and is never re-painted during swipes. */
-const Backdrop = memo(function Backdrop() {
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-0 transform-gpu backface-hidden will-change-transform z-0 overflow-hidden"
-    >
-      {/* Soft directional light wash */}
-      <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-transparent to-emerald-200/30" />
-
-      {/* Warm sunrise/sunshine glow (top-right amber) */}
-      <div className="absolute -end-20 -top-24 h-72 w-72 rounded-full bg-amber-300/40 blur-3xl" />
-      <div className="absolute end-4 top-6 h-40 w-40 rounded-full bg-yellow-200/50 blur-2xl" />
-
-      {/* Vibrant fresh-sprout green glow (top-left) */}
-      <div className="absolute -start-24 -top-16 h-72 w-72 rounded-full bg-emerald-300/45 blur-3xl" />
-
-      {/* Rich forest emerald pool (bottom) */}
-      <div className="absolute -bottom-28 start-1/4 h-80 w-80 rounded-full bg-emerald-400/25 blur-3xl" />
-
-      {/* Subtle dotted texture — like distant crop rows */}
-      <div
-        className="absolute inset-0 opacity-40"
-        style={{
-          backgroundImage: "radial-gradient(circle at 1px 1px, rgba(6,78,59,0.12) 1px, transparent 0)",
-          backgroundSize: "26px 26px",
-        }}
-      />
     </div>
   );
 });
