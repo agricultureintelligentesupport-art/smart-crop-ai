@@ -2,6 +2,15 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut as fbSignOut,
+  updateProfile,
+} from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { auth, db, googleProvider } from "@/lib/firebase";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
 import { createAuthGateway } from "@/lib/auth/gateway";
 import {
@@ -31,7 +40,7 @@ import {
   passwordStrength,
   toE164,
 } from "@/lib/auth/validation";
-import { DEFAULT_WILAYA_CODE } from "@/lib/wilayas";
+import { DEFAULT_WILAYA_CODE, getWilaya } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import type { StepId } from "./StepLadder";
 
@@ -236,7 +245,59 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setNotice(null);
     setBusy("google");
     try {
-      const session = await gateway.signInWithGoogle();
+      let session: SessionUser;
+      try {
+        const cred = await signInWithPopup(auth, googleProvider);
+        const fbUser = cred.user;
+        const userDocRef = doc(db, "users", fbUser.uid);
+        const snap = await getDoc(userDocRef);
+        const existingData = snap.exists() ? snap.data() : {};
+
+        const resolvedRole = (existingData.role ?? role) as AuthRole | null;
+        const resolvedWilaya = (existingData.wilayaCode ?? existingData.wilaya ?? wilayaCode) as string | null;
+        const wilayaData = resolvedWilaya ? getWilaya(resolvedWilaya) : null;
+        const preferredCrop = existingData.preferredCrop ?? wilayaData?.crops?.[0] ?? null;
+
+        await setDoc(
+          userDocRef,
+          {
+            uid: fbUser.uid,
+            displayName: fbUser.displayName || existingData.displayName || "",
+            email: fbUser.email || existingData.email || "",
+            photoURL: fbUser.photoURL || existingData.photoURL || null,
+            role: resolvedRole,
+            wilaya: resolvedWilaya,
+            wilayaCode: resolvedWilaya,
+            preferredCrop,
+            lastLoginAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true },
+        );
+
+        session = {
+          uid: fbUser.uid,
+          method: "google",
+          displayName: fbUser.displayName || existingData.displayName || "",
+          email: fbUser.email ?? undefined,
+          role: resolvedRole,
+          wilayaCode: resolvedWilaya,
+          isGuest: false,
+        };
+      } catch (popupErr: unknown) {
+        const errCode = (popupErr as { code?: string })?.code;
+        if (
+          gateway.isDemo ||
+          errCode === "auth/popup-closed-by-user" ||
+          errCode === "auth/cancelled-popup-request" ||
+          errCode === "auth/operation-not-supported-in-this-environment"
+        ) {
+          session = await gateway.signInWithGoogle();
+        } else {
+          throw popupErr;
+        }
+      }
+
       if (!mounted.current) return;
       afterAuth(session);
     } catch (error) {
@@ -244,7 +305,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, clearErrors, gateway]);
+  }, [afterAuth, clearErrors, gateway, role, wilayaCode]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 
@@ -338,14 +399,95 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setErrorCode(null);
     setBusy("email");
     try {
-      const session =
-        mode === "register"
-          ? await gateway.registerWithEmail({
+      let session: SessionUser;
+      if (mode === "register") {
+        try {
+          const cred = await createUserWithEmailAndPassword(auth, email.email.trim(), email.password);
+          const fbUser = cred.user;
+          const displayName = email.name.trim();
+          if (displayName) {
+            await updateProfile(fbUser, { displayName });
+          }
+
+          const targetRole = role ?? null;
+          const targetWilaya = wilayaCode ?? null;
+          const wilayaData = targetWilaya ? getWilaya(targetWilaya) : null;
+          const preferredCrop = wilayaData?.crops?.[0] ?? null;
+
+          await setDoc(
+            doc(db, "users", fbUser.uid),
+            {
+              uid: fbUser.uid,
+              displayName,
+              email: fbUser.email,
+              role: targetRole,
+              wilaya: targetWilaya,
+              wilayaCode: targetWilaya,
+              preferredCrop,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true },
+          );
+
+          session = {
+            uid: fbUser.uid,
+            method: "email",
+            displayName: displayName || fbUser.displayName || "",
+            email: fbUser.email ?? email.email.trim(),
+            role: targetRole,
+            wilayaCode: targetWilaya,
+            isGuest: false,
+          };
+        } catch (fbErr: unknown) {
+          const errCode = (fbErr as { code?: string })?.code;
+          if (
+            gateway.isDemo ||
+            errCode === "auth/network-request-failed" ||
+            errCode === "auth/operation-not-supported-in-this-environment"
+          ) {
+            session = await gateway.registerWithEmail({
               displayName: email.name.trim(),
               email: email.email.trim(),
               password: email.password,
-            })
-          : await gateway.signInWithEmail(email.email.trim(), email.password);
+            });
+          } else {
+            throw fbErr;
+          }
+        }
+      } else {
+        try {
+          const cred = await signInWithEmailAndPassword(auth, email.email.trim(), email.password);
+          const fbUser = cred.user;
+          const snap = await getDoc(doc(db, "users", fbUser.uid));
+          const data = snap.exists() ? snap.data() : {};
+
+          const resolvedRole = (data.role ?? role) as AuthRole | null;
+          const resolvedWilaya = (data.wilayaCode ?? data.wilaya ?? wilayaCode) as string | null;
+
+          session = {
+            uid: fbUser.uid,
+            method: "email",
+            displayName: fbUser.displayName || data.displayName || email.email.trim().split("@")[0],
+            email: fbUser.email ?? email.email.trim(),
+            role: resolvedRole,
+            wilayaCode: resolvedWilaya,
+            isGuest: false,
+          };
+        } catch (fbErr: unknown) {
+          const errCode = (fbErr as { code?: string })?.code;
+          if (
+            gateway.isDemo ||
+            errCode === "auth/network-request-failed" ||
+            errCode === "auth/operation-not-supported-in-this-environment"
+          ) {
+            session = await gateway.signInWithEmail(email.email.trim(), email.password);
+          } else {
+            throw fbErr;
+          }
+        }
+      }
+
       if (!mounted.current) return;
       afterAuth(session);
     } catch (error) {
@@ -359,7 +501,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, copyFor, email, gateway, mode, t, validateEmailForm]);
+  }, [afterAuth, copyFor, email, gateway, mode, role, t, validateEmailForm, wilayaCode]);
 
   const handleForgotPassword = useCallback(async () => {
     clearErrors();
@@ -407,6 +549,28 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     const code = wilayaCode ?? DEFAULT_WILAYA_CODE;
     setBusy("email");
     try {
+      const wilayaData = getWilaya(code);
+      const preferredCrop = wilayaData?.crops?.[0] ?? null;
+
+      const currentFbUser = auth.currentUser;
+      if (currentFbUser) {
+        try {
+          await setDoc(
+            doc(db, "users", currentFbUser.uid),
+            {
+              role: role ?? null,
+              wilaya: code,
+              wilayaCode: code,
+              preferredCrop,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true },
+          );
+        } catch {
+          // Ignore network errors in offline/demo environments
+        }
+      }
+
       let session = user;
       if (user && !user.isGuest) {
         session = await gateway.saveProfile(user.uid, {
@@ -420,9 +584,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         writeProfile(
           profileFromUser(
             session ?? {
-              uid: "local",
+              uid: currentFbUser?.uid ?? "local",
               method: "email",
-              displayName: "",
+              displayName: currentFbUser?.displayName ?? "",
               role,
               wilayaCode: code,
               isGuest: false,
@@ -466,6 +630,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   /** Signing out drops the session but keeps the device preferences. */
   const handleSignOut = useCallback(async () => {
     clearErrors();
+    try {
+      await fbSignOut(auth);
+    } catch {
+      // offline / demo fallback
+    }
     await gateway.signOut();
     stored.clear();
     router.push("/auth");

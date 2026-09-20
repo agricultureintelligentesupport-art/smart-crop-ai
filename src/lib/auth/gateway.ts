@@ -15,6 +15,7 @@
  */
 
 import { getWilaya } from "@/lib/wilayas";
+import { createFirebaseAuthGateway } from "./firebase-adapter";
 import {
   AuthError,
   type AuthGateway,
@@ -254,10 +255,10 @@ let gateway: AuthGateway | null = null;
 /** Single app-wide gateway instance (module-level so hot reloads do not churn it). */
 export function createAuthGateway(): AuthGateway {
   if (gateway) return gateway;
-  // Firebase swap-in:
-  //   import { createFirebaseAuthGateway } from "./firebase-adapter";
-  //   gateway = process.env.NEXT_PUBLIC_AUTH_BACKEND === "firebase" ? createFirebaseAuthGateway() : createDemoGateway();
-  gateway = createDemoGateway();
+  gateway =
+    process.env.NEXT_PUBLIC_AUTH_BACKEND === "firebase"
+      ? createFirebaseAuthGateway()
+      : createDemoGateway();
   return gateway;
 }
 

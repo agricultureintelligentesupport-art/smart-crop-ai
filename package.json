@@ -12,6 +12,7 @@
     "test:walk": "node tools/walkthrough.mjs all"
   },
   "dependencies": {
+    "firebase": "^12.19.0",
     "framer-motion": "^13.4.0",
     "lucide-react": "^1.47.0",
     "next": "16.3.5",

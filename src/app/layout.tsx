@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Cairo, Plus_Jakarta_Sans } from "next/font/google";
+import { AuthProvider } from "@/context/AuthContext";
 import "./globals.css";
 
 const cairo = Cairo({
@@ -42,7 +43,7 @@ export default function RootLayout({
       className={`${cairo.variable} ${jakarta.variable}`}
     >
       <body className="min-h-full overflow-hidden antialiased">
-        {children}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

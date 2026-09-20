@@ -88,6 +88,8 @@ export default function MethodStep({ flow }: { flow: FlowController }) {
 
       <LiveRegion message={flow.notice} />
 
+      <div id="recaptcha-container" />
+
       <button
         type="button"
         onClick={() => flow.handleGuestContinue()}
