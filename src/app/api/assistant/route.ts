@@ -486,9 +486,9 @@ async function generateWithGemini(apiKey: string, userContent: string): Promise<
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
   try {
-    let res: Response;
+    let response: Response;
     try {
-      res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
+      response = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -516,24 +516,28 @@ async function generateWithGemini(apiKey: string, userContent: string): Promise<
       throw new GeminiError(detail);
     }
 
-    if (!res.ok) {
+    if (!response.ok) {
       let bodyText = "";
       try {
-        bodyText = await res.text();
+        // Preserve the body for the existing warning parser while logging
+        // Google's exact, untruncated response on the server.
+        const errorResponse = response.clone();
+        console.error('[Gemini Error]', response.status, await response.text());
+        bodyText = await errorResponse.text();
       } catch {
-        bodyText = res.statusText;
+        bodyText = response.statusText;
       }
-      let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+      let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
       try {
         const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
-        if (parsed?.error?.message) detail = `HTTP ${res.status} — ${parsed.error.message}`;
+        if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
       } catch {
         // keep the raw detail
       }
-      throw new GeminiError(detail, res.status);
+      throw new GeminiError(detail, response.status);
     }
 
-    const payload = (await res.json().catch(() => null)) as GeminiPayload | null;
+    const payload = (await response.json().catch(() => null)) as GeminiPayload | null;
     const text = geminiText(payload);
     if (!text) {
       const blocked = payload?.promptFeedback?.blockReason;
