@@ -45,6 +45,21 @@ const geminiReply = () => Response.json({
   candidates: [{ content: { parts: [{ text: "Water in the morning." }] } }],
 });
 
+/** Mirrors Google's response for a retired / unavailable model id on v1beta. */
+const geminiModelNotFound = (model: string) =>
+  Response.json(
+    {
+      error: {
+        code: 404,
+        message: `models/${model} is not found for API version v1beta, or is a valid model.`,
+        status: "NOT_FOUND",
+      },
+    },
+    { status: 404 },
+  );
+
+const requestedModel = (url: string) => /\/models\/([^:]+):generateContent/.exec(url)?.[1];
+
 test("assistant route explicitly uses dynamic rendering", () => {
   assert.equal(dynamic, "force-dynamic");
 });
@@ -76,7 +91,7 @@ test("keys are read per request, not when the route module loads", async () => {
   assert.equal((await POST(request())).status, 500);
   configureKeys();
   const upstream = mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
-    assert.match(String(url), /\/models\/gemini-1\.5-flash:generateContent/);
+    assert.match(String(url), /\/models\/gemini-2\.0-flash:generateContent/);
     assert.doesNotMatch(String(url), /models\/models\//);
     assert.equal(new Headers(init?.headers).get("x-goog-api-key"), "test-gemini");
     return geminiReply();
@@ -89,6 +104,76 @@ test("keys are read per request, not when the route module loads", async () => {
   assert.equal(upstream.mock.callCount(), 1);
   delete process.env.GEMINI_API_KEY;
   assert.equal((await POST(request())).status, 500);
+  assert.equal(upstream.mock.callCount(), 1);
+});
+
+/* Model selection: gemini-2.0-flash is primary, the 1.5 ids are availability
+   fallbacks (Google 404s the retired bare `gemini-1.5-flash` on v1beta). */
+
+const FALLBACK_ORDER = ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"] as const;
+
+test("404 model-not-found on the primary model falls back to the next id", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (urls.length === 1) return geminiModelNotFound("gemini-2.0-flash");
+    return geminiReply();
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    reply: "Water in the morning.", diagnosis: null, source: "gemini",
+  });
+  assert.deepEqual(urls.map(requestedModel), ["gemini-2.0-flash", "gemini-1.5-flash-latest"]);
+  assert.doesNotMatch(urls.join(" "), /models\/models\//);
+});
+
+test("all models unavailable returns Gemini Error listing every id tried", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    return geminiModelNotFound(String(requestedModel(String(url))));
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 500);
+  const body = (await response.json()) as { error: string };
+  assert.match(body.error, /^Gemini Error:/);
+  assert.deepEqual(urls.map(requestedModel), [...FALLBACK_ORDER]);
+  for (const model of FALLBACK_ORDER) {
+    assert.match(body.error, new RegExp(model.replace(/[.-]/g, "\\$&")));
+  }
+  assert.doesNotMatch(urls.join(" "), /models\/models\//);
+});
+
+test("a model that returns no text falls through to the next id", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    return urls.length < FALLBACK_ORDER.length ? Response.json({ candidates: [] }) : geminiReply();
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    reply: "Water in the morning.", diagnosis: null, source: "gemini",
+  });
+  assert.deepEqual(urls.map(requestedModel), [...FALLBACK_ORDER]);
+});
+
+test("transient upstream failures do not trigger model fallback", async () => {
+  configureKeys();
+  const upstream = mock.method(globalThis, "fetch", async () =>
+    new Response(null, { status: 503 }),
+  );
+  const response = await POST(request());
+  assert.equal(response.status, 500);
+  const body = (await response.json()) as { error: string };
+  assert.match(body.error, /^Gemini Error:/);
+  assert.match(body.error, /HTTP 503/);
+  // One attempt only: a 503 is not a model problem, so don't burn the request
+  // budget re-trying the same failure on every id.
   assert.equal(upstream.mock.callCount(), 1);
 });
 
@@ -167,6 +252,7 @@ test("strict pipeline: HF 503 model-loading returns clear HF Error message", asy
 
 test("strict pipeline: HF parses returned array to extract primary class and confidence", async () => {
   configureKeys();
+  let geminiRequestBody = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (url.includes("huggingface.co")) {
       // Unsorted array — route must sort and pick Tomato___Early_blight 95% as top
@@ -176,10 +262,10 @@ test("strict pipeline: HF parses returned array to extract primary class and con
         { label: "Tomato___healthy", score: 0.02 },
       ]);
     }
-    // Ensure Gemini receives the HF label + confidence in its prompt
-    const body = JSON.parse(String(init.body ?? "{}"));
-    // In strict pipeline, Gemini prompt should contain the HF label string
-    // We can't inspect Gemini body here (init is for HF), so fallback to success
+    // Step 2 runs on the primary model id, without a doubled `models/` prefix.
+    assert.match(url, /\/models\/gemini-2\.0-flash:generateContent/);
+    assert.doesNotMatch(url, /models\/models\//);
+    geminiRequestBody = String(init.body ?? "");
     return geminiReply();
   });
   const response = await POST(request(true));
@@ -188,4 +274,7 @@ test("strict pipeline: HF parses returned array to extract primary class and con
   assert.equal(payload.diagnosis.label, "Tomato___Early_blight");
   assert.equal(Math.round(payload.diagnosis.confidence * 100), 95);
   assert.equal(payload.source, "hybrid");
+  // The Step 1 verdict (label + confidence) is passed straight into the prompt.
+  assert.match(geminiRequestBody, /Tomato___Early_blight/);
+  assert.match(geminiRequestBody, /95%/);
 });

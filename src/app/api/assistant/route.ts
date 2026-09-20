@@ -7,7 +7,10 @@
  *     primary predicted disease class + confidence percentage.
  *     Handles 503/530 model-loading responses with a clear status message.
  *
- *   Step 2 (always): Google Gemini 1.5 Flash localized reasoning.
+ *   Step 2 (always): Google Gemini localized reasoning — `gemini-2.0-flash`
+ *     primary, with automatic fallback to `gemini-1.5-flash-latest` and
+ *     `gemini-1.5-pro` when Google reports the model id itself as unavailable
+ *     (e.g. `404 — models/gemini-1.5-flash is not found for API version v1beta`).
  *     The PlantVillage label + confidence from Step 1, alongside the user's
  *     text message and Firestore profile context (Wilaya, crop type), are fed
  *     into Gemini behind a system prompt that frames it as an expert Algerian
@@ -19,9 +22,10 @@
  *
  * Error reporting: each stage logs to the server console
  * (`[Step 1: HF Success]` / `[Step 2: Gemini Success]` and corresponding
- * error logs). If either API errors, the handler returns a descriptive JSON
- * error `{ error: "HF Error: ..." }` or `{ error: "Gemini Error: ..." }`
- * with HTTP 500 so the caller can identify exactly which stage failed.
+ * error logs; `[Step 2: Gemini Fallback]` marks a model switch). If either
+ * API errors, the handler returns a descriptive JSON error
+ * `{ error: "HF Error: ..." }` or `{ error: "Gemini Error: ..." }` with HTTP
+ * 500 so the caller can identify exactly which stage failed.
  */
 
 import {
@@ -64,11 +68,22 @@ const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
 
 /**
- * Bare model id for `GoogleGenerativeAI.getGenerativeModel()`.
- * Do not prepend `models/` — the `@google/generative-ai` SDK adds that
- * namespace itself (`models/${id}`), and a manual prefix 404s on v1beta.
+ * Gemini model ids tried by Step 2, in order.
+ *
+ * `gemini-2.0-flash` is the primary model: Google retired the bare
+ * `gemini-1.5-flash` id on the `v1beta` endpoint (`404 — models/gemini-1.5-flash
+ * is not found for API version v1beta`), so the 1.5 ids below are kept purely as
+ * fallbacks for keys/projects that don't have access to 2.0 yet
+ * (`-latest` tracks the newest 1.5 Flash build; 1.5 Pro is the last resort).
+ *
+ * Bare ids only — do not prepend `models/` — the `@google/generative-ai` SDK
+ * adds that namespace itself (`models/${id}`), and a manual prefix 404s on v1beta.
  */
-const GEMINI_MODEL = "gemini-1.5-flash";
+const GEMINI_MODELS = [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash-latest",
+  "gemini-1.5-pro",
+] as const;
 
 /** ~6 MB of raw base64 ≈ 4.5 MB image — plenty for a leaf photo. */
 const MAX_IMAGE_B64_CHARS = 6 * 1024 * 1024;
@@ -246,7 +261,7 @@ async function classifyPlantImageStrict(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 2 — Gemini 1.5 Flash localized reasoning (STRICT)             */
+/*  Step 2 — Gemini localized reasoning with model fallback (STRICT)   */
 /* ------------------------------------------------------------------ */
 
 const SYSTEM_PROMPT = `أنت "مستشار زراعي جزائري خبير" داخل تطبيق "محصولي الذكي" (Smart Crop AI).
@@ -314,11 +329,96 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 }
 
 /**
- * Strict Step 2: localized reasoning via Gemini 1.5 Flash.
+ * Message fragments Google returns when the *model id* is the problem rather
+ * than the request itself: retired / unavailable ids, wrong API version, a
+ * model that doesn't serve `generateContent`. Together with an HTTP 404 these
+ * are the only failures that trigger the fallback chain — auth, quota, safety
+ * blocks, 5xx and network errors are surfaced immediately, because another
+ * model id can't fix them and the extra round-trips would just burn the
+ * request budget (`maxDuration`).
+ */
+const GEMINI_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
+  /\bnot found\b/i,
+  /no such model/i,
+  /was found but is invalid/i,
+  /is not supported for this method/i,
+  /\b404\b/,
+];
+
+/** The model answered successfully but produced no usable text. */
+class GeminiEmptyResponseError extends Error {}
+
+function geminiErrorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * HTTP status of a Gemini failure: the SDK puts it on
+ * `GoogleGenerativeAIFetchError.status`, and always repeats it in the message
+ * (`"...: [404 Not Found] models/x is not found for API version v1beta"`).
+ */
+function geminiErrorStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const { status } = error as { status?: unknown };
+  if (typeof status === "number") return status;
+  const inline = /\[(\d{3}) [^\]]*\]|HTTP (\d{3})/i.exec(geminiErrorDetail(error));
+  const code = inline?.[1] ?? inline?.[2];
+  return code ? Number(code) : undefined;
+}
+
+/** True when the failure looks like "this model id isn't usable for this key". */
+function isGeminiModelAvailabilityError(error: unknown): boolean {
+  if (geminiErrorStatus(error) === 404) return true;
+  const detail = geminiErrorDetail(error);
+  return GEMINI_MODEL_ERROR_PATTERNS.some((pattern) => pattern.test(detail));
+}
+
+/**
+ * A single `generateContent` round-trip against one model id.
+ * Throws the raw SDK error on transport/HTTP failures and
+ * {@link GeminiEmptyResponseError} when the model returns no text.
+ */
+async function generateWithGeminiModel(
+  genAI: GoogleGenerativeAI,
+  model: string,
+  userParts: Part[],
+): Promise<string> {
+  // Bare id only — do not pass "models/gemini-2.0-flash"; the SDK prefixes models/.
+  const generativeModel = genAI.getGenerativeModel({
+    model,
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      temperature: 0.55,
+      topP: 0.9,
+      maxOutputTokens: 1400,
+    },
+    safetySettings: [
+      {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+    ],
+  });
+
+  const result = await generativeModel.generateContent(userParts, {
+    timeout: UPSTREAM_TIMEOUT_MS,
+  });
+  const text = result.response.text()?.trim() ?? "";
+
+  if (!text) {
+    throw new GeminiEmptyResponseError(`Empty response from ${model} (no candidates).`);
+  }
+  return text;
+}
+
+/**
+ * Strict Step 2: localized reasoning via Gemini, starting at
+ * {@link GEMINI_MODELS gemini-2.0-flash} and falling back through the 1.5 ids
+ * when Google reports the model itself as unavailable (404 / model error).
  * - Passes the PlantVillage label + confidence from Step 1 directly into Gemini,
  *   alongside the user's text message and Firestore profile (Wilaya, crop type).
  * - Uses the Algerian advisor system prompt.
- * - Throws an Error prefixed with "Gemini Error:" on any failure.
+ * - Throws an Error prefixed with "Gemini Error:" once no model can answer.
  */
 async function askGeminiStrict(
   apiKey: string,
@@ -350,53 +450,49 @@ async function askGeminiStrict(
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  // Bare id only — do not pass "models/gemini-1.5-flash"; the SDK prefixes models/.
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: SYSTEM_PROMPT,
-    generationConfig: {
-      temperature: 0.55,
-      topP: 0.9,
-      maxOutputTokens: 1400,
-    },
-    safetySettings: [
-      {
-        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-      },
-    ],
-  });
+  const failures: string[] = [];
 
-  try {
-    const result = await model.generateContent(userParts, { timeout: UPSTREAM_TIMEOUT_MS });
-    const text = result.response.text()?.trim() ?? "";
+  for (const [index, model] of GEMINI_MODELS.entries()) {
+    try {
+      const text = await generateWithGeminiModel(genAI, model, userParts);
 
-    if (!text || text.length === 0) {
-      throw new Error(
-        `Gemini Error: Empty response from Gemini 1.5 Flash (no candidates).`,
+      console.log(
+        `[Step 2: Gemini Success] model=${model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? Math.round(diagnosis.confidence * 100) + "%" : "n/a"} replyLength=${text.length}`,
       );
-    }
+      return text;
+    } catch (error) {
+      const detail = geminiErrorDetail(error);
+      const status = geminiErrorStatus(error);
+      const modelLevel =
+        error instanceof GeminiEmptyResponseError || isGeminiModelAvailabilityError(error);
+      failures.push(`${model}: ${detail}`);
 
-    console.log(
-      `[Step 2: Gemini Success] diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? Math.round(diagnosis.confidence * 100) + "%" : "n/a"} replyLength=${text.length}`,
-    );
-    return text;
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Gemini Error:")) {
-      console.error(`[Step 2: Gemini Error] ${error.message}`);
-      throw error;
+      const nextModel = index < GEMINI_MODELS.length - 1 ? GEMINI_MODELS[index + 1] : null;
+      if (modelLevel && nextModel) {
+        console.warn(`[Step 2: Gemini Fallback] ${detail} — retrying with ${nextModel}`);
+        continue;
+      }
+
+      // Anything that isn't about model availability (bad key, quota, safety
+      // block, Google 5xx, timeout) fails the stage immediately.
+      if (!modelLevel) {
+        const wrapped = new Error(
+          status ? `Gemini Error: HTTP ${status} - ${detail}` : `Gemini Error: ${detail}`,
+        );
+        console.error(`[Step 2: Gemini Error] ${wrapped.message}`);
+        throw wrapped;
+      }
+      break;
     }
-    const status =
-      typeof error === "object" && error !== null && "status" in error
-        ? (error as { status?: number }).status
-        : undefined;
-    const detail = error instanceof Error ? error.message : String(error);
-    const wrapped = new Error(
-      status ? `Gemini Error: HTTP ${status} - ${detail}` : `Gemini Error: ${detail}`,
-    );
-    console.error(`[Step 2: Gemini Error] ${wrapped.message}`);
-    throw wrapped;
   }
+
+  // Every id in the chain hit a model-level failure — report all of them so the
+  // operator can tell "Google retired this model" from "this key lacks access".
+  const wrapped = new Error(
+    `Gemini Error: no Gemini model could answer (tried ${GEMINI_MODELS.join(", ")}) — ${failures.join(" | ")}`,
+  );
+  console.error(`[Step 2: Gemini Error] ${wrapped.message}`);
+  throw wrapped;
 }
 
 /* ------------------------------------------------------------------ */

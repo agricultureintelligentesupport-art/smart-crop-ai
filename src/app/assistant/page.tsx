@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 /**
  * AI agricultural assistant. Hybrid pipeline: Hugging Face PlantVillage
- * vision diagnosis + Gemini 1.5 Flash localized reasoning (see
+ * vision diagnosis + Gemini 2.0 Flash localized reasoning (see
  * `/api/assistant`). Session-gated like the dashboard.
  */
 export default function AssistantPage() {
