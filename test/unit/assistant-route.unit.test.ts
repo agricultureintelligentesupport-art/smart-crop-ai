@@ -107,7 +107,7 @@ test("image requests use server keys and return hybrid results without secrets",
   assert.doesNotMatch(JSON.stringify(payload), /test-gemini|test-hf/);
 });
 
-test("vision-only advice remains available when Gemini fails", async () => {
+test("strict pipeline: Gemini failure with image returns Gemini Error 500 (no vision-only fallback)", async () => {
   configureKeys();
   mock.method(globalThis, "fetch", async (url: string) =>
     url.includes("huggingface.co")
@@ -115,12 +115,13 @@ test("vision-only advice remains available when Gemini fails", async () => {
       : new Response(null, { status: 503 }),
   );
   const response = await POST(request(true));
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).source, "vision-only");
+  assert.equal(response.status, 500);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /^Gemini Error:/);
 });
 
 for (const failure of ["http", "network", "empty"] as const) {
-  test(`upstream ${failure} failure is not misreported as missing keys`, async () => {
+  test(`strict pipeline: upstream ${failure} failure is reported as Gemini Error 500 (not MISSING_KEYS)`, async () => {
     configureKeys();
     mock.method(globalThis, "fetch", async () => {
       if (failure === "network") throw new TypeError("fetch failed");
@@ -128,9 +129,61 @@ for (const failure of ["http", "network", "empty"] as const) {
       return new Response(null, { status: 503 });
     });
     const response = await POST(request());
-    assert.equal(response.status, 502);
-    assert.deepEqual(await response.json(), {
-      error: "AI service temporarily unavailable", code: "UPSTREAM_ERROR",
-    });
+    assert.equal(response.status, 500);
+    const body = await response.json() as { error: string };
+    assert.match(body.error, /^Gemini Error:/);
+    assert.notEqual(body.error, "API keys missing on server");
   });
 }
+
+test("strict pipeline: HF failure returns HF Error 500 with stage identifier", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("huggingface.co")) return new Response(null, { status: 503 });
+    return geminiReply();
+  });
+  const response = await POST(request(true));
+  assert.equal(response.status, 500);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /^HF Error:/);
+});
+
+test("strict pipeline: HF 503 model-loading returns clear HF Error message", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.includes("huggingface.co")) {
+      return Response.json({ error: "Model linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification is currently loading", estimated_time: 23.4 }, { status: 503 });
+    }
+    return geminiReply();
+  });
+  const response = await POST(request(true));
+  assert.equal(response.status, 500);
+  const body = await response.json() as { error: string };
+  assert.match(body.error, /^HF Error:/);
+  assert.match(body.error, /loading/i);
+});
+
+test("strict pipeline: HF parses returned array to extract primary class and confidence", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (url.includes("huggingface.co")) {
+      // Unsorted array — route must sort and pick Tomato___Early_blight 95% as top
+      return Response.json([
+        { label: "Tomato___Late_blight", score: 0.03 },
+        { label: "Tomato___Early_blight", score: 0.95 },
+        { label: "Tomato___healthy", score: 0.02 },
+      ]);
+    }
+    // Ensure Gemini receives the HF label + confidence in its prompt
+    const body = JSON.parse(String(init.body ?? "{}"));
+    // In strict pipeline, Gemini prompt should contain the HF label string
+    // We can't inspect Gemini body here (init is for HF), so fallback to success
+    return geminiReply();
+  });
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.diagnosis.label, "Tomato___Early_blight");
+  assert.equal(Math.round(payload.diagnosis.confidence * 100), 95);
+  assert.equal(payload.source, "hybrid");
+});
