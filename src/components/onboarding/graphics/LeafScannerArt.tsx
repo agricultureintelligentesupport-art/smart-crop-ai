@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { motion } from "framer-motion";
 
 /* Slide 1 — High-tech glowing leaf scanner with a camera viewfinder frame */
@@ -16,7 +17,7 @@ function bracket([cx, cy, sx, sy]: Corner) {
   return `M ${cx + 26 * sx} ${cy} L ${cx + 8 * sx} ${cy} Q ${cx} ${cy} ${cx} ${cy + 8 * sy} L ${cx} ${cy + 26 * sy}`;
 }
 
-export default function LeafScannerArt() {
+function LeafScannerArt() {
   return (
     <svg viewBox="0 0 320 260" className="h-full w-full" fill="none" role="img" aria-label="Leaf scanner illustration">
       <defs>
@@ -57,19 +58,19 @@ export default function LeafScannerArt() {
 
       {/* Slowly rotating tech ring */}
       <motion.g
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
+        style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
         animate={{ rotate: 360 }}
         transition={{ duration: 36, ease: "linear", repeat: Infinity }}
       >
-        <circle cx="160" cy="129" r="118" stroke="#10b981" strokeOpacity="0.25" strokeWidth="1.5" strokeDasharray="3 10" />
+        <circle cx="160" cy="129" r="118" stroke="#10b981" strokeOpacity="0.25" strokeWidth="1.5" strokeDasharray="3 10" shapeRendering="geometricPrecision" />
       </motion.g>
       {/* Counter-rotating outer ring */}
       <motion.g
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
+        style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
         animate={{ rotate: -360 }}
         transition={{ duration: 54, ease: "linear", repeat: Infinity }}
       >
-        <circle cx="160" cy="129" r="132" stroke="#f59e0b" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="2 14" />
+        <circle cx="160" cy="129" r="132" stroke="#f59e0b" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="2 14" shapeRendering="geometricPrecision" />
       </motion.g>
 
       {/* Viewfinder frame — light glass */}
@@ -106,7 +107,7 @@ export default function LeafScannerArt() {
         {/* Leaf */}
         <g>
           <motion.g
-            style={{ transformBox: "fill-box", transformOrigin: "center" }}
+            style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
             animate={{ rotate: [-2.5, 2.5, -2.5] }}
             transition={{ duration: 6, ease: "easeInOut", repeat: Infinity }}
           >
@@ -130,6 +131,7 @@ export default function LeafScannerArt() {
             cy="118"
             stroke="#fbbf24"
             strokeWidth="2"
+            shapeRendering="geometricPrecision"
             initial={{ r: 7, opacity: 0.9 }}
             animate={{ r: [7, 20], opacity: [0.9, 0] }}
             transition={{ duration: 1.8, ease: "easeOut", repeat: Infinity }}
@@ -141,6 +143,7 @@ export default function LeafScannerArt() {
             cy="146"
             stroke="#fbbf24"
             strokeWidth="1.6"
+            shapeRendering="geometricPrecision"
             initial={{ r: 5, opacity: 0.8 }}
             animate={{ r: [5, 16], opacity: [0.8, 0] }}
             transition={{ duration: 1.8, ease: "easeOut", repeat: Infinity, delay: 0.6 }}
@@ -149,11 +152,12 @@ export default function LeafScannerArt() {
 
         {/* Sweeping scan line */}
         <motion.g
+          style={{ willChange: "transform" }}
           animate={{ y: [-64, 66] }}
           transition={{ duration: 2.4, ease: "easeInOut", repeat: Infinity, repeatType: "mirror" }}
         >
-          <rect x="70" y="108" width="180" height="42" fill="url(#scanG)" />
-          <line x1="76" y1="150" x2="244" y2="150" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" opacity="0.95" />
+          <rect x="70" y="108" width="180" height="42" fill="url(#scanG)" shapeRendering="geometricPrecision" />
+          <line x1="76" y1="150" x2="244" y2="150" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" opacity="0.95" shapeRendering="geometricPrecision" />
         </motion.g>
       </g>
 
@@ -168,6 +172,7 @@ export default function LeafScannerArt() {
         cy="62"
         r="3"
         fill="#22c55e"
+        shapeRendering="geometricPrecision"
         animate={{ opacity: [1, 0.2, 1] }}
         transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
       />
@@ -175,8 +180,10 @@ export default function LeafScannerArt() {
         SCAN
       </text>
 
-      {/* Result chip — glass with amber health indicator */}
-      <g filter="url(#cardShadow)">
+      {/* Result chip — glass with amber health indicator.
+          GPU: translateZ(0) promotes the filtered group to its own composite
+          layer so the drop shadow rasterizes once instead of re-filtering. */}
+      <g filter="url(#cardShadow)" style={{ transform: "translateZ(0)", willChange: "transform" }}>
         <rect x="100" y="174" width="120" height="26" rx="13" fill="rgba(255,255,255,0.85)" stroke="#E2F1E8" />
         <circle cx="115" cy="187" r="4" fill="#22c55e" />
         <text x="126" y="190.5" fontSize="9.5" fontWeight="800" fill="#064e3b" fontFamily="inherit">
@@ -186,6 +193,7 @@ export default function LeafScannerArt() {
 
       {/* Floating HUD chips */}
       <motion.g
+        style={{ willChange: "transform" }}
         animate={{ y: [0, -5, 0] }}
         transition={{ duration: 4.4, ease: "easeInOut", repeat: Infinity }}
         filter="url(#cardShadow)"
@@ -196,6 +204,7 @@ export default function LeafScannerArt() {
         </text>
       </motion.g>
       <motion.g
+        style={{ willChange: "transform" }}
         animate={{ y: [0, 6, 0] }}
         transition={{ duration: 5, ease: "easeInOut", repeat: Infinity, delay: 0.6 }}
         filter="url(#cardShadow)"
@@ -208,3 +217,6 @@ export default function LeafScannerArt() {
     </svg>
   );
 }
+
+/* React.memo: static artwork — never re-renders when the slide/text state changes. */
+export default memo(LeafScannerArt);
