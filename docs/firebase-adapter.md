@@ -276,10 +276,18 @@ account later, call `linkWithCredential()` during `handleGoogleAuth` /
 `handleVerifyOTP` — the `SessionUser` shape is identical, so the dashboard
 needs no changes.
 
-## 7. Google: account chooser, popup blocked and mobile
+## 7. Google: strict auth, account chooser, popup blocked and mobile
 
-`handleGoogleAuth` (in `useAuthFlow.ts`) implements the whole real-world
-Google flow around the shared `googleProvider` from §2/§3:
+**Strict rule:** the Google button ALWAYS performs real Firebase Auth — there
+is no on-device/mock session for it (the demo gateway's `signInWithGoogle`
+is kept for interface completeness but is never called by the flow). The
+onboarding wizard advances ONLY when a valid Firebase `user` object comes
+back, and the decision logic is a pure, unit-tested function:
+`runGoogleSignIn()` in `src/lib/auth/googleFlow.ts`
+(`test/unit/google-flow.unit.test.ts`).
+
+`handleGoogleAuth` (in `useAuthFlow.ts`) wraps that runner around the shared
+`googleProvider` from §2/§3:
 
 1. **Account chooser** — the provider always carries
    `setCustomParameters({ prompt: "select_account" })`, so clicking

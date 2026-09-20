@@ -160,10 +160,23 @@ test.describe("email registration", () => {
 /*  3. Role selection                                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Signs in through the demo phone OTP so the setup steps can be tested.
+ * The Google button is intentionally NOT driven here: it opens a real
+ * Firebase OAuth popup (strict auth — the wizard never advances without a
+ * real Firebase user), which cannot be completed headlessly.
+ */
+async function signInViaDemoOtp(page: Page, digits: string) {
+  await enterPhone(page, digits);
+  await page.getByRole("button", { name: /إرسال رمز SMS/ }).click();
+  await page.getByLabel("رمز التحقق").fill("123456");
+  await page.getByRole("button", { name: /تحقّق ودخول/ }).click();
+}
+
 test.describe("role selection", () => {
   test("shows all three profiles and requires a choice", async ({ page }) => {
     await page.goto("/auth");
-    await page.getByRole("button", { name: /المتابعة بحساب Google/ }).click();
+    await signInViaDemoOtp(page, "661223344");
 
     await expect(page.getByRole("heading", { name: "تحديد صفة المستخدم" })).toBeVisible();
     await expect(page.getByRole("radio")).toHaveCount(3);
@@ -185,7 +198,7 @@ test.describe("role selection", () => {
 test.describe("wilaya selection", () => {
   test("searches in Arabic and French, and previews the climate", async ({ page }) => {
     await page.goto("/auth");
-    await page.getByRole("button", { name: /المتابعة بحساب Google/ }).click();
+    await signInViaDemoOtp(page, "550112233");
     await page.getByRole("radio", { name: /مستثمر/ }).click();
     await page.getByRole("button", { name: "متابعة" }).click();
 

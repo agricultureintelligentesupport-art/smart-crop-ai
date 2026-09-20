@@ -270,8 +270,8 @@ const AR: AuthCopy = {
     badge: "وضع تجريبي",
     otpTitle: "رمز تجريبي",
     otpBody: "لا تُرسل رسائل حقيقية بعد. استخدم الرمز {code} لإتمام التحقق.",
-    noteTitle: "لم يُربط Firebase بعد",
-    noteBody: "كل الحقول والتحققات تعمل محلياً على جهازك، ولا تُرسل بياناتك إلى أي خادم.",
+    noteTitle: "ملاحظة الوضع التجريبي",
+    noteBody: "الدخول عبر Google يتم عبر Firebase الفعلي، أما رسائل SMS فتبقى تجريبية على هذا الجهاز.",
   },
   errors: {
     required: "هذا الحقل مطلوب",
@@ -456,8 +456,9 @@ const FR: AuthCopy = {
     badge: "Mode démo",
     otpTitle: "Code de démonstration",
     otpBody: "Aucun SMS réel n'est envoyé. Utilisez le code {code} pour valider.",
-    noteTitle: "Firebase pas encore branché",
-    noteBody: "Tous les champs et validations fonctionnent en local, aucune donnée ne quitte votre appareil.",
+    noteTitle: "Mode démo",
+    noteBody:
+      "La connexion Google passe par Firebase réel, mais les SMS restent simulés sur cet appareil.",
   },
   errors: {
     required: "Ce champ est obligatoire",

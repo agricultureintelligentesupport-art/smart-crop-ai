@@ -16,8 +16,8 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db, googleProvider } from "@/lib/firebase";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
 import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
+import { runGoogleSignIn } from "@/lib/auth/googleFlow";
 import { createAuthGateway } from "@/lib/auth/gateway";
-import { isMobileBrowser } from "@/lib/auth/platform";
 import { syncUserDoc } from "@/lib/auth/userDoc";
 import {
   guestProfile,
@@ -309,7 +309,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
         return;
       }
-      if (!redirect?.user) return;
+      // Strict gate: a redirect only completes the sign-in when it yields a
+      // valid Firebase user object — otherwise the wizard stays on step 1.
+      if (!redirect?.user?.uid) return;
       logAuthInfo("google", `redirect sign-in complete (uid ${redirect.user.uid})`);
       try {
         const session = await buildGoogleSession(redirect.user);
@@ -327,84 +329,48 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setNotice(null);
     setBusy("google");
 
-    const reportFailure = (error: unknown) => {
-      logAuthError("handleGoogleAuth", error);
-      if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
-    };
-
     try {
-      // Demo gateway: the whole Google sign-in runs on-device (see
-      // gateway.ts). No real OAuth popup is opened, which keeps the demo
-      // flow deterministic and offline.
-      if (gateway.isDemo) {
-        const session = await gateway.signInWithGoogle();
+      // Google sign-in ALWAYS goes through real Firebase Auth — there is no
+      // on-device/mock session for it. runGoogleSignIn() only ever produces
+      // `signed-in` from a valid Firebase user object (popup, or the redirect
+      // consumed below), so the wizard can never advance without real auth.
+      const outcome = await runGoogleSignIn({
+        signInWithPopup: () => signInWithPopup(auth, googleProvider),
+        signInWithRedirect: () => signInWithRedirect(auth, googleProvider),
+        onRedirectStart: () => {
+          if (mounted.current) setNotice(t.method.googleRedirecting);
+        },
+      });
+
+      if (outcome.kind === "signed-in") {
+        logAuthInfo("google", `sign-in complete (uid ${outcome.user.uid})`);
+        const session = await buildGoogleSession(outcome.user);
         if (!mounted.current) return;
-        logAuthInfo("google", "demo sign-in complete");
         afterAuth(session);
         return;
       }
 
-      // Mobile browsers block or botch OAuth popups: use the full-page
-      // redirect from the start. Google still shows its account chooser
-      // there (the shared provider carries prompt=select_account); the
-      // getRedirectResult() effect above finishes the sign-in on the way
-      // back.
-      if (isMobileBrowser()) {
-        setNotice(t.method.googleRedirecting);
-        logAuthInfo("google", "mobile browser → using signInWithRedirect instead of a popup");
-        await signInWithRedirect(auth, googleProvider);
-        return; // the browser navigates away — nothing to do after the redirect
+      if (outcome.kind === "redirect-started") {
+        // The browser is navigating to Google's account chooser. The wizard
+        // stays put until the real session comes back via getRedirectResult().
+        logAuthInfo("google", "redirect started — waiting for getRedirectResult on return");
+        return;
       }
 
-      try {
-        const cred = await signInWithPopup(auth, googleProvider);
-        logAuthInfo("google", `popup sign-in complete (uid ${cred.user.uid})`);
-        const session = await buildGoogleSession(cred.user);
-        if (!mounted.current) return;
-        afterAuth(session);
-      } catch (popupErr: unknown) {
-        logAuthError("signInWithPopup", popupErr);
-        const errCode = (popupErr as { code?: string })?.code;
-
-        // The user deliberately closed/cancelled the account chooser: don't
-        // drag them into a full-page redirect — just tell them and let them
-        // retry.
-        if (
-          errCode === "auth/popup-closed-by-user" ||
-          errCode === "auth/cancelled-popup-request" ||
-          errCode === "auth/cancelled-redirect" ||
-          errCode === "auth/redirect-cancelled-by-user"
-        ) {
-          if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(popupErr)));
-          return;
-        }
-
-        // A redirect would fail identically: this is a Firebase-console setup
-        // problem (Authorized domains), so surface it instead of retrying.
-        if (errCode === "auth/unauthorized-domain") {
-          if (mounted.current) setGoogleError(copyFor("unauthorized-domain"));
-          return;
-        }
-
-        // Popup blocked or unsupported environment (mobile web view, headless,
-        // pop-up blocker): fall back to the full-page redirect, which works
-        // in those contexts.
-        try {
-          setNotice(t.method.googleRedirecting);
-          logAuthInfo("google", "popup blocked/unsupported → falling back to signInWithRedirect");
-          await signInWithRedirect(auth, googleProvider);
-          // The browser navigates away; the getRedirectResult() effect
-          // completes the sign-in on the way back.
-        } catch (redirectErr: unknown) {
-          reportFailure(redirectErr);
-        }
-      }
+      // user-cancelled / unauthorized-domain / failed: keep the user on step
+      // 1 with an explicit, localised message (the `finally` below resets the
+      // loading state).
+      if (!mounted.current) return;
+      if (outcome.kind === "user-cancelled") setGoogleError(copyFor("popup-closed"));
+      else if (outcome.kind === "unauthorized-domain") setGoogleError(copyFor("unauthorized-domain"));
+      else setGoogleError(copyFor(outcome.code));
     } catch (error: unknown) {
-      reportFailure(error);
+      logAuthError("handleGoogleAuth", error);
+      if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, buildGoogleSession, clearErrors, copyFor, gateway, t]);
+  }, [afterAuth, buildGoogleSession, clearErrors, copyFor, t]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 

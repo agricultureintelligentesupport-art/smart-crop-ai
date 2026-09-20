@@ -225,9 +225,17 @@ const flows = {
     const { ctx, page } = await newPage(browser, "google");
     try {
       await page.goto(`${BASE}/auth`, { waitUntil: "networkidle" });
-      await page.getByRole("button", { name: /المتابعة بحساب Google/ }).click();
+      // The Google button opens the REAL Firebase OAuth popup (strict auth —
+      // the wizard never advances without a real Firebase user), which a human
+      // completes. The automated walk screenshots the button, then enters the
+      // wizard through the demo phone OTP (same role → wilaya → success path).
+      await shot(page, "14a-google-button");
+      await page.getByRole("textbox", { name: "الهاتف" }).fill("661223344");
+      await page.getByRole("button", { name: /إرسال رمز SMS/ }).click();
+      await page.getByLabel("رمز التحقق").fill("123456");
+      await page.getByRole("button", { name: /تحقّق ودخول/ }).click();
       await page.getByRole("heading", { name: "تحديد صفة المستخدم" }).waitFor({ timeout: 20000 });
-      await shot(page, "14a-google-role");
+      await shot(page, "14b-google-role");
       await page.getByRole("radio", { name: /مهندس زراعي/ }).click();
       await page.getByRole("button", { name: "متابعة" }).click();
       await page.getByRole("searchbox", { name: "البحث عن ولاية" }).fill("Setif");
