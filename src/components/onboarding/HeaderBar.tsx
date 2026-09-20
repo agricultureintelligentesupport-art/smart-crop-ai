@@ -2,6 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { Leaf } from "lucide-react";
+import { memo } from "react";
 import type { Copy, Lang } from "@/lib/content";
 
 const LANGS: { code: Lang; label: string; full: string }[] = [
@@ -9,7 +10,9 @@ const LANGS: { code: Lang; label: string; full: string }[] = [
   { code: "fr", label: "FR", full: "Français" },
 ];
 
-export default function HeaderBar({
+/** Memoized: the header (incl. its backdrop-blur glass surfaces) never
+ *  re-renders while slides swipe — only on language / last-step changes. */
+function HeaderBar({
   t,
   lang,
   onLangChange,
@@ -24,8 +27,9 @@ export default function HeaderBar({
 }) {
   return (
     <header className="pt-safe relative z-30 flex shrink-0 items-center justify-between gap-1.5 px-3.5 pb-1 sm:px-4">
-      {/* App badge — starts at the right in RTL, left in LTR */}
-      <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
+      {/* App badge — starts at the right in RTL, left in LTR.
+          GPU: transform-gpu keeps the backdrop-blur pill on its own compositor layer. */}
+      <div className="glass transform-gpu backface-hidden flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
         <span className="hidden h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)] min-[360px]:grid">
           <Leaf size={15} strokeWidth={2.4} className="text-white" />
         </span>
@@ -43,7 +47,7 @@ export default function HeaderBar({
       <div
         role="group"
         aria-label={t.languageAria}
-        className="glass flex shrink-0 items-center rounded-full p-1 shadow-sm"
+        className="glass transform-gpu backface-hidden flex shrink-0 items-center rounded-full p-1 shadow-sm"
       >
         {LANGS.map((l) => {
           const active = lang === l.code;
@@ -63,7 +67,7 @@ export default function HeaderBar({
               {active && (
                 <motion.span
                   layoutId="lang-thumb"
-                  className="absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500 to-green-600 shadow-[0_6px_16px_rgba(16,185,129,0.5)]"
+                  className="absolute inset-0 transform-gpu backface-hidden will-change-transform rounded-full bg-gradient-to-r from-emerald-500 to-green-600 shadow-[0_6px_16px_rgba(16,185,129,0.5)]"
                   transition={{ type: "spring", stiffness: 480, damping: 34 }}
                 />
               )}
@@ -73,9 +77,11 @@ export default function HeaderBar({
         })}
       </div>
 
-      {/* Skip — ends on the left in RTL, right in LTR. Fixed slot so the header never jumps */}
+      {/* Skip — ends on the left in RTL, right in LTR. Fixed slot so the header never jumps.
+          Perf: mode="wait" avoids popLayout's measure-and-pin layout read on the swap frame;
+          the slot is a fixed grid cell so the exit animation is pixel-identical. */}
       <div className="grid h-12 min-w-[64px] flex-none place-items-center justify-items-end">
-        <AnimatePresence initial={false} mode="popLayout">
+        <AnimatePresence initial={false} mode="wait">
           {showSkip && (
             <motion.button
               key="skip"
@@ -86,7 +92,7 @@ export default function HeaderBar({
               exit={{ opacity: 0, x: 8 }}
               transition={{ duration: 0.22 }}
               whileTap={{ scale: 0.94 }}
-              className="h-12 rounded-xl px-2 text-[12.5px] font-bold text-emerald-800/70 transition-colors hover:text-emerald-600"
+              className="transform-gpu backface-hidden h-12 rounded-xl px-2 text-[12.5px] font-bold text-emerald-800/70 transition-colors hover:text-emerald-600"
             >
               {t.skip}
             </motion.button>
@@ -96,3 +102,5 @@ export default function HeaderBar({
     </header>
   );
 }
+
+export default memo(HeaderBar);

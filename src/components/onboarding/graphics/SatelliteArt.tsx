@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { motion } from "framer-motion";
 
 /* Slide 3 — Satellite map interface with an NDVI crop-health heatmap */
@@ -24,7 +25,7 @@ const MAP = { x: 22, y: 54, w: 276, h: 178 };
 const CELL = { w: 27, h: 23, gx: 4, gy: 4, x0: 48, y0: 76 };
 const TARGET = { cx: CELL.x0 + 4 * (CELL.w + CELL.gx) + CELL.w / 2, cy: CELL.y0 + 1 * (CELL.h + CELL.gy) + CELL.h / 2 };
 
-export default function SatelliteArt() {
+function SatelliteArt() {
   return (
     <svg viewBox="0 0 320 260" className="h-full w-full" fill="none" role="img" aria-label="Satellite NDVI map illustration">
       <defs>
@@ -94,6 +95,7 @@ export default function SatelliteArt() {
               height={CELL.h}
               rx="4"
               fill={ndviColor(v)}
+              shapeRendering="geometricPrecision"
               animate={{ opacity: [0.7, 1, 0.7] }}
               transition={{ duration: 3.4, ease: "easeInOut", repeat: Infinity, delay: (r * 8 + c) * 0.09 }}
             />
@@ -103,6 +105,7 @@ export default function SatelliteArt() {
         {/* Field boundary — warm amber marching-ants (sunshine accent) */}
         <motion.path
           d="M60 120 L150 84 L268 100 L244 200 L96 214 Z"
+          shapeRendering="geometricPrecision"
           stroke="#f59e0b"
           strokeWidth="2"
           strokeDasharray="5 6"
@@ -111,7 +114,11 @@ export default function SatelliteArt() {
         />
 
         {/* Drifting light clouds */}
-        <motion.g animate={{ x: [-30, 70, -30] }} transition={{ duration: 26, ease: "easeInOut", repeat: Infinity }}>
+        <motion.g
+          style={{ willChange: "transform" }}
+          animate={{ x: [-30, 70, -30] }}
+          transition={{ duration: 26, ease: "easeInOut", repeat: Infinity }}
+        >
           <ellipse cx="120" cy="70" rx="34" ry="9" fill="#ffffff" opacity="0.7" />
           <ellipse cx="150" cy="62" rx="22" ry="7" fill="#ffffff" opacity="0.55" />
           <ellipse cx="240" cy="205" rx="30" ry="8" fill="#ffffff" opacity="0.55" />
@@ -119,10 +126,11 @@ export default function SatelliteArt() {
 
         {/* Scan sweep — vivid emerald */}
         <motion.g
+          style={{ willChange: "transform" }}
           animate={{ x: [-130, 130] }}
           transition={{ duration: 5, ease: "easeInOut", repeat: Infinity, repeatType: "mirror" }}
         >
-          <rect x="160" y={MAP.y} width="26" height={MAP.h} fill="url(#sweepG)" />
+          <rect x="160" y={MAP.y} width="26" height={MAP.h} fill="url(#sweepG)" shapeRendering="geometricPrecision" />
         </motion.g>
 
         {/* Legend */}
@@ -138,11 +146,11 @@ export default function SatelliteArt() {
       {/* HUD crosshair on the analyzed zone */}
       <g clipPath="url(#mapClip)">
         <motion.g
-          style={{ transformBox: "fill-box", transformOrigin: "center" }}
+          style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
           animate={{ rotate: 360 }}
           transition={{ duration: 14, ease: "linear", repeat: Infinity }}
         >
-          <circle cx={TARGET.cx} cy={TARGET.cy} r="24" stroke="#10b981" strokeOpacity="0.9" strokeWidth="1.6" strokeDasharray="6 8" />
+          <circle cx={TARGET.cx} cy={TARGET.cy} r="24" stroke="#10b981" strokeOpacity="0.9" strokeWidth="1.6" strokeDasharray="6 8" shapeRendering="geometricPrecision" />
         </motion.g>
         <circle cx={TARGET.cx} cy={TARGET.cy} r="3.5" fill="#22c55e" />
         <circle cx={TARGET.cx} cy={TARGET.cy} r="6" fill="#bbf7d0" fillOpacity="0.6" />
@@ -151,6 +159,7 @@ export default function SatelliteArt() {
           cy={TARGET.cy}
           stroke="#34d399"
           strokeWidth="2"
+          shapeRendering="geometricPrecision"
           initial={{ r: 4, opacity: 0.9 }}
           animate={{ r: [4, 28], opacity: [0.9, 0] }}
           transition={{ duration: 1.8, ease: "easeOut", repeat: Infinity }}
@@ -161,7 +170,11 @@ export default function SatelliteArt() {
       </g>
 
       {/* Satellite */}
-      <motion.g animate={{ y: [0, 5, 0], x: [0, -5, 0] }} transition={{ duration: 5.5, ease: "easeInOut", repeat: Infinity }}>
+      <motion.g
+        style={{ willChange: "transform" }}
+        animate={{ y: [0, 5, 0], x: [0, -5, 0] }}
+        transition={{ duration: 5.5, ease: "easeInOut", repeat: Infinity }}
+      >
         {/* Solar panels with vibrant amber sun highlight */}
         <rect x="222" y="14" width="18" height="11" rx="2" fill="#0ea5e9" />
         <rect x="256" y="14" width="18" height="11" rx="2" fill="#0ea5e9" />
@@ -178,6 +191,7 @@ export default function SatelliteArt() {
       {/* Downlink beam */}
       <motion.path
         d={`M249 33 L ${TARGET.cx + 2} ${TARGET.cy - 26}`}
+        shapeRendering="geometricPrecision"
         stroke="#22c55e"
         strokeOpacity="0.8"
         strokeWidth="1.8"
@@ -186,14 +200,17 @@ export default function SatelliteArt() {
         transition={{ duration: 1.1, ease: "linear", repeat: Infinity }}
       />
 
-      {/* LIVE chip — glass with amber LIVE indicator */}
-      <g transform="translate(34 62)" filter="url(#cardShadow)">
+      {/* LIVE chip — glass with amber LIVE indicator.
+          GPU: merged attribute+hint transform → feDropShadow rasterizes once
+          on a dedicated composite layer. */}
+      <g filter="url(#cardShadow)" style={{ transform: "translate(34px, 62px) translateZ(0)", willChange: "transform" }}>
         <rect width="60" height="16" rx="8" fill="rgba(255,255,255,0.85)" stroke="#E2F1E8" />
         <motion.circle
           cx="10"
           cy="8"
           r="2.8"
           fill="#f59e0b"
+          shapeRendering="geometricPrecision"
           animate={{ opacity: [1, 0.25, 1] }}
           transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
         />
@@ -204,3 +221,6 @@ export default function SatelliteArt() {
     </svg>
   );
 }
+
+/* React.memo: static artwork — never re-renders when the slide/text state changes. */
+export default memo(SatelliteArt);

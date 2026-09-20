@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { motion } from "framer-motion";
 
 /* Slide 2 — Smart water drop with weather widget + irrigation scheduling card */
@@ -9,7 +10,7 @@ const WAVE_TOP =
   Array.from({ length: 14 }, () => "q 10 -7 20 0 t 20 0 ").join("") +
   " L 440 268 L -120 268 Z";
 
-export default function IrrigationArt() {
+function IrrigationArt() {
   return (
     <svg viewBox="0 0 320 260" className="h-full w-full" fill="none" role="img" aria-label="Smart irrigation illustration">
       <defs>
@@ -44,28 +45,36 @@ export default function IrrigationArt() {
 
       {/* Orbiting gauge ring (emerald tint) */}
       <motion.g
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
+        style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
         animate={{ rotate: -360 }}
         transition={{ duration: 44, ease: "linear", repeat: Infinity }}
       >
-        <circle cx="160" cy="130" r="114" stroke="#10b981" strokeOpacity="0.22" strokeWidth="1.5" strokeDasharray="2 9" />
+        <circle cx="160" cy="130" r="114" stroke="#10b981" strokeOpacity="0.22" strokeWidth="1.5" strokeDasharray="2 9" shapeRendering="geometricPrecision" />
       </motion.g>
       {/* Counter-ring with sky blue */}
       <motion.g
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
+        style={{ transformBox: "fill-box", transformOrigin: "center", willChange: "transform" }}
         animate={{ rotate: 360 }}
         transition={{ duration: 60, ease: "linear", repeat: Infinity }}
       >
-        <circle cx="160" cy="130" r="128" stroke="#0ea5e9" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="3 13" />
+        <circle cx="160" cy="130" r="128" stroke="#0ea5e9" strokeOpacity="0.18" strokeWidth="1" strokeDasharray="3 13" shapeRendering="geometricPrecision" />
       </motion.g>
 
       {/* The droplet */}
-      <motion.g animate={{ y: [0, -6, 0] }} transition={{ duration: 5.5, ease: "easeInOut", repeat: Infinity }}>
+      <motion.g
+        style={{ willChange: "transform" }}
+        animate={{ y: [0, -6, 0] }}
+        transition={{ duration: 5.5, ease: "easeInOut", repeat: Infinity }}
+      >
         <path d={DROP} fill="url(#dropG)" stroke="rgba(255,255,255,0.7)" strokeWidth="1.8" />
         <g clipPath="url(#dropClip)">
           {/* Animated water surface */}
-          <motion.g animate={{ x: [0, -40] }} transition={{ duration: 3, ease: "linear", repeat: Infinity }}>
-            <path d={WAVE_TOP} fill="#38bdf8" fillOpacity="0.45" />
+          <motion.g
+            style={{ willChange: "transform" }}
+            animate={{ x: [0, -40] }}
+            transition={{ duration: 3, ease: "linear", repeat: Infinity }}
+          >
+            <path d={WAVE_TOP} fill="#38bdf8" fillOpacity="0.45" shapeRendering="geometricPrecision" />
           </motion.g>
           {/* Shine */}
           <ellipse cx="134" cy="94" rx="9" ry="17" transform="rotate(-16 134 94)" fill="#ffffff" fillOpacity="0.65" />
@@ -79,10 +88,12 @@ export default function IrrigationArt() {
             <motion.circle
               key={i}
               cx={b.cx}
+              cy={198}
               r={b.r}
               fill="#e0f2fe"
-              initial={{ cy: 198, opacity: 0 }}
-              animate={{ cy: [198, 158], opacity: [0, 0.9, 0] }}
+              shapeRendering="geometricPrecision"
+              initial={{ y: 0, opacity: 0 }}
+              animate={{ y: [0, -40], opacity: [0, 0.9, 0] }}
               transition={{ duration: 3.2, ease: "easeIn", repeat: Infinity, delay: b.delay }}
             />
           ))}
@@ -101,6 +112,7 @@ export default function IrrigationArt() {
         cy="228"
         stroke="#10b981"
         strokeWidth="1.8"
+        shapeRendering="geometricPrecision"
         initial={{ rx: 30, ry: 4, opacity: 0.6 }}
         animate={{ rx: [30, 58], ry: [4, 9], opacity: [0.6, 0] }}
         transition={{ duration: 3, ease: "easeOut", repeat: Infinity }}
@@ -110,6 +122,7 @@ export default function IrrigationArt() {
         cy="228"
         stroke="#38bdf8"
         strokeWidth="1.4"
+        shapeRendering="geometricPrecision"
         initial={{ rx: 22, ry: 3, opacity: 0.5 }}
         animate={{ rx: [22, 50], ry: [3, 8], opacity: [0.5, 0] }}
         transition={{ duration: 3, ease: "easeOut", repeat: Infinity, delay: 0.8 }}
@@ -118,6 +131,7 @@ export default function IrrigationArt() {
       {/* Dashed data links */}
       <motion.path
         d="M116 88 Q 130 96 141 107"
+        shapeRendering="geometricPrecision"
         stroke="#0ea5e9"
         strokeOpacity="0.6"
         strokeWidth="1.6"
@@ -127,6 +141,7 @@ export default function IrrigationArt() {
       />
       <motion.path
         d="M208 182 Q 194 174 181 168"
+        shapeRendering="geometricPrecision"
         stroke="#10b981"
         strokeOpacity="0.65"
         strokeWidth="1.6"
@@ -135,8 +150,9 @@ export default function IrrigationArt() {
         transition={{ duration: 1.6, ease: "linear", repeat: Infinity, delay: 0.4 }}
       />
 
-      {/* Weather widget card — light glass */}
-      <g transform="translate(10 50)" filter="url(#cardShadow)">
+      {/* Weather widget card — light glass.
+          GPU: the feDropShadow rasterizes once on a dedicated composite layer. */}
+      <g filter="url(#cardShadow)" style={{ transform: "translate(10px, 50px) translateZ(0)", willChange: "transform" }}>
         <motion.g animate={{ y: [0, -5, 0] }} transition={{ duration: 6, ease: "easeInOut", repeat: Infinity, delay: 0.8 }}>
           <rect width="108" height="70" rx="16" fill="rgba(255,255,255,0.82)" stroke="#E2F1E8" />
           {/* Sun with glowing rays */}
@@ -168,8 +184,8 @@ export default function IrrigationArt() {
         </motion.g>
       </g>
 
-      {/* Irrigation schedule card */}
-      <g transform="translate(202 148)" filter="url(#cardShadow)">
+      {/* Irrigation schedule card — GPU-isolated filter layer. */}
+      <g filter="url(#cardShadow)" style={{ transform: "translate(202px, 148px) translateZ(0)", willChange: "transform" }}>
         <motion.g animate={{ y: [0, 5, 0] }} transition={{ duration: 6.5, ease: "easeInOut", repeat: Infinity, delay: 0.3 }}>
           <rect width="108" height="86" rx="16" fill="rgba(255,255,255,0.82)" stroke="#E2F1E8" />
           <circle cx="24" cy="20" r="8.5" stroke="#10b981" strokeWidth="2" />
@@ -197,3 +213,6 @@ export default function IrrigationArt() {
     </svg>
   );
 }
+
+/* React.memo: static artwork — never re-renders when the slide/text state changes. */
+export default memo(IrrigationArt);

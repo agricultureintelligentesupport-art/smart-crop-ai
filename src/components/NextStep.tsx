@@ -22,8 +22,8 @@ export default function NextStep({
       className="screen-h relative mx-auto flex w-full max-w-[480px] flex-col items-center justify-center overflow-hidden px-6 font-arabic text-emerald-950"
       style={{ background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 55%, #DCF5E6 100%)" }}
     >
-      {/* ambient backdrop */}
-      <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+      {/* ambient backdrop — GPU-isolated so the blur stack rasterizes once */}
+      <div aria-hidden className="pointer-events-none absolute inset-0 transform-gpu backface-hidden will-change-transform overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-transparent to-emerald-200/30" />
         <div className="absolute -end-20 -top-24 h-72 w-72 rounded-full bg-amber-300/40 blur-3xl" />
         <div className="absolute -start-24 -top-16 h-72 w-72 rounded-full bg-emerald-300/45 blur-3xl" />

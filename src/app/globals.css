@@ -70,7 +70,11 @@
     padding-top: max(0.625rem, env(safe-area-inset-top));
   }
 
-  /* Light glassmorphism — crisp white with emerald-tinted borders */
+  /* Light glassmorphism — crisp white with emerald-tinted borders.
+     GPU: translateZ(0) + will-change pin each glass surface onto its own
+     compositor layer so backdrop-blur never re-rasterizes on the CPU while
+     slides swipe over/around it. Visually inert (backdrop-filter already
+     creates a stacking context). */
   .glass {
     background: rgba(255, 255, 255, 0.8);
     border: 1px solid rgba(226, 241, 232, 0.9);
@@ -79,21 +83,33 @@
     box-shadow:
       0 1px 0 rgba(255, 255, 255, 0.9) inset,
       0 8px 24px -12px rgba(6, 78, 59, 0.12);
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform, opacity;
   }
 
-  /* Vibrant emerald glow for primary CTAs */
+  /* Vibrant emerald glow for primary CTAs.
+     GPU: isolate the large blurred box-shadow onto a dedicated composite
+     layer so hover/tap transitions and slide swipes never re-paint it. */
   .glow-emerald {
     box-shadow:
       0 0 0 1px rgba(255, 255, 255, 0.6) inset,
       0 0 28px rgba(16, 185, 129, 0.45),
       0 16px 36px -14px rgba(16, 185, 129, 0.7);
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform, opacity;
   }
 
-  /* Warm amber accent glow for badges / progress */
+  /* Warm amber accent glow for badges / progress.
+     GPU: same dedicated-layer isolation as .glow-emerald. */
   .glow-amber {
     box-shadow:
       0 0 20px rgba(245, 158, 11, 0.35),
       0 10px 24px -10px rgba(245, 158, 11, 0.55);
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    will-change: transform, opacity;
   }
 }
 
