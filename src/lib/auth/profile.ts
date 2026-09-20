@@ -5,7 +5,8 @@
  *
  * Mirrors what Firestore holds for a signed-in user (`users/{uid}`), so the
  * role + wilaya picked during onboarding immediately shape the dashboard.
- * Guests get the same record with `isGuest: true` and a null uid.
+ * Every record belongs to an authenticated session (Google, phone or e-mail);
+ * guest mode no longer exists.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -18,14 +19,13 @@ const PROFILE_EVENT = "smart-crop:profile";
 const PREFS_KEY = "smart-crop.prefs.v1";
 
 export interface StoredProfile {
-  uid: string | null;
-  method: AuthMethod | "guest";
+  uid: string;
+  method: AuthMethod;
   displayName: string;
   email?: string;
   phone?: string;
   role: AuthRole | null;
   wilayaCode: string | null;
-  isGuest: boolean;
   lang?: Lang;
   /** Provider avatar (Google) so the app can greet the real person. */
   photoURL?: string | null;
@@ -34,8 +34,13 @@ export interface StoredProfile {
 
 function isProfile(value: unknown): value is StoredProfile {
   if (!value || typeof value !== "object") return false;
+  // Records written by the removed guest mode (uid: null, isGuest: true,
+  // method: "guest") are not sessions: treat them as absent so their owners
+  // are routed back to the auth wizard instead of a dashboard.
+  const legacy = value as { isGuest?: unknown; method?: unknown };
+  if (legacy.isGuest === true || legacy.method === "guest") return false;
   const v = value as Partial<StoredProfile>;
-  return typeof v.displayName === "string" && typeof v.isGuest === "boolean";
+  return typeof v.uid === "string" && v.uid.length > 0 && typeof v.displayName === "string";
 }
 
 export function readProfile(): StoredProfile | null {
@@ -88,21 +93,7 @@ export function profileFromUser(user: SessionUser, extra: Partial<StoredProfile>
     phone: user.phone,
     role: user.role,
     wilayaCode: user.wilayaCode,
-    isGuest: user.isGuest,
     photoURL: user.photoURL ?? null,
-    updatedAt: Date.now(),
-    ...extra,
-  };
-}
-
-export function guestProfile(extra: Partial<StoredProfile> = {}): StoredProfile {
-  return {
-    uid: null,
-    method: "guest",
-    displayName: "زائر",
-    role: null,
-    wilayaCode: null,
-    isGuest: true,
     updatedAt: Date.now(),
     ...extra,
   };

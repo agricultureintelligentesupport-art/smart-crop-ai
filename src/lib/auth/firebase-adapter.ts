@@ -87,7 +87,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? data.email ?? undefined,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
-          isGuest: false,
         };
       } catch (error) {
         logAuthError("signInWithGoogle (gateway)", error);
@@ -133,7 +132,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           phone: cred.user.phoneNumber ?? challenge.phone,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
-          isGuest: false,
         };
       } catch (error) {
         throw toAdapterError(error, "firebase/verifyOtp");
@@ -151,7 +149,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? email,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
-          isGuest: false,
         };
       } catch (error) {
         throw toAdapterError(error, "firebase/signInWithEmail");
@@ -184,7 +181,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email,
           role: null,
           wilayaCode: null,
-          isGuest: false,
         };
       } catch (error) {
         throw toAdapterError(error, "firebase/registerWithEmail");
@@ -223,7 +219,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
         email: user.email ?? undefined,
         role: patch.role ?? data.role ?? null,
         wilayaCode: patch.wilayaCode ?? data.wilayaCode ?? data.wilaya ?? null,
-        isGuest: false,
       };
     },
 

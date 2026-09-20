@@ -75,14 +75,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         if (!currentUser?.uid) {
           // Signed out: identity state drops to defaults. A stale signed-in
-          // profile left in storage (expired session, another tab's
-          // sign-out, …) is discarded — guest records carry no identity and
-          // are preserved, as are device preferences.
+          // FIREBASE profile left in storage (expired session, another tab's
+          // sign-out, …) is discarded; device preferences survive in their
+          // own storage key. Gateway-backed sessions (demo / on-device
+          // users, `local_*` uids) are invisible to Firebase — the null
+          // callback says nothing about them, so they are kept and the
+          // dashboard session gate keeps honouring them.
           setUser(null);
           setProfile(null);
           try {
             const cached = readProfile();
-            if (cached && !cached.isGuest) clearProfile();
+            if (cached && !cached.uid.startsWith("local_")) clearProfile();
           } catch {
             /* storage unavailable */
           }
@@ -126,7 +129,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     email: currentUser.email ?? undefined,
                     role,
                     wilayaCode: wilaya,
-                    isGuest: false,
                     updatedAt: Date.now(),
                   };
                   writeProfile(stored);

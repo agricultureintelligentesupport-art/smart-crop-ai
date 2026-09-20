@@ -7,7 +7,7 @@
  *
  *   npm run dev                       # in one shell
  *   npm i -D @sparticuz/chromium      # optional: uses a prebuilt Chromium
- *   node tools/walkthrough.mjs all    # or: register | otp | login | google | guest | narrow
+ *   node tools/walkthrough.mjs all    # or: register | otp | login | google | narrow
  *
  * `npm run test:e2e` is the assertion-grade suite; this is the eyes-on one.
  */
@@ -248,61 +248,6 @@ const flows = {
       await page.getByRole("button", { name: "Français" }).click();
       await shot(page, "14c-success-french");
       log("google → role → wilaya → success OK");
-    } finally {
-      await ctx.close();
-      await browser.close();
-    }
-  },
-
-  async guest() {
-    const browser = await launch();
-    const { ctx, page } = await newPage(browser, "guest");
-    try {
-      await page.goto(`${BASE}/auth`, { waitUntil: "networkidle" });
-      await page.getByRole("button", { name: /متابعة كزائر/ }).click();
-      await page.waitForURL(/\/guest/, { timeout: 20000 });
-      await page.getByRole("heading", { level: 1 }).waitFor({ timeout: 20000 });
-      await shot(page, "17-guest-dashboard");
-
-      await page.getByRole("button", { name: /تعديل/ }).click();
-      await shot(page, "18-guest-personalize");
-      await page.getByRole("button", { name: /الولاية/ }).click();
-      await page.getByRole("searchbox", { name: "بحث" }).fill("وادي");
-      await page.waitForTimeout(300);
-      await page.getByRole("option", { name: /الوادي/ }).first().click();
-      await page.waitForTimeout(400);
-      await page.getByRole("button", { name: /إغلاق/ }).click();
-      await shot(page, "20-guest-personalized");
-
-      const slider = page.getByRole("slider", { name: "المساحة بالسقي" });
-      await slider.focus();
-      for (let i = 0; i < 30; i += 1) await slider.press("ArrowRight");
-      await page.getByRole("radio", { name: "بالرشّ" }).click();
-      await page.waitForTimeout(300);
-      await shot(page, "21-guest-irrigation");
-
-      const png = Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=",
-        "base64",
-      );
-      await page.setInputFiles('input[type="file"]', { name: "leaf.png", mimeType: "image/png", buffer: png });
-      await page.waitForTimeout(400);
-      await shot(page, "22-guest-scan-preview");
-      await page.getByRole("button", { name: "تشخيص صحة النبات" }).click();
-      await page.getByText("التوصية الميدانية").waitFor({ timeout: 10000 });
-      await shot(page, "23-guest-scan-result");
-
-      await page.getByRole("checkbox").first().check();
-      await shot(page, "24-guest-tasks");
-
-      await page.getByRole("button", { name: "Français" }).click();
-      await shot(page, "25-guest-french");
-
-      // guest → register CTA
-      await page.getByRole("link", { name: /Créer un compte/ }).first().click();
-      await page.waitForURL(/\/register/, { timeout: 20000 });
-      await shot(page, "25b-guest-to-register");
-      log("guest flow OK");
     } finally {
       await ctx.close();
       await browser.close();

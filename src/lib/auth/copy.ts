@@ -1,5 +1,5 @@
 /**
- * Bilingual copy for the auth flow and the guest dashboard.
+ * Bilingual copy for the auth flow.
  *
  * Shape-first: `AR` is the source of truth, `AuthCopy` is derived from it, and
  * `AUTH` is typed as `Record<Lang, AuthCopy>` so a missing French key is a
@@ -23,7 +23,6 @@ export interface AuthCopy {
     navDashboard: string;
     navSignIn: string;
     navCreateAccount: string;
-    navGuest: string;
     signOut: string;
     langAria: string;
     langAr: string;
@@ -196,7 +195,6 @@ const AR: AuthCopy = {
     navDashboard: "لوحة التحكم",
     navSignIn: "تسجيل الدخول",
     navCreateAccount: "إنشاء حساب",
-    navGuest: "متابعة كزائر",
     signOut: "تسجيل الخروج",
     langAria: "اختيار اللغة",
     langAr: "العربية",
@@ -390,7 +388,6 @@ const FR: AuthCopy = {
     navDashboard: "Tableau de bord",
     navSignIn: "Connexion",
     navCreateAccount: "Créer un compte",
-    navGuest: "Continuer en invité",
     signOut: "Se déconnecter",
     langAria: "Choix de la langue",
     langAr: "العربية",

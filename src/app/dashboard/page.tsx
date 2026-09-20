@@ -7,7 +7,10 @@ export const metadata: Metadata = {
     "لوحة الزراعة الدقيقة: الطقس، السقي، تشخيص النبات ومؤشر الأقمار الصناعية. / Tableau de bord d'agriculture de précision : météo, irrigation, diagnostic et NDVI.",
 };
 
-/** Member dashboard. Redirects to /auth when no session is stored on the device. */
+/**
+ * Member dashboard. Strictly session-gated: it requires an authenticated user
+ * (Google, phone or e-mail); anyone else is redirected to the auth wizard.
+ */
 export default function DashboardPage() {
-  return <DashboardView mode="member" />;
+  return <DashboardView />;
 }

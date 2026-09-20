@@ -11,7 +11,6 @@ import {
   ShieldCheck,
   Sprout,
   Sun,
-  UserRound,
   Waves,
 } from "lucide-react";
 import Link from "next/link";
@@ -32,7 +31,6 @@ import FieldTasksCard from "./FieldTasksCard";
 import IrrigationCard from "./IrrigationCard";
 import SatelliteCard from "./SatelliteCard";
 import ScanCard from "./ScanCard";
-import UpgradeCard from "./UpgradeCard";
 import WeatherCard, { fmt } from "./WeatherCard";
 import WilayaSelect from "./WilayaSelect";
 import { Chip, Segmented } from "./parts";
@@ -40,17 +38,20 @@ import { Chip, Segmented } from "./parts";
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
 
 /**
- * The live dashboard. `/guest` renders it in guest mode (local data only),
- * `/dashboard` in member mode (session required). Every number reacts to the
- * wilaya + crop + parcel inputs, so the page is fully operational without a
- * backend: it is seeded, deterministic and clearly labelled as an estimate.
+ * The live member dashboard, rendered by `/dashboard`. Every number reacts to
+ * the wilaya + crop + parcel inputs, so the page is fully operational without
+ * a backend: it is seeded, deterministic and clearly labelled as an estimate.
+ *
+ * Strictly session-gated: an authenticated user (Google, phone or e-mail —
+ * Firebase session or gateway-backed on-device session) is required; anyone
+ * else is redirected straight to the auth wizard.
  */
-export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
+export default function DashboardView() {
   const router = useRouter();
   const { lang, setLang } = useLang("ar");
   const t = DASHBOARD[lang];
   const brand = AUTH[lang].header;
-  const { profile, ready, patch, save, clear } = useProfile();
+  const { profile, ready, patch, clear } = useProfile();
   const { user: authUser, profile: authProfile, signOut: authSignOut, updateProfile } = useAuth();
 
   /** `null` = follow the stored profile; a value = the user overrode it here. */
@@ -66,26 +67,15 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
     wilayaOverride ?? profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? DEFAULT_WILAYA_CODE;
   const role = roleOverride ?? profile?.role ?? (authProfile?.role as AuthRole | null) ?? null;
 
-  // /dashboard is member-only: no session → back to the auth flow.
+  // Session gate: a signed-in Firebase user OR a stored authenticated
+  // session (Google / phone / e-mail through the gateway) is required.
+  // Legacy guest records are rejected by `readProfile()`'s guard, so former
+  // guests land on the wizard instead of the dashboard.
+  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
   useEffect(() => {
-    if (mode !== "member" || !ready) return;
-    if (!profile && !authUser) router.replace("/auth");
-  }, [authUser, mode, profile, ready, router]);
-
-  // A guest arriving without a record still gets one, so choices stick.
-  useEffect(() => {
-    if (mode !== "guest" || !ready || profile) return;
-    save({
-      uid: null,
-      method: "guest",
-      displayName: lang === "ar" ? "زائر" : "Invité",
-      role: null,
-      wilayaCode: DEFAULT_WILAYA_CODE,
-      isGuest: true,
-      lang,
-      updatedAt: Date.now(),
-    });
-  }, [lang, mode, profile, ready, save]);
+    if (!ready) return;
+    if (!authenticated) router.replace("/auth");
+  }, [authenticated, ready, router]);
 
   const wilaya = getWilaya(wilayaCode);
   const weather = weatherFor(wilayaCode);
@@ -100,14 +90,11 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
 
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
   const displayName =
-    profile?.displayName ??
-    authProfile?.displayName ??
-    authUser?.displayName ??
-    (mode === "guest" ? t.welcome.guest : "");
-  const greeting =
-    mode === "guest"
-      ? t.welcome.guest
-      : t.welcome.member.replace("{name}", displayName || (lang === "ar" ? "فلاح" : "Agriculteur"));
+    profile?.displayName ?? authProfile?.displayName ?? authUser?.displayName ?? "";
+  const greeting = t.welcome.member.replace(
+    "{name}",
+    displayName || (lang === "ar" ? "فلاح" : "Agriculteur"),
+  );
 
   const updateWilaya = (code: string) => {
     setWilayaOverride(code);
@@ -156,7 +143,7 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
               {brand.brand}
             </span>
             <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
-              {mode === "guest" ? t.header.badgeGuest : t.header.badgeMember}
+              {t.header.badgeMember}
             </span>
           </span>
         </div>
@@ -169,33 +156,21 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
             labels={{ ar: t.header.langAr, fr: t.header.langFr }}
             layoutId="dashboard-lang-thumb"
           />
-          {mode === "guest" ? (
-            <Link
-              href="/register"
-              className={`glass inline-flex h-12 items-center gap-1.5 rounded-2xl px-3 text-[11.5px] font-extrabold whitespace-nowrap text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-            >
-              <UserRound size={15} strokeWidth={2.4} aria-hidden />
-              {t.header.navCreate}
-            </Link>
-          ) : (
-            <>
-              <Link
-                href="/"
-                aria-label={t.header.navHome}
-                className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-              >
-                <Home size={16} strokeWidth={2.4} aria-hidden />
-              </Link>
-              <button
-                type="button"
-                onClick={() => void signOut()}
-                aria-label={t.header.signOut}
-                className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-              >
-                <LogOut size={16} strokeWidth={2.4} aria-hidden />
-              </button>
-            </>
-          )}
+          <Link
+            href="/"
+            aria-label={t.header.navHome}
+            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+          >
+            <Home size={16} strokeWidth={2.4} aria-hidden />
+          </Link>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            aria-label={t.header.signOut}
+            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+          >
+            <LogOut size={16} strokeWidth={2.4} aria-hidden />
+          </button>
         </div>
       </header>
 
@@ -320,11 +295,6 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
             <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
             <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
             <ScanCard t={t} wilayaCode={wilayaCode} />
-            {mode === "guest" && (
-              <div className="min-w-0 sm:col-span-2">
-                <UpgradeCard t={t} lang={lang} />
-              </div>
-            )}
           </div>
 
           <p className="mx-auto max-w-[70ch] text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">

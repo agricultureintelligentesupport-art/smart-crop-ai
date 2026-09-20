@@ -16,7 +16,7 @@ export interface Copy {
   next: string;
   swipeHint: string;
   createAccount: string;
-  continueGuest: string;
+  signIn: string;
   stepWord: string;
   languageAria: string;
   slides: SlideCopy[];
@@ -33,7 +33,7 @@ export const COPY: Record<Lang, Copy> = {
     next: "التالي",
     swipeHint: "اسحب لتصفّح الخطوات",
     createAccount: "إنشاء حساب",
-    continueGuest: "متابعة كزائر",
+    signIn: "تسجيل الدخول",
     stepWord: "خطوة",
     languageAria: "اختيار اللغة",
     slides: [
@@ -65,7 +65,7 @@ export const COPY: Record<Lang, Copy> = {
     next: "Suivant",
     swipeHint: "Glissez pour parcourir les étapes",
     createAccount: "Créer un compte",
-    continueGuest: "Continuer comme invité",
+    signIn: "Se connecter",
     stepWord: "Étape",
     languageAria: "Choix de la langue",
     slides: [

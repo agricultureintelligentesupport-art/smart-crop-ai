@@ -72,7 +72,7 @@ test.describe("auth routes", () => {
   });
 
   test("does not ship any 'coming soon' placeholder copy", async ({ page }) => {
-    for (const route of ["/auth", "/login", "/register", "/guest"]) {
+    for (const route of ["/auth", "/login", "/register"]) {
       await page.goto(route);
       const body = (await page.locator("body").innerText()).toLowerCase();
       expect(body).not.toContain("bientôt");
@@ -323,13 +323,46 @@ test.describe("email sign-in", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  7. Guest mode                                                      */
+/*  7. Auth-gated dashboard (guest mode removed)                       */
 /* ------------------------------------------------------------------ */
 
-test.describe("guest mode", () => {
-  test("/guest renders the dashboard immediately, not a placeholder", async ({ page }) => {
+/**
+ * Signs in through the demo phone OTP, walks the setup steps and lands on
+ * the member dashboard. Every dashboard feature below is verified behind
+ * the session gate.
+ */
+async function openDashboard(page: Page, wilaya = "بسكرة") {
+  await page.goto("/auth");
+  await signInViaDemoOtp(page, "661223344");
+  await completeSetup(page, wilaya);
+  await page.getByRole("button", { name: /الدخول إلى لوحة التحكم/ }).click();
+  await expect(page).toHaveURL(/\/dashboard/);
+}
+
+test.describe("dashboard session guard", () => {
+  test("unauthenticated /dashboard redirects straight to the auth wizard", async ({ page }) => {
+    await page.goto("/dashboard");
+    await expect(page).toHaveURL(/\/auth/);
+    await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
+  });
+
+  test("/guest is gone: the old route forwards to the auth wizard", async ({ page }) => {
     await page.goto("/guest");
-    await expect(page.getByRole("heading", { level: 1 })).toContainText("زائر");
+    await expect(page).toHaveURL(/\/auth/);
+    await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
+  });
+
+  test("the auth wizard offers no guest escape hatch", async ({ page }) => {
+    await page.goto("/auth");
+    await expect(page.getByRole("button", { name: /زائر/ })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: /زائر/ })).toHaveCount(0);
+  });
+});
+
+test.describe("member dashboard", () => {
+  test("a signed-in member gets the full dashboard, not a placeholder", async ({ page }) => {
+    await openDashboard(page);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(/مرحباً/);
     await expect(page.getByRole("heading", { name: "الطقس والاحتياج المائي" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "تشخيص صحة النبات" })).toBeVisible();
@@ -337,15 +370,8 @@ test.describe("guest mode", () => {
     await expect(page.getByRole("heading", { name: "مهام اليوم" })).toBeVisible();
   });
 
-  test("the guest CTA on /auth goes straight to the guest dashboard", async ({ page }) => {
-    await page.goto("/auth");
-    await page.getByRole("button", { name: /متابعة كزائر/ }).click();
-    await expect(page).toHaveURL(/\/guest/);
-    await expect(page.getByRole("heading", { level: 1 })).toContainText("زائر");
-  });
-
   test("irrigation calculator reacts to crop, area and system", async ({ page }) => {
-    await page.goto("/guest");
+    await openDashboard(page);
     const perDay = page.getByText("لكل قطعة يومياً").locator("..").getByText(/m³/).first();
     const before = await perDay.textContent();
 
@@ -364,7 +390,7 @@ test.describe("guest mode", () => {
   });
 
   test("leaf scan produces a diagnosis with field advice", async ({ page }) => {
-    await page.goto("/guest");
+    await openDashboard(page);
     await page.setInputFiles('input[type="file"]', {
       name: "leaf.png",
       mimeType: "image/png",
@@ -381,7 +407,7 @@ test.describe("guest mode", () => {
   });
 
   test("personalising the wilaya updates the header and can be persisted", async ({ page }) => {
-    await page.goto("/guest");
+    await openDashboard(page);
     await page.getByRole("button", { name: /تعديل/ }).click();
     const picker = page.getByRole("button", { name: /الولاية/ });
     await expect(picker).toBeVisible();
@@ -393,13 +419,6 @@ test.describe("guest mode", () => {
 
     await page.reload();
     await expect(page.getByText(/تقرت/).first()).toBeVisible();
-  });
-
-  test("guest dashboard links to the registration flow", async ({ page }) => {
-    await page.goto("/guest");
-    await page.getByRole("link", { name: /إنشاء حساب/ }).first().click();
-    await expect(page).toHaveURL(/\/register/);
-    await expect(page.getByRole("heading", { name: "إنشاء حساب جديد" })).toBeVisible();
   });
 });
 
@@ -423,12 +442,11 @@ test.describe("bilingual chrome", () => {
   });
 
   test("French dashboard copy is complete", async ({ page }) => {
-    await page.goto("/guest");
+    await openDashboard(page);
     await page.getByRole("button", { name: "Français" }).click();
     await expect(page.getByRole("heading", { name: "Météo et besoin en eau" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Calculateur d'irrigation" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Diagnostic de la feuille" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Créez un compte pour conserver votre exploitation" })).toBeVisible();
   });
 });
 

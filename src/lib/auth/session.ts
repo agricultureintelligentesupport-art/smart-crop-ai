@@ -74,14 +74,14 @@ export function clearAllLocalCache(): void {
 
 /**
  * True when `nextUid` belongs to a different signed-in user than the cached
- * profile. Guest records (no uid) never count as a switch: a guest upgrading
- * to a real account keeps their on-device choices (wilaya, role).
+ * profile. Records without a uid never count as a switch — there is nothing
+ * to switch away from.
  */
 export function isSwitchingAccounts(
   previous: StoredProfile | null,
   nextUid: string | null | undefined,
 ): boolean {
-  if (!previous || previous.isGuest) return false;
+  if (!previous) return false;
   if (!previous.uid || !nextUid) return false;
   return previous.uid !== nextUid;
 }
@@ -96,9 +96,9 @@ export interface SessionBinding {
 /**
  * Strict UID-bound profile resolution for a freshly authenticated session.
  *
- * Same user (or guest upgrade): the Firestore-backed session wins, with the
- * cached profile and device prefs as fallbacks for values the document does
- * not carry yet (e.g. onboarding completed while offline).
+ * Same user: the Firestore-backed session wins, with the cached profile and
+ * device prefs as fallbacks for values the document does not carry yet (e.g.
+ * onboarding completed while offline).
  *
  * Different user: the cached role/wilaya are DISCARDED — the session (synced
  * from `users/{uid}` before this runs) is the sole source of truth, and a

@@ -142,7 +142,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? undefined,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? null,
-          isGuest: false,
         };
       } catch (error) {
         return rethrow(error);
@@ -184,7 +183,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           phone: cred.user.phoneNumber ?? challenge.phone,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? null,
-          isGuest: false,
         };
       } catch (error) {
         return rethrow(error);
@@ -203,7 +201,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? email,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? null,
-          isGuest: false,
         };
       } catch (error) {
         return rethrow(error);
@@ -223,7 +220,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email,
           role: null,
           wilayaCode: null,
-          isGuest: false,
         };
       } catch (error) {
         return rethrow(error);
@@ -251,7 +247,6 @@ export function createFirebaseAuthGateway(): AuthGateway {
         email: user.email ?? undefined,
         role: patch.role ?? data.role ?? null,
         wilayaCode: patch.wilayaCode ?? data.wilayaCode ?? null,
-        isGuest: false,
       };
     },
 
@@ -322,15 +317,7 @@ export function createAuthGateway(): AuthGateway {
 | Wilaya/role persistence | `src/lib/auth/useAuthFlow.ts` | `saveProfile()` already writes through the gateway |
 | Firestore rules | Firebase console | `match /users/{uid} { allow read, write: if request.auth.uid == uid; }` |
 
-## 6. Guest mode
-
-`/guest` never touches the gateway: it writes a local record with
-`uid: null, isGuest: true` (`guestProfile()`). To migrate a guest to a real
-account later, call `linkWithCredential()` during `handleGoogleAuth` /
-`handleVerifyOTP` — the `SessionUser` shape is identical, so the dashboard
-needs no changes.
-
-## 7. Google: strict auth, account chooser, popup blocked and mobile
+## 6. Google: strict auth, account chooser, popup blocked and mobile
 
 **Strict rule:** the Google button ALWAYS performs real Firebase Auth — there
 is no on-device/mock session for it (the demo gateway's `signInWithGoogle`

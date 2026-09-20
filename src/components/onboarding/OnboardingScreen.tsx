@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion, useWillChange } from "framer-motion";
-import { ArrowLeft, ArrowRight, MoveHorizontal, UserPlus, UserRound } from "lucide-react";
+import { ArrowLeft, ArrowRight, LogIn, MoveHorizontal, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { memo, useCallback, useEffect, useState, type ComponentType } from "react";
 import { COPY, SLIDES, type Copy, type SlideId } from "@/lib/content";
@@ -67,7 +67,7 @@ export default function OnboardingScreen() {
   // Stable handlers → memoized HeaderBar / Controls skip re-renders on slide changes.
   const handleSkip = useCallback(() => goTo(last), [goTo, last]);
   const handleCreate = useCallback(() => router.push("/register"), [router]);
-  const handleGuest = useCallback(() => router.push("/guest"), [router]);
+  const handleSignIn = useCallback(() => router.push("/login"), [router]);
   const handleNext = useCallback(() => goTo(slide + 1), [goTo, slide]);
 
   const handleDragEnd = useCallback(
@@ -132,7 +132,7 @@ export default function OnboardingScreen() {
         onDot={goTo}
         onNext={handleNext}
         onCreate={handleCreate}
-        onGuest={handleGuest}
+        onSignIn={handleSignIn}
       />
     </div>
   );
@@ -212,7 +212,7 @@ const Controls = memo(function Controls({
   onDot,
   onNext,
   onCreate,
-  onGuest,
+  onSignIn,
 }: {
   t: Copy;
   slide: number;
@@ -221,7 +221,7 @@ const Controls = memo(function Controls({
   onDot: (i: number) => void;
   onNext: () => void;
   onCreate: () => void;
-  onGuest: () => void;
+  onSignIn: () => void;
 }) {
   return (
     <footer className="pb-safe relative z-20 shrink-0 px-6">
@@ -253,14 +253,14 @@ const Controls = memo(function Controls({
               </motion.button>
               <motion.button
                 type="button"
-                onClick={onGuest}
+                onClick={onSignIn}
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.97 }}
                 className="glass transform-gpu backface-hidden grid h-12 w-full place-items-center rounded-2xl text-[15px] font-extrabold text-emerald-900 transition-colors hover:bg-white/95"
               >
                 <span className="inline-flex items-center gap-2">
-                  <UserRound size={18} strokeWidth={2.2} />
-                  {t.continueGuest}
+                  <LogIn size={18} strokeWidth={2.2} />
+                  {t.signIn}
                 </span>
               </motion.button>
             </motion.div>

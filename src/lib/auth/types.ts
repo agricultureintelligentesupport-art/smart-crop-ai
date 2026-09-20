@@ -24,7 +24,6 @@ export interface SessionUser {
   role: AuthRole | null;
   /** Wilaya code filled in during step 3 (null until then). */
   wilayaCode: string | null;
-  isGuest: boolean;
 }
 
 /** Phone challenge returned by `sendOtp` and consumed by `verifyOtp`. */

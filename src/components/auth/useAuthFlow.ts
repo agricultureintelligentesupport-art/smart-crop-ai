@@ -33,7 +33,6 @@ import { createAuthGateway } from "@/lib/auth/gateway";
 import { syncUserDoc, type UserDocPatch } from "@/lib/auth/userDoc";
 import {
   clearProfile,
-  guestProfile,
   profileFromUser,
   readProfile,
   readPrefs,
@@ -388,7 +387,6 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         photoURL: fbUser.photoURL ?? (data.photoURL as string | null | undefined) ?? null,
         role: resolvedRole,
         wilayaCode: resolvedWilaya,
-        isGuest: false,
       };
     },
     [role, t, wilayaCode],
@@ -528,7 +526,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
    * expired/revoked token — every user-bound bit of wizard state drops back
    * to the Step 1 defaults instead of lingering for the next account.
    * Gateway-only sessions (demo / device OTP) never bound, so they are
-   * untouched; guests keep their on-device record (it carries no identity).
+   * untouched; the on-device profile of the bound account is dropped so the
+   * next account starts from a clean slate.
    */
   useEffect(() => {
     if (!isAuthReady(auth)) return;
@@ -550,8 +549,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       clearGoogleError();
       setNotice(null);
       setStep("method");
-      const cached = readProfile();
-      if (cached && !cached.isGuest) clearProfile();
+      clearProfile();
     });
     return unsubscribe;
   }, [clearErrors, clearGoogleError]);
@@ -749,7 +747,6 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
             email: fbUser.email ?? email.email.trim(),
             role: targetRole,
             wilayaCode: targetWilaya,
-            isGuest: false,
           };
         } catch (fbErr: unknown) {
           const errCode = (fbErr as { code?: string })?.code;
@@ -791,7 +788,6 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
             email: fbUser.email ?? email.email.trim(),
             role: resolvedRole,
             wilayaCode: resolvedWilaya,
-            isGuest: false,
           };
         } catch (fbErr: unknown) {
           const errCode = (fbErr as { code?: string })?.code;
@@ -895,7 +891,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       }
 
       let session = user;
-      if (user && !user.isGuest) {
+      if (user) {
         session = await gateway.saveProfile(user.uid, {
           role: role ?? undefined,
           wilayaCode: code,
@@ -912,7 +908,6 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
               displayName: currentFbUser?.displayName ?? "",
               role,
               wilayaCode: code,
-              isGuest: false,
             },
             { role, wilayaCode: code, lang },
           ),
@@ -927,24 +922,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     }
   }, [gateway, lang, role, user, wilayaCode]);
 
-  /* ---------------- Guest + dashboard ---------------- */
-
-  const handleGuestContinue = useCallback(
-    (code?: string) => {
-      const target = code ?? wilayaCode ?? DEFAULT_WILAYA_CODE;
-      writePrefs({ role: role ?? prefs.role, wilayaCode: target, lang });
-      writeProfile(
-        guestProfile({
-          wilayaCode: target,
-          role: role ?? undefined,
-          lang,
-          displayName: lang === "ar" ? "زائر" : "Invité",
-        }),
-      );
-      router.push("/guest");
-    },
-    [lang, prefs.role, role, router, wilayaCode],
-  );
+  /* ---------------- Dashboard ---------------- */
 
   const handleGoToDashboard = useCallback(() => {
     router.push("/dashboard");
@@ -1068,7 +1046,6 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     handleRoleConfirm,
     handleWilayaSelect,
     handleWilayaConfirm,
-    handleGuestContinue,
     handleGoToDashboard,
     handleSignOut,
     clearErrors,
