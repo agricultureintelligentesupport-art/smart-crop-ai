@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./auth/auth.css";
 
 /* Fonts are wired from next/font CSS variables in app/layout.tsx */
 @theme inline {
