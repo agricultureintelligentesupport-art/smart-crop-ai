@@ -127,6 +127,10 @@ export interface AuthCopy {
     profileSave: string;
     network: string;
     unknown: string;
+    firebaseTitle: string;
+    firebaseCode: string;
+    firebaseMessage: string;
+    firebaseConfig: string;
   };
   role: {
     title: string;
@@ -294,6 +298,10 @@ const AR: AuthCopy = {
     profileSave: "تم تسجيل الدخول، لكن تعذّر حفظ الملف على السحابة — تفصيلة في سجل المتصفح (console)",
     network: "تعذّر الاتصال، تحقّق من شبكتك",
     unknown: "حدث خطأ غير متوقع، أعد المحاولة",
+    firebaseTitle: "تفاصيل خطأ Firebase Auth",
+    firebaseCode: "الرمز",
+    firebaseMessage: "الرسالة الأصلية",
+    firebaseConfig: "مصدر إعداد Firebase",
   },
   role: {
     title: "تحديد صفة المستخدم",
@@ -484,6 +492,10 @@ const FR: AuthCopy = {
       "Connexion réussie, mais l'enregistrement du profil a échoué — détails dans la console du navigateur",
     network: "Connexion impossible, vérifiez votre réseau",
     unknown: "Une erreur inattendue est survenue, réessayez",
+    firebaseTitle: "Détails de l'erreur Firebase Auth",
+    firebaseCode: "Code",
+    firebaseMessage: "Message original",
+    firebaseConfig: "Source de la configuration Firebase",
   },
   role: {
     title: "تحديد صفة المستخدم",

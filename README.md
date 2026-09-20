@@ -47,7 +47,10 @@ Step 3 · wilaya     Searchable list of all 58 wilayas + climate preview
   `gateway.isDemo` is true.
 - **Firebase**: drop-in adapter + step-by-step wiring in
   [`docs/firebase-adapter.md`](docs/firebase-adapter.md). Flipping
-  `NEXT_PUBLIC_AUTH_BACKEND=firebase` is the only behavioural switch.
+  `NEXT_PUBLIC_AUTH_BACKEND=firebase` is the only behavioural switch. Google
+  Auth is always real Firebase Auth; its raw SDK code/message and runtime
+  project diagnostics are shown in the UI. See
+  [`docs/firebase-auth-diagnostics.md`](docs/firebase-auth-diagnostics.md).
 - **Persistence**: `src/lib/auth/profile.ts` keeps the session on-device
   (`localStorage`, mirroring `users/{uid}`), plus device preferences (role +
   wilaya) that survive signing out, so a returning farmer skips the setup steps.

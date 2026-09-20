@@ -1,9 +1,10 @@
 # Wiring Firebase Auth
 
-The auth flow never talks to an SDK directly. Every screen calls the
-`AuthGateway` interface in `src/lib/auth/types.ts`, which today is fulfilled by
-`createDemoGateway()`. Swapping in Firebase means adding one file and flipping
-one line — no component changes, no prop drilling, no new state.
+Phone and e-mail screens use the `AuthGateway` interface in
+`src/lib/auth/types.ts`. Google is intentionally a strict exception: its
+button calls the real Firebase Auth popup/redirect path so a demo session can
+never masquerade as a Firebase user. The gateway still provides the local
+phone/e-mail demo until `NEXT_PUBLIC_AUTH_BACKEND=firebase` is enabled.
 
 ## 1. Where the seam is
 
@@ -18,9 +19,10 @@ AuthGateway  (src/lib/auth/types.ts)
         └── createFirebaseAuthGateway()   ← this document
 ```
 
-`useAuthFlow` only knows the interface: it awaits a `SessionUser`, an
-`OtpChallenge` or an `AuthErrorCode`. Anything the SDK throws is funnelled
-through `toAuthErrorCode()` so the copy table keeps working.
+The non-Google handlers await a `SessionUser`, an `OtpChallenge` or an
+`AuthErrorCode`. Anything the SDK throws is funnelled through
+`toAuthErrorCode()` so the copy table keeps working; Google additionally keeps
+the original Firebase `code` and `message` for the diagnostic alert.
 
 ## 2. Install and configure
 

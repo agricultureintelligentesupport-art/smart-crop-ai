@@ -3,6 +3,28 @@
  * Firebase adapter (see `docs/firebase-adapter.md`).
  */
 
+export interface FirebaseAuthErrorDetails {
+  /** The exact SDK code, for example `auth/unauthorized-domain`. */
+  code: string;
+  /** The exact SDK message, kept separate from localised friendly copy. */
+  message: string;
+}
+
+/** Preserve the raw Firebase error before mapping it to localised UI copy. */
+export function getFirebaseAuthErrorDetails(error: unknown): FirebaseAuthErrorDetails {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = (error as { message?: unknown } | null)?.message;
+  return {
+    code: typeof code === "string" && code ? code : "auth/unknown",
+    message:
+      typeof message === "string" && message
+        ? message
+        : error instanceof Error
+          ? error.message
+          : String(error),
+  };
+}
+
 export type AuthMethod = "google" | "phone" | "email";
 
 /** Which side of the email tab the user is on. */

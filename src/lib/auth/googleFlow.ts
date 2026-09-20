@@ -27,6 +27,8 @@ export interface GoogleAuthRunner {
   isMobile?: boolean;
   /** UI feedback hook, called right before any redirect is initiated. */
   onRedirectStart?: () => void;
+  /** Keep the unmodified SDK error available to the interface. */
+  onError?: (operation: "signInWithPopup" | "signInWithRedirect", error: unknown) => void;
 }
 
 export type GoogleAuthOutcome =
@@ -61,6 +63,7 @@ async function startRedirect(runner: GoogleAuthRunner): Promise<GoogleAuthOutcom
     return { kind: "redirect-started" };
   } catch (error) {
     logAuthError("signInWithRedirect", error);
+    runner.onError?.("signInWithRedirect", error);
     return { kind: "failed", code: toAuthErrorCode(error) };
   }
 }
@@ -82,6 +85,7 @@ export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleA
     cred = await runner.signInWithPopup();
   } catch (popupErr: unknown) {
     logAuthError("signInWithPopup", popupErr);
+    runner.onError?.("signInWithPopup", popupErr);
     const errCode = fbCode(popupErr);
 
     // The user deliberately closed/cancelled the account chooser: never drag
@@ -107,6 +111,7 @@ export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleA
     const error = new Error("Google sign-in resolved without a Firebase user");
     (error as { code?: string }).code = "auth/internal-error";
     logAuthError("signInWithPopup (no user)", error);
+    runner.onError?.("signInWithPopup", error);
     return { kind: "failed", code: "unknown" };
   }
 

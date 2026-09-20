@@ -59,6 +59,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let authUnsub: (() => void) | null = null;
 
     if (!auth || !(auth as { app?: unknown }).app) {
+      // Firebase may be intentionally unavailable when a production build is
+      // missing NEXT_PUBLIC_FIREBASE_* values. Do not leave every consumer in
+      // an eternal loading state; the auth screen renders the initialization
+      // diagnostic itself.
+      setLoading(false);
       return;
     }
 

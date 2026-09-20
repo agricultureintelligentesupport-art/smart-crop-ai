@@ -25,6 +25,7 @@ import {
   Divider,
   EASE_OUT,
   FieldError,
+  FirebaseAuthErrorAlert,
   FOCUS_RING,
   GPU,
   LiveRegion,
@@ -189,10 +190,27 @@ function GoogleButton({ flow }: { flow: FlowController }) {
           </>
         )}
       </motion.button>
-      {flow.googleError ? (
-        <FieldError>{flow.googleError}</FieldError>
+      {flow.googleError ? <FieldError>{flow.googleError}</FieldError> : null}
+      {flow.firebaseAuthError ? (
+        <FirebaseAuthErrorAlert
+          error={flow.firebaseAuthError}
+          labels={{
+            title: t.errors.firebaseTitle,
+            code: t.errors.firebaseCode,
+            message: t.errors.firebaseMessage,
+            config: t.errors.firebaseConfig,
+          }}
+          configSource={flow.firebaseRuntimeConfig.source}
+          projectId={flow.firebaseRuntimeConfig.projectId}
+        />
       ) : (
         <p className="text-center text-[10.5px] font-semibold text-emerald-900/55">{t.method.googleNote}</p>
+      )}
+      {flow.firebaseRuntimeConfig.source !== "environment" && (
+        <p role="status" className="text-center text-[10px] font-bold text-amber-800/80">
+          {t.errors.firebaseConfig}: {flow.firebaseRuntimeConfig.source}
+          {flow.firebaseRuntimeConfig.projectId ? ` · ${flow.firebaseRuntimeConfig.projectId}` : ""}
+        </p>
       )}
     </div>
   );

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type { HTMLMotionProps } from "framer-motion";
+import type { FirebaseAuthErrorDetails } from "@/lib/auth/types";
 
 /* ------------------------------------------------------------------ */
 /*  Motion tokens — one spring language across the whole flow          */
@@ -135,6 +136,56 @@ export function FieldError({ id, children }: { id?: string; children: ReactNode 
       <CircleAlert size={13} strokeWidth={2.6} className="mt-[3px] shrink-0" aria-hidden />
       <span>{children}</span>
     </p>
+  );
+}
+
+/**
+ * The friendly message is useful for normal users, but it is not enough to
+ * debug Firebase Console setup. Keep the raw SDK code and message visible in
+ * an assertive alert so errors such as auth/unauthorized-domain are actionable
+ * without opening DevTools.
+ */
+export function FirebaseAuthErrorAlert({
+  error,
+  labels,
+  configSource,
+  projectId,
+}: {
+  error: FirebaseAuthErrorDetails;
+  labels: {
+    title: string;
+    code: string;
+    message: string;
+    config: string;
+  };
+  configSource: string;
+  projectId: string | null;
+}) {
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex flex-col gap-2 rounded-2xl border-2 border-rose-300 bg-rose-50 p-3 text-start text-rose-950 shadow-[0_8px_24px_-16px_rgba(159,18,57,0.8)]"
+    >
+      <p className="flex items-center gap-2 text-[12.5px] font-black">
+        <CircleAlert size={16} strokeWidth={2.8} aria-hidden />
+        {labels.title}
+      </p>
+      <dl className="grid gap-1 text-[11px] leading-5">
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <dt className="font-black">{labels.code}</dt>
+          <dd className="min-w-0 break-all font-mono font-bold">{error.code}</dd>
+        </div>
+        <div className="grid grid-cols-[auto_1fr] gap-x-2">
+          <dt className="font-black">{labels.message}</dt>
+          <dd className="min-w-0 break-words font-mono">{error.message}</dd>
+        </div>
+      </dl>
+      <p className="border-t border-rose-200 pt-1 text-[10.5px] font-semibold leading-5">
+        {labels.config}: <span className="font-mono font-bold">{configSource}</span>
+        {projectId ? <span className="font-mono"> · {projectId}</span> : null}
+      </p>
+    </div>
   );
 }
 

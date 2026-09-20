@@ -15,7 +15,12 @@ import { GoogleAuthProvider } from "firebase/auth";
 import { initializeFirestore, type Firestore } from "firebase/firestore";
 
 import { googleProvider } from "../../src/lib/firebase";
-import { AUTH_ERROR_CODES, AuthError, toAuthErrorCode } from "../../src/lib/auth/types";
+import {
+  AUTH_ERROR_CODES,
+  AuthError,
+  getFirebaseAuthErrorDetails,
+  toAuthErrorCode,
+} from "../../src/lib/auth/types";
 import { isMobileBrowser } from "../../src/lib/auth/platform";
 import { logAuthError } from "../../src/lib/auth/logging";
 import { syncUserDoc } from "../../src/lib/auth/userDoc";
@@ -63,6 +68,19 @@ test("AUTH_ERROR_CODES contains the new Google failure codes", () => {
   for (const code of ["popup-blocked", "unauthorized-domain", "operation-not-supported", "popup-closed"]) {
     assert.ok(codes.includes(code), `missing ${code}`);
   }
+});
+
+test("getFirebaseAuthErrorDetails preserves the raw SDK code and message", () => {
+  assert.deepEqual(
+    getFirebaseAuthErrorDetails({
+      code: "auth/operation-not-allowed",
+      message: "This provider is disabled for this project.",
+    }),
+    {
+      code: "auth/operation-not-allowed",
+      message: "This provider is disabled for this project.",
+    },
+  );
 });
 
 /* ------------------------------------------------------------------ */

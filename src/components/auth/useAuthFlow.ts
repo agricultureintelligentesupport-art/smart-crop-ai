@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  browserLocalPersistence,
   createUserWithEmailAndPassword,
   getRedirectResult,
   onAuthStateChanged,
@@ -10,11 +11,12 @@ import {
   signInWithPopup,
   signInWithRedirect,
   signOut as fbSignOut,
+  setPersistence,
   updateProfile,
   type User,
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { auth, db, googleProvider } from "@/lib/firebase";
+import { auth, db, firebaseRuntimeConfig, googleProvider } from "@/lib/firebase";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
 import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
 import { runGoogleSignIn } from "@/lib/auth/googleFlow";
@@ -32,8 +34,10 @@ import {
 } from "@/lib/auth/profile";
 import {
   AuthError,
+  getFirebaseAuthErrorDetails,
   toAuthErrorCode,
   type AuthErrorCode,
+  type FirebaseAuthErrorDetails,
   type AuthRole,
   type EmailIntent,
   type OtpChallenge,
@@ -69,6 +73,23 @@ export type FieldErrors = Partial<Record<EmailField | "phone" | "otp", string>>;
 
 const EMPTY_EMAIL: EmailFormState = { name: "", email: "", password: "", confirm: "" };
 const MAX_OTP_ATTEMPTS = 4;
+const GOOGLE_REDIRECT_MARKER = "smart-crop.google-redirect.v1";
+
+function readRedirectMarker(): string | null {
+  try {
+    return window.sessionStorage.getItem(GOOGLE_REDIRECT_MARKER);
+  } catch {
+    return null;
+  }
+}
+
+function clearRedirectMarker(): void {
+  try {
+    window.sessionStorage.removeItem(GOOGLE_REDIRECT_MARKER);
+  } catch {
+    // Storage is diagnostic only; it cannot be allowed to break auth.
+  }
+}
 
 /**
  * Owns the entire multi-step auth workflow: form state, validation, the
@@ -105,8 +126,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const [user, setUser] = useState<SessionUser | null>(null);
   const [busy, setBusy] = useState<BusyState>(null);
   const [errorCode, setErrorCode] = useState<AuthErrorCode | null>(null);
-  /** Google-specific failure copy, rendered right under the Google button. */
+  /** Google-specific friendly copy, rendered under the Google button. */
   const [googleError, setGoogleError] = useState<string | null>(null);
+  /** Never discard the raw Firebase code/message behind the friendly copy. */
+  const [firebaseAuthError, setFirebaseAuthError] = useState<FirebaseAuthErrorDetails | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
@@ -145,6 +168,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
 
   const clearErrors = useCallback(() => {
     setErrorCode(null);
+    setFirebaseAuthError(null);
     setFieldErrors({});
   }, []);
 
@@ -311,6 +335,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     }));
   }, []);
 
+  const exposeFirebaseError = useCallback((error: unknown) => {
+    if (mounted.current) setFirebaseAuthError(getFirebaseAuthErrorDetails(error));
+  }, []);
+
   /**
    * THE post-auth success handler, shared by every path that completes a
    * real Firebase sign-in:
@@ -339,10 +367,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       } catch (error) {
         logAuthError(`${source}-post-auth`, error);
         pendingGoogleUid.current = null;
+        exposeFirebaseError(error);
         if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
       }
     },
-    [afterAuth, buildSyncedSession, copyFor, prefillProfileFields],
+    [afterAuth, buildSyncedSession, copyFor, exposeFirebaseError, prefillProfileFields],
   );
 
   /* ---------------- Google redirect result ----------------
@@ -357,19 +386,40 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   useEffect(() => {
     if (redirectChecked.current) return;
     if (typeof window === "undefined") return;
-    if (!auth || !(auth as { app?: unknown }).app) return;
     redirectChecked.current = true;
+
+    if (!auth || !(auth as { app?: unknown }).app) {
+      const initError = firebaseRuntimeConfig.initializationError;
+      if (initError && mounted.current) {
+        setFirebaseAuthError(initError);
+        setGoogleError(initError.message);
+      }
+      return;
+    }
 
     (async () => {
       let redirectUser: User | null = null;
       let redirectError: unknown = null;
       try {
+        // This is intentionally called on every fresh page load. Firebase
+        // consumes the one-shot redirect result here; null is normal when the
+        // page was opened directly and is not a fake sign-in.
         const result = await getRedirectResult(auth);
         redirectUser = result?.user ?? null;
       } catch (error) {
         redirectError = error;
         logAuthError("getRedirectResult", error);
+        exposeFirebaseError(error);
       }
+
+      const marker = readRedirectMarker();
+      logAuthInfo(
+        "getRedirectResult",
+        `completed with ${redirectUser?.uid ? `Firebase user ${redirectUser.uid}` : "null"}; ` +
+          `redirect marker=${marker ? "present" : "absent"}; ` +
+          `auth.currentUser=${auth.currentUser?.uid ?? "null"}. ` +
+          "A null result is recovered by onAuthStateChanged when Firebase restored the session.",
+      );
 
       // Strict gate: complete only with a Firebase user that carries a uid.
       const decision = resolveGoogleReturn({
@@ -380,13 +430,14 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         onMethodStep: true,
       });
       if (decision.kind === "complete") {
+        clearRedirectMarker();
         logAuthInfo("google", `redirect sign-in complete (uid ${decision.user.uid})`);
         void handlePostAuthSuccess(decision.user, "redirect");
         return;
       }
       if (redirectError && mounted.current) setGoogleError(copyFor(toAuthErrorCode(redirectError)));
     })();
-  }, [copyFor, handlePostAuthSuccess]);
+  }, [copyFor, exposeFirebaseError, handlePostAuthSuccess]);
 
   /* ---------------- Restored Firebase session ----------------
    * Safety net for the case the redirect payload never arrives while the
@@ -429,16 +480,67 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setBusy("google");
 
     try {
+      if (!auth || !(auth as { app?: unknown }).app) {
+        const error =
+          firebaseRuntimeConfig.initializationError ??
+          getFirebaseAuthErrorDetails(
+            Object.assign(new Error("Firebase Auth is not initialized"), {
+              code: "auth/configuration-missing",
+            }),
+          );
+        exposeFirebaseError(error);
+        setGoogleError(error.message);
+        return;
+      }
+
+      // Make the redirect hand-off explicit. Firebase's default persistence is
+      // usually local, but relying on an implicit default is exactly what
+      // makes a browser return with getRedirectResult(null) in restricted
+      // storage/preview environments.
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+      } catch (error) {
+        logAuthError("setPersistence(browserLocalPersistence)", error);
+        exposeFirebaseError(error);
+        // Continue to the provider call: popup sign-in can still succeed, and
+        // the raw persistence error is now visible if the redirect fails.
+      }
+
       // Google sign-in ALWAYS goes through real Firebase Auth — there is no
-      // on-device/mock session for it. runGoogleSignIn() only ever produces
-      // `signed-in` from a valid Firebase user object (popup, or the redirect
-      // consumed below), so the wizard can never advance without real auth.
+      // on-device/mock session for it. Each SDK call has its own try/catch so
+      // the original Firebase code/message reaches the alert below.
       const outcome = await runGoogleSignIn({
-        signInWithPopup: () => signInWithPopup(auth, googleProvider),
-        signInWithRedirect: () => signInWithRedirect(auth, googleProvider),
+        signInWithPopup: async () => {
+          try {
+            return await signInWithPopup(auth, googleProvider);
+          } catch (error) {
+            logAuthError("signInWithPopup", error);
+            exposeFirebaseError(error);
+            throw error;
+          }
+        },
+        signInWithRedirect: async () => {
+          try {
+            return await signInWithRedirect(auth, googleProvider);
+          } catch (error) {
+            logAuthError("signInWithRedirect", error);
+            exposeFirebaseError(error);
+            throw error;
+          }
+        },
         onRedirectStart: () => {
+          try {
+            window.sessionStorage.setItem(
+              GOOGLE_REDIRECT_MARKER,
+              JSON.stringify({ startedAt: Date.now(), origin: window.location.origin }),
+            );
+          } catch {
+            // The SDK error/redirect result still decides auth; this marker is
+            // diagnostic only and must never block Google.
+          }
           if (mounted.current) setNotice(t.method.googleRedirecting);
         },
+        onError: (_operation, error) => exposeFirebaseError(error),
       });
 
       if (outcome.kind === "signed-in") {
@@ -466,11 +568,12 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       else setGoogleError(copyFor(outcome.code));
     } catch (error: unknown) {
       logAuthError("handleGoogleAuth", error);
+      exposeFirebaseError(error);
       if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [clearErrors, copyFor, handlePostAuthSuccess, t]);
+  }, [clearErrors, copyFor, exposeFirebaseError, handlePostAuthSuccess, t]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 
@@ -874,6 +977,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     errorCode,
     errorMessage,
     googleError,
+    firebaseAuthError,
+    firebaseRuntimeConfig,
     fieldErrors,
     notice,
     emailStrength,
