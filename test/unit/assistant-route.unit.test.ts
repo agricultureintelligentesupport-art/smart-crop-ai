@@ -280,9 +280,9 @@ test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async
   // the vision model is touched when Stage 1 answers.
   assert.equal(calls.length, 1);
   const { url, init } = calls[0];
-  assert.match(
+  assert.equal(
     url,
-    /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-1\.5-flash:generateContent\?/,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), "gemini-1.5-flash");
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -406,6 +406,41 @@ for (const [name, failure] of [
     assert.equal(requestedGeminiModel(urls[0]), "gemini-1.5-flash");
     assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
     assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  });
+}
+
+for (const [name, status, body, expectedDetail] of [
+  [
+    "structured Google error",
+    429,
+    JSON.stringify({
+      error: {
+        code: 429,
+        message: "Quota exhausted.",
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ description: "Diagnostic details. ".repeat(50) }],
+      },
+    }),
+    "HTTP 429 — Quota exhausted.",
+  ],
+  ["plain-text error", 502, "Bad gateway\nUpstream unavailable.", "HTTP 502 — Bad gateway"],
+  ["empty error", 500, "", "HTTP 500"],
+] as const) {
+  test(`Stage 1 logs the exact status and full ${name} while preserving fallback`, async () => {
+    configureKeys();
+    const errorLog = mock.method(console, "error", () => {});
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isGeminiUrl(String(url))) return new Response(body, { status });
+      return chatReply();
+    });
+
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "llm");
+    assert.ok(warningText(payload).includes(expectedDetail));
+    assert.equal(errorLog.mock.callCount(), 1);
+    assert.deepEqual(errorLog.mock.calls[0].arguments, ["[Gemini Error]", status, body]);
   });
 }
 
