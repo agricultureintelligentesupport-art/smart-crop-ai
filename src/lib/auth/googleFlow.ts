@@ -1,7 +1,8 @@
 import type { User } from "firebase/auth";
+import { describeAuthError, type AuthErrorReport } from "./errorReport";
 import { logAuthError, logAuthInfo } from "./logging";
 import { isMobileBrowser } from "./platform";
-import { toAuthErrorCode, type AuthErrorCode } from "./types";
+import { AuthError, type AuthErrorCode } from "./types";
 
 /**
  * Strict Google sign-in decision logic — pure and unit-testable.
@@ -15,6 +16,13 @@ import { toAuthErrorCode, type AuthErrorCode } from "./types";
  */
 
 export interface GoogleAuthRunner {
+  /**
+   * Session persistence, awaited BEFORE the popup/redirect is initiated:
+   * `setPersistence(auth, browserLocalPersistence)`. Without it a full-page
+   * redirect comes back to an auth instance that cannot store the session and
+   * the user silently lands on step 1 again.
+   */
+  ensurePersistence?: () => Promise<boolean | void>;
   /** Desktop popup. Resolves with the Firebase user credential or rejects. */
   signInWithPopup: () => Promise<{ user: User }>;
   /**
@@ -38,10 +46,10 @@ export type GoogleAuthOutcome =
    */
   | { kind: "redirect-started" }
   /** The user closed or cancelled the account chooser: retry offered, never advance. */
-  | { kind: "user-cancelled" }
+  | { kind: "user-cancelled"; report: AuthErrorReport }
   /** Firebase console setup problem (Authorized domains): surfaced, never retried. */
-  | { kind: "unauthorized-domain" }
-  | { kind: "failed"; code: AuthErrorCode };
+  | { kind: "unauthorized-domain"; report: AuthErrorReport }
+  | { kind: "failed"; code: AuthErrorCode; report: AuthErrorReport };
 
 const CANCELLED_CODES = [
   "auth/popup-closed-by-user",
@@ -54,14 +62,32 @@ function fbCode(error: unknown): string | undefined {
   return (error as { code?: unknown } | null)?.code as string | undefined;
 }
 
+/**
+ * Runs the persistence hook (when the caller provides one) before touching the
+ * SDK. A persistence failure is logged but never blocks sign-in: the session
+ * then lives in memory for this page load, and the UI shows the reason in its
+ * diagnostics block.
+ */
+async function ensurePersistenceBeforeSignIn(runner: GoogleAuthRunner, scope: string): Promise<void> {
+  if (!runner.ensurePersistence) return;
+  try {
+    const ok = await runner.ensurePersistence();
+    if (ok === false) logAuthInfo(scope, "browserLocalPersistence unavailable — continuing in-memory");
+  } catch (error) {
+    logAuthError(`${scope}/setPersistence`, error);
+  }
+}
+
 async function startRedirect(runner: GoogleAuthRunner): Promise<GoogleAuthOutcome> {
+  await ensurePersistenceBeforeSignIn(runner, "signInWithRedirect");
   runner.onRedirectStart?.();
   try {
     await runner.signInWithRedirect();
     return { kind: "redirect-started" };
   } catch (error) {
     logAuthError("signInWithRedirect", error);
-    return { kind: "failed", code: toAuthErrorCode(error) };
+    const report = describeAuthError(error, "signInWithRedirect");
+    return { kind: "failed", code: report.appCode, report };
   }
 }
 
@@ -77,23 +103,26 @@ export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleA
     return startRedirect(runner);
   }
 
+  await ensurePersistenceBeforeSignIn(runner, "signInWithPopup");
+
   let cred: { user: User } | undefined;
   try {
     cred = await runner.signInWithPopup();
   } catch (popupErr: unknown) {
     logAuthError("signInWithPopup", popupErr);
+    const report = describeAuthError(popupErr, "signInWithPopup");
     const errCode = fbCode(popupErr);
 
     // The user deliberately closed/cancelled the account chooser: never drag
     // them into a full-page redirect — stay on step 1 and offer a retry.
     if (CANCELLED_CODES.includes(errCode ?? "")) {
-      return { kind: "user-cancelled" };
+      return { kind: "user-cancelled", report };
     }
 
     // A redirect would fail identically: this is a Firebase-console setup
     // problem (Authorized domains), so surface it instead of retrying.
     if (errCode === "auth/unauthorized-domain") {
-      return { kind: "unauthorized-domain" };
+      return { kind: "unauthorized-domain", report };
     }
 
     // Popup blocked or unsupported environment (mobile web view, headless,
@@ -104,10 +133,13 @@ export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleA
 
   // Strict gate: the wizard only advances with a valid Firebase user object.
   if (!cred?.user?.uid) {
-    const error = new Error("Google sign-in resolved without a Firebase user");
-    (error as { code?: string }).code = "auth/internal-error";
+    const error = new AuthError(
+      "unknown",
+      "Google sign-in resolved without a Firebase user (no uid)",
+      "auth/internal-error",
+    );
     logAuthError("signInWithPopup (no user)", error);
-    return { kind: "failed", code: "unknown" };
+    return { kind: "failed", code: "unknown", report: describeAuthError(error, "signInWithPopup") };
   }
 
   return { kind: "signed-in", user: cred.user };

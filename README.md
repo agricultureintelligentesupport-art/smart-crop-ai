@@ -46,11 +46,28 @@ Step 3 · wilaya     Searchable list of all 58 wilayas + climate preview
   exists. The demo SMS code is `123456` and is shown in the UI while
   `gateway.isDemo` is true.
 - **Firebase**: drop-in adapter + step-by-step wiring in
-  [`docs/firebase-adapter.md`](docs/firebase-adapter.md). Flipping
-  `NEXT_PUBLIC_AUTH_BACKEND=firebase` is the only behavioural switch.
-- **Persistence**: `src/lib/auth/profile.ts` keeps the session on-device
-  (`localStorage`, mirroring `users/{uid}`), plus device preferences (role +
-  wilaya) that survive signing out, so a returning farmer skips the setup steps.
+  [`docs/firebase-adapter.md`](docs/firebase-adapter.md).
+  `NEXT_PUBLIC_AUTH_BACKEND` is the only behavioural switch: `firebase` (real
+  Auth), `auto` (Firebase when the config is complete, demo otherwise) or
+  `demo` — the default when the variable is unset.
+- **Firebase environment**: every `NEXT_PUBLIC_FIREBASE_*` variable is read
+  once, statically, in `src/lib/firebase-env.ts` (the only place `process.env`
+  is touched), so Next.js can inline it into both the server and the browser
+  bundle. See [`.env.example`](.env.example). Missing variables fall back to
+  the documented project **and are reported** — never silently ignored.
+- **Auth failure reporting**: `signInWithPopup`, `signInWithRedirect` and
+  `getRedirectResult` are wrapped end to end. Any rejection renders the raw
+  `error.code` + `error.message` under the Google button, together with a
+  localized sentence, an actionable hint and a diagnostics table (backend,
+  project, authDomain, origin, authorized-domain check, iframe warning,
+  `browserLocalPersistence` state) — plus a "copy details" button.
+- **Session persistence**: `setPersistence(auth, browserLocalPersistence)` is
+  awaited *before* every popup/redirect (`ensureAuthPersistence()` in
+  `src/lib/firebase.ts`), so a redirect return is not lost on the way back.
+- **Persistence (device)**: `src/lib/auth/profile.ts` keeps the session
+  on-device (`localStorage`, mirroring `users/{uid}`), plus device preferences
+  (role + wilaya) that survive signing out, so a returning farmer skips the
+  setup steps.
 
 ## The dashboard
 

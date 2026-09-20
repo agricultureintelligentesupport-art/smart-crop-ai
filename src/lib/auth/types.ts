@@ -50,6 +50,7 @@ export const AUTH_ERROR_CODES = [
   "too-many-requests",
   "popup-closed",
   "popup-blocked",
+  "storage-blocked",
   "unauthorized-domain",
   "operation-not-supported",
   "network",
@@ -58,14 +59,23 @@ export const AUTH_ERROR_CODES = [
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];
 
-/** Thin wrapper so the UI can map failures onto localised copy. */
+/**
+ * Thin wrapper so the UI can map failures onto localised copy.
+ *
+ * `firebaseCode` + `message` keep the raw provider facts (`auth/popup-blocked`
+ * and the SDK's own sentence) attached to the error, so the UI can render them
+ * under the localized copy — see `errorReport.ts`.
+ */
 export class AuthError extends Error {
   readonly code: AuthErrorCode;
+  /** Raw provider code, when the failure came from the SDK. */
+  readonly firebaseCode?: string;
 
-  constructor(code: AuthErrorCode, message?: string) {
+  constructor(code: AuthErrorCode, message?: string, firebaseCode?: string) {
     super(message ?? code);
     this.name = "AuthError";
     this.code = code;
+    this.firebaseCode = firebaseCode;
   }
 }
 
@@ -96,7 +106,10 @@ export function toAuthErrorCode(error: unknown): AuthErrorCode {
       case "auth/redirect-cancelled-by-user":
         return "popup-closed";
       case "auth/popup-blocked":
+      case "auth/popup-blocked-by-browser":
         return "popup-blocked";
+      case "auth/web-storage-unsupported":
+        return "storage-blocked";
       case "auth/unauthorized-domain":
         return "unauthorized-domain";
       case "auth/operation-not-supported-in-this-environment":

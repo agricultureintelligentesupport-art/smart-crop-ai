@@ -2,10 +2,8 @@
 
 import {
   RecaptchaVerifier,
-  browserLocalPersistence,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
-  setPersistence,
   signInWithEmailAndPassword,
   signInWithPhoneNumber,
   signInWithPopup,
@@ -14,10 +12,10 @@ import {
   type ConfirmationResult,
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { auth, db, googleProvider } from "@/lib/firebase";
+import { auth, db, ensureAuthPersistence, googleProvider } from "@/lib/firebase";
+import { describeAuthError } from "./errorReport";
 import {
   AuthError,
-  toAuthErrorCode,
   type AuthGateway,
   type AuthRole,
   type OtpChallenge,
@@ -31,6 +29,16 @@ import { syncUserDoc } from "./userDoc";
 import { getWilaya } from "@/lib/wilayas";
 
 type FirebaseChallenge = OtpChallenge & { result: ConfirmationResult };
+
+/**
+ * Converts an SDK rejection into an `AuthError` that keeps BOTH the localisable
+ * app code and the raw provider facts (`error.code`, `error.message`), so the
+ * UI panel can show exactly what Firebase said.
+ */
+function toAdapterError(error: unknown, scope: string): AuthError {
+  const report = describeAuthError(error, scope);
+  return new AuthError(report.appCode, report.message, report.code);
+}
 
 async function loadProfile(uid: string) {
   try {
@@ -54,13 +62,9 @@ export function createFirebaseAuthGateway(): AuthGateway {
 
     async signInWithGoogle(): Promise<SessionUser> {
       try {
-        if (typeof window !== "undefined") {
-          try {
-            await setPersistence(auth, browserLocalPersistence);
-          } catch {
-            // Browser environment may restrict 3rd-party persistence
-          }
-        }
+        // Persistence FIRST: the popup/redirect session must be written to
+        // localStorage, not just kept in memory for this page load.
+        await ensureAuthPersistence("signInWithGoogle");
         const cred = await signInWithPopup(auth, googleProvider);
         logAuthInfo("signInWithPopup", `complete (uid ${cred.user.uid})`);
         // Reliable users/{uid} sync (merge + retry + logging) — the same
@@ -87,7 +91,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
         };
       } catch (error) {
         logAuthError("signInWithGoogle (gateway)", error);
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "signInWithGoogle");
       }
     },
 
@@ -113,7 +117,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
           result,
         } satisfies FirebaseChallenge;
       } catch (error) {
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "firebase/sendOtp");
       }
     },
 
@@ -132,7 +136,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
           isGuest: false,
         };
       } catch (error) {
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "firebase/verifyOtp");
       }
     },
 
@@ -150,7 +154,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
           isGuest: false,
         };
       } catch (error) {
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "firebase/signInWithEmail");
       }
     },
 
@@ -183,7 +187,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
           isGuest: false,
         };
       } catch (error) {
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "firebase/registerWithEmail");
       }
     },
 
@@ -191,7 +195,7 @@ export function createFirebaseAuthGateway(): AuthGateway {
       try {
         await sendPasswordResetEmail(auth, email);
       } catch (error) {
-        throw new AuthError(toAuthErrorCode(error));
+        throw toAdapterError(error, "firebase/requestPasswordReset");
       }
     },
 
