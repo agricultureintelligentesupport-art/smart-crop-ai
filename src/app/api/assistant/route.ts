@@ -24,6 +24,12 @@
  * with HTTP 500 so the caller can identify exactly which stage failed.
  */
 
+import {
+  GoogleGenerativeAI,
+  HarmBlockThreshold,
+  HarmCategory,
+  type Part,
+} from "@google/generative-ai";
 import { NextResponse, type NextRequest } from "next/server";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
@@ -57,8 +63,12 @@ const HF_PLANT_MODELS = [
 const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
 
+/**
+ * Bare model id for `GoogleGenerativeAI.getGenerativeModel()`.
+ * Do not prepend `models/` — the `@google/generative-ai` SDK adds that
+ * namespace itself (`models/${id}`), and a manual prefix 404s on v1beta.
+ */
 const GEMINI_MODEL = "gemini-1.5-flash";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 /** ~6 MB of raw base64 ≈ 4.5 MB image — plenty for a leaf photo. */
 const MAX_IMAGE_B64_CHARS = 6 * 1024 * 1024;
@@ -303,11 +313,6 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .join("\n");
 }
 
-interface GeminiPart {
-  text?: string;
-  inline_data?: { mime_type: string; data: string };
-}
-
 /**
  * Strict Step 2: localized reasoning via Gemini 1.5 Flash.
  * - Passes the PlantVillage label + confidence from Step 1 directly into Gemini,
@@ -322,7 +327,7 @@ async function askGeminiStrict(
   diagnosis: AssistantDiagnosis | null,
   image: { data: string; mimeType: string } | null,
 ): Promise<string> {
-  const userParts: GeminiPart[] = [];
+  const userParts: Part[] = [];
 
   const sections = [
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
@@ -341,58 +346,34 @@ async function askGeminiStrict(
   // Attach the photo too: Gemini can double-check the vision verdict and
   // spot context the classifier ignores (pests, nutrient burn, wilt).
   if (image) {
-    userParts.push({ inline_data: { mime_type: image.mimeType, data: image.data } });
+    userParts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
   }
 
+  const genAI = new GoogleGenerativeAI(apiKey);
+  // Bare id only — do not pass "models/gemini-1.5-flash"; the SDK prefixes models/.
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    systemInstruction: SYSTEM_PROMPT,
+    generationConfig: {
+      temperature: 0.55,
+      topP: 0.9,
+      maxOutputTokens: 1400,
+    },
+    safetySettings: [
+      {
+        category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+      },
+    ],
+  });
+
   try {
-    const res = await timedFetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts: userParts }],
-        generationConfig: {
-          temperature: 0.55,
-          topP: 0.9,
-          maxOutputTokens: 1400,
-        },
-        safetySettings: [
-          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" },
-        ],
-      }),
-    });
-
-    if (!res.ok) {
-      let bodyText = "";
-      try {
-        bodyText = await res.text();
-      } catch {
-        bodyText = res.statusText;
-      }
-      let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 600)}` : ""}`;
-      try {
-        const j = JSON.parse(bodyText) as { error?: { message?: string } | string };
-        if (typeof j?.error === "string") detail = `HTTP ${res.status} — ${j.error}`;
-        else if (typeof j?.error?.message === "string") detail = `HTTP ${res.status} — ${j.error.message}`;
-      } catch {
-        // keep raw
-      }
-      throw new Error(`Gemini Error: ${detail}`);
-    }
-
-    const json: unknown = await res.json();
-    const text = (
-      json as {
-        candidates?: { content?: { parts?: { text?: string }[] } }[];
-      }
-    )?.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text ?? "")
-      .join("")
-      .trim();
+    const result = await model.generateContent(userParts, { timeout: UPSTREAM_TIMEOUT_MS });
+    const text = result.response.text()?.trim() ?? "";
 
     if (!text || text.length === 0) {
       throw new Error(
-        `Gemini Error: Empty response from Gemini 1.5 Flash (no candidates). Raw: ${JSON.stringify(json).slice(0, 800)}`,
+        `Gemini Error: Empty response from Gemini 1.5 Flash (no candidates).`,
       );
     }
 
@@ -405,10 +386,15 @@ async function askGeminiStrict(
       console.error(`[Step 2: Gemini Error] ${error.message}`);
       throw error;
     }
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    const wrapped = new Error(`Gemini Error: ${detail}`);
-    console.error(`[Step 2: Gemini Error] ${detail}`);
+    const status =
+      typeof error === "object" && error !== null && "status" in error
+        ? (error as { status?: number }).status
+        : undefined;
+    const detail = error instanceof Error ? error.message : String(error);
+    const wrapped = new Error(
+      status ? `Gemini Error: HTTP ${status} - ${detail}` : `Gemini Error: ${detail}`,
+    );
+    console.error(`[Step 2: Gemini Error] ${wrapped.message}`);
     throw wrapped;
   }
 }

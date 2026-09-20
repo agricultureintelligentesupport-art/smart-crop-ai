@@ -13,6 +13,7 @@
     "test:walk": "node tools/walkthrough.mjs all"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "firebase": "^12.19.0",
     "framer-motion": "^13.4.0",
     "lucide-react": "^1.47.0",

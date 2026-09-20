@@ -75,8 +75,10 @@ for (const [name, gemini, hf] of [
 test("keys are read per request, not when the route module loads", async () => {
   assert.equal((await POST(request())).status, 500);
   configureKeys();
-  const upstream = mock.method(globalThis, "fetch", async (url: string) => {
-    assert.equal(new URL(url).searchParams.get("key"), "test-gemini");
+  const upstream = mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+    assert.match(String(url), /\/models\/gemini-1\.5-flash:generateContent/);
+    assert.doesNotMatch(String(url), /models\/models\//);
+    assert.equal(new Headers(init?.headers).get("x-goog-api-key"), "test-gemini");
     return geminiReply();
   });
   const response = await POST(request());
