@@ -30,8 +30,9 @@ import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
 import { runGoogleSignIn } from "@/lib/auth/googleFlow";
 import { methodForFirebaseUser, resolveGoogleReturn } from "@/lib/auth/returnGate";
 import { createAuthGateway } from "@/lib/auth/gateway";
-import { syncUserDoc } from "@/lib/auth/userDoc";
+import { syncUserDoc, type UserDocPatch } from "@/lib/auth/userDoc";
 import {
+  clearProfile,
   guestProfile,
   profileFromUser,
   readProfile,
@@ -40,6 +41,11 @@ import {
   writePrefs,
   writeProfile,
 } from "@/lib/auth/profile";
+import {
+  clearAllLocalCache,
+  isSwitchingAccounts,
+  resolveSessionBinding,
+} from "@/lib/auth/session";
 import {
   AuthError,
   toAuthErrorCode,
@@ -254,21 +260,44 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     [clearErrors, clearGoogleError],
   );
 
+  /**
+   * The Firebase uid the wizard's user state is currently bound to (set by
+   * `afterAuth` only when the SDK actually holds that session — popup /
+   * redirect / e-mail — never for gateway-only demo/device sessions). The
+   * signed-out reset effect below watches it: the moment the bound session
+   * disappears, every user-bound bit of wizard state drops to the Step 1
+   * defaults instead of lingering for the next account.
+   */
+  const firebaseBoundUid = useRef<string | null>(null);
+
   /** Every completed authentication lands here. */
   const afterAuth = useCallback(
     (session: SessionUser) => {
       const previous = readProfile();
       const device = readPrefs();
-      const resolvedRole = session.role ?? previous?.role ?? device.role ?? null;
-      const resolvedWilaya = session.wilayaCode ?? previous?.wilayaCode ?? device.wilayaCode ?? null;
+      // Strict UID-bound merge: cached role/wilaya apply ONLY when they
+      // belong to this same uid — on an account switch the Firestore-backed
+      // session is the sole source of truth (see session.ts).
+      const binding = resolveSessionBinding(session, previous, device);
+      const resolvedRole = binding.role;
+      const resolvedWilaya = binding.wilayaCode;
 
       writeProfile(
         profileFromUser({ ...session, role: resolvedRole, wilayaCode: resolvedWilaya }, { lang }),
       );
       writePrefs({ role: resolvedRole, wilayaCode: resolvedWilaya, lang });
+      // Complete overwrite of the wizard's in-memory user state: nothing of
+      // a previously signed-in account survives next to the new session.
       setUser({ ...session, role: resolvedRole, wilayaCode: resolvedWilaya });
       setRole(resolvedRole);
       setWilayaCode(resolvedWilaya);
+
+      // Bind the wizard to the Firebase session when the SDK actually holds
+      // this uid. Gateway-only sessions (demo, device OTP) never bind, so
+      // the signed-out reset below ignores them.
+      if (isAuthReady(auth) && auth.currentUser?.uid === session.uid) {
+        firebaseBoundUid.current = session.uid;
+      }
 
       if (resolvedRole && resolvedWilaya) {
         router.push("/dashboard");
@@ -323,6 +352,17 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
    */
   const buildSyncedSession = useCallback(
     async (fbUser: User): Promise<SessionUser> => {
+      // Strict UID-bound sync: never write wizard/device state into the
+      // Firestore doc of a DIFFERENT user, and never let an empty local
+      // state clobber the doc of a returning user — the patch carries only
+      // explicit in-session values for the same user, and the session
+      // resolves strictly from users/{uid}.
+      const switching = isSwitchingAccounts(readProfile(), fbUser.uid);
+      const patch: UserDocPatch = { lastLoginAt: new Date().toISOString() };
+      if (!switching) {
+        if (role) patch.role = role;
+        if (wilayaCode) patch.wilayaCode = wilayaCode;
+      }
       const { ok, data, error } = await syncUserDoc(
         {
           uid: fbUser.uid,
@@ -330,15 +370,15 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
           email: fbUser.email,
           photoURL: fbUser.photoURL,
         },
-        { role: role ?? null, wilayaCode: wilayaCode ?? null, lastLoginAt: new Date().toISOString() },
+        patch,
       );
       if (!ok) {
         logAuthError("google-profile-sync", error);
         if (mounted.current) setNotice(t.errors.profileSave);
       }
 
-      const resolvedRole = (data.role ?? role) as AuthRole | null;
-      const resolvedWilaya = (data.wilayaCode ?? data.wilaya ?? wilayaCode) as string | null;
+      const resolvedRole = (data.role ?? null) as AuthRole | null;
+      const resolvedWilaya = (data.wilayaCode ?? data.wilaya ?? null) as string | null;
 
       return {
         uid: fbUser.uid,
@@ -481,6 +521,40 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     });
     return unsubscribe;
   }, [handlePostAuthSuccess, step, user]);
+
+  /* ---------------- Signed-out reset (strict session isolation) ----------------
+   * The wizard binds to exactly one Firebase uid per mount (see afterAuth).
+   * Whenever that session disappears — sign-out here, in another tab, or an
+   * expired/revoked token — every user-bound bit of wizard state drops back
+   * to the Step 1 defaults instead of lingering for the next account.
+   * Gateway-only sessions (demo / device OTP) never bound, so they are
+   * untouched; guests keep their on-device record (it carries no identity).
+   */
+  useEffect(() => {
+    if (!isAuthReady(auth)) return;
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser?.uid) return;
+      if (!firebaseBoundUid.current) return;
+      firebaseBoundUid.current = null;
+      pendingGoogleUid.current = null;
+      setUser(null);
+      setRole(null);
+      setWilayaCode(null);
+      setChallenge(null);
+      setOtpCode("");
+      setOtpAttempts(0);
+      setPhoneDigits("");
+      setEmailState(EMPTY_EMAIL);
+      setBusy(null);
+      clearErrors();
+      clearGoogleError();
+      setNotice(null);
+      setStep("method");
+      const cached = readProfile();
+      if (cached && !cached.isGuest) clearProfile();
+    });
+    return unsubscribe;
+  }, [clearErrors, clearGoogleError]);
 
   const handleGoogleAuth = useCallback(async () => {
     clearErrors();
@@ -633,6 +707,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     manualSignIn.current = true;
     try {
       let session: SessionUser;
+      // A pre-existing Firebase session (or a cached profile for another
+      // uid) means this sign-in switches accounts: local role/wilaya state
+      // must not be seeded into the new user's document.
+      const priorUid = auth.currentUser?.uid ?? null;
       if (mode === "register") {
         try {
           const cred = await createUserWithEmailAndPassword(auth, email.email.trim(), email.password);
@@ -642,8 +720,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
             await updateProfile(fbUser, { displayName });
           }
 
-          const targetRole = role ?? null;
-          const targetWilaya = wilayaCode ?? null;
+          const switched = priorUid !== null || isSwitchingAccounts(readProfile(), fbUser.uid);
+          const targetRole = switched ? null : (role ?? null);
+          const targetWilaya = switched ? null : (wilayaCode ?? null);
           const wilayaData = targetWilaya ? getWilaya(targetWilaya) : null;
           const preferredCrop = wilayaData?.crops?.[0] ?? null;
 
@@ -695,8 +774,15 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
           const snap = await getDoc(doc(db, "users", fbUser.uid));
           const data = snap.exists() ? snap.data() : {};
 
-          const resolvedRole = (data.role ?? role) as AuthRole | null;
-          const resolvedWilaya = (data.wilayaCode ?? data.wilaya ?? wilayaCode) as string | null;
+          const switched =
+            (priorUid !== null && priorUid !== fbUser.uid) ||
+            isSwitchingAccounts(readProfile(), fbUser.uid);
+          const resolvedRole = (
+            switched ? (data.role ?? null) : (data.role ?? role)
+          ) as AuthRole | null;
+          const resolvedWilaya = (
+            switched ? (data.wilayaCode ?? data.wilaya ?? null) : (data.wilayaCode ?? data.wilaya ?? wilayaCode)
+          ) as string | null;
 
           session = {
             uid: fbUser.uid,
@@ -864,21 +950,49 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     router.push("/dashboard");
   }, [router]);
 
-  /** Signing out drops the session but keeps the device preferences. */
+  /**
+   * Signing out drops the session AND every trace of the identity: the SDK
+   * sign-out is accompanied by a full local-cache wipe (localStorage +
+   * sessionStorage), a reset of the wizard to Step 1, and a reset of all
+   * user-bound React state — so the next account can never inherit this
+   * profile (stale-cache bleed fix).
+   */
   const handleSignOut = useCallback(async () => {
     clearErrors();
+    clearGoogleError();
+    setNotice(null);
     try {
       await fbSignOut(auth);
     } catch {
-      // offline / demo fallback
+      // offline / demo fallback — the local cleanup below still runs
     }
-    await gateway.signOut();
+    try {
+      await gateway.signOut();
+    } catch {
+      // firebase adapter may reject when offline; the demo gateway never does
+    }
     // Release the redirect/adoption claim so signing back in — even on the
     // same page instance — is captured again instead of being deduped away.
     pendingGoogleUid.current = null;
+    firebaseBoundUid.current = null;
+    // Complete local cache wipe: no field of this identity may survive for
+    // the next account.
+    clearAllLocalCache();
     stored.clear();
+    // Reset the wizard to the Step 1 defaults.
+    setUser(null);
+    setRole(null);
+    setWilayaCode(null);
+    setChallenge(null);
+    setOtpCode("");
+    setOtpAttempts(0);
+    setPhoneDigits("");
+    setEmailState(EMPTY_EMAIL);
+    setBusy(null);
+    setNeedsSetup(initialMode === "register");
+    setStep("method");
     router.push("/auth");
-  }, [clearErrors, gateway, router, stored]);
+  }, [clearErrors, clearGoogleError, gateway, initialMode, router, stored]);
 
   /* ---------------- Derived ---------------- */
 

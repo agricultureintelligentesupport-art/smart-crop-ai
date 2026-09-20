@@ -13,7 +13,8 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
-import { clearProfile, writeProfile, type StoredProfile } from "@/lib/auth/profile";
+import { clearProfile, readProfile, writeProfile, type StoredProfile } from "@/lib/auth/profile";
+import { clearAllLocalCache } from "@/lib/auth/session";
 import type { AuthRole } from "@/lib/auth/types";
 
 export interface UserProfile {
@@ -64,22 +65,52 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       authUnsub = onAuthStateChanged(auth, (currentUser) => {
-        setUser(currentUser);
-
+        // Whatever the previous session was listening to belongs to the
+        // previous user: detach first so its snapshots can never land on the
+        // new session (or on the signed-out state).
         if (profileUnsub) {
           profileUnsub();
           profileUnsub = null;
         }
 
+        if (!currentUser?.uid) {
+          // Signed out: identity state drops to defaults. A stale signed-in
+          // profile left in storage (expired session, another tab's
+          // sign-out, …) is discarded — guest records carry no identity and
+          // are preserved, as are device preferences.
+          setUser(null);
+          setProfile(null);
+          try {
+            const cached = readProfile();
+            if (cached && !cached.isGuest) clearProfile();
+          } catch {
+            /* storage unavailable */
+          }
+          setLoading(false);
+          return;
+        }
+
+        // New (or restored) session: drop the previous user's in-memory
+        // profile IMMEDIATELY so it can never flash on screen while the new
+        // document loads, then bind strictly to users/{uid}.
+        setUser(currentUser);
+        setProfile(null);
+
         if (currentUser && db && (db as { app?: unknown }).app) {
           try {
-            const userDocRef = doc(db, "users", currentUser.uid);
+            const uid = currentUser.uid;
+            const userDocRef = doc(db, "users", uid);
             profileUnsub = onSnapshot(
               userDocRef,
               (snapshot) => {
+                // Strict UID binding: a snapshot that arrives after the
+                // session already moved on (account switch) is ignored.
+                if (auth.currentUser?.uid !== uid) return;
                 if (snapshot.exists()) {
                   const data = snapshot.data() as UserProfile;
-                  setProfile(data);
+                  // Complete overwrite: the new user's document replaces any
+                  // in-memory remainder of the previous profile.
+                  setProfile({ ...data, uid });
 
                   // Sync with local session storage for offline / quick hydration
                   const role = (data.role as AuthRole | null) ?? null;
@@ -134,12 +165,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (auth && (auth as { app?: unknown }).app) {
         await fbSignOut(auth);
       }
-      clearProfile();
+    } finally {
+      // Complete session isolation: the SDK sign-out is always accompanied
+      // by a full local-cache wipe (localStorage + sessionStorage) and an
+      // in-memory reset, so the next account can never inherit this
+      // profile — even if signOut() itself throws (offline). Errors still
+      // propagate to the caller.
+      clearAllLocalCache();
       setUser(null);
       setProfile(null);
-    } catch (error) {
-      console.error("Error signing out:", error);
-      throw error;
     }
   };
 
