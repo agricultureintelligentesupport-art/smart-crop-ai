@@ -11,6 +11,11 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:3000",
     trace: "on-first-retry",
+    // Sandboxes/CI images that ship their own Chromium can point at it with
+    // PW_CHROMIUM_PATH instead of downloading browsers.
+    launchOptions: process.env.PW_CHROMIUM_PATH
+      ? { executablePath: process.env.PW_CHROMIUM_PATH }
+      : {},
   },
   projects: [
     {

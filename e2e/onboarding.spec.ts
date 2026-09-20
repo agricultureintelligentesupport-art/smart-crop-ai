@@ -184,11 +184,16 @@ test.describe("action step wiring", () => {
     await expect(page).toHaveURL(/\/register/);
     await expect(page.getByRole("heading", { name: "إنشاء حساب جديد" })).toBeVisible();
 
-    await page.getByRole("link", { name: /Retour/ }).click();
+    // The register screen is the live flow: header navigation goes back home…
+    await page.getByRole("link", { name: /الرئيسية/ }).click();
+    await expect(page).toHaveURL(/\/$/);
+
+    // …and the guest CTA lands on the working dashboard, not a placeholder.
     await page.getByRole("button", { name: "تخطي" }).click();
     await page.getByRole("button", { name: "متابعة كزائر" }).click();
     await expect(page).toHaveURL(/\/guest/);
-    await expect(page.getByRole("heading", { name: "وضع الزائر" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("زائر");
+    await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
   });
 });
 

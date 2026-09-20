@@ -1,0 +1,362 @@
+/**
+ * Deterministic agro-computation layer for the dashboard.
+ *
+ * Everything here is *derived* from the wilaya baseline in `wilayas.ts` plus a
+ * small seeded PRNG, so a given wilaya always produces the same numbers on
+ * every render and on every device (no hydration mismatch, no flapping UI).
+ * No network, no fake "live" claims: the UI labels these as estimates.
+ */
+
+import { CROPS, SOILS, getWilaya, type CropKey, type SoilKey, type Wilaya } from "./wilayas";
+
+/* ------------------------------------------------------------------ */
+/*  Seeded PRNG (mulberry32) — stable pseudo-random per wilaya         */
+/* ------------------------------------------------------------------ */
+
+function seedFrom(text: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function seededSeries(key: string, count: number, min: number, max: number): number[] {
+  const rand = mulberry32(seedFrom(key));
+  return Array.from({ length: count }, () => {
+    const v = min + rand() * (max - min);
+    return Math.round(v * 100) / 100;
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Weather                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface HourPoint {
+  label: string;
+  tempC: number;
+  /** Chance of rain, %. */
+  rainPct: number;
+}
+
+export interface DayPoint {
+  labelKey: number;
+  minC: number;
+  maxC: number;
+  rainPct: number;
+}
+
+export interface WeatherSnapshot {
+  wilaya: Wilaya;
+  tempC: number;
+  humidity: number;
+  windKph: number;
+  rainMmYear: number;
+  /** Estimated reference evapotranspiration (mm/day). */
+  et0: number;
+  hours: HourPoint[];
+  days: DayPoint[];
+}
+
+/** Labels are index-based so the component can localise them (no AR/FR strings here). */
+export const HOUR_LABELS = ["06", "09", "12", "15", "18", "21"] as const;
+export const DAY_KEYS = [0, 1, 2, 3, 4, 5, 6] as const;
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+/**
+ * Hargreaves-style reference evapotranspiration estimate for the reference
+ * season. Coastal/humid sites are damped, arid sites amplified.
+ */
+export function referenceEt0(climate: Wilaya["climate"]): number {
+  const humidityDamping = 0.72 + (climate.humidity / 100) * 0.42; // ~0.8 humid → ~1.06 arid
+  const windBoost = 1 + (climate.windKph - 12) * 0.012;
+  const et0 = 0.155 * climate.tempC * humidityDamping * windBoost;
+  return round1(Math.min(Math.max(et0, 1.4), 9.5));
+}
+
+export function weatherFor(wilayaCode: string | null | undefined): WeatherSnapshot {
+  const wilaya = getWilaya(wilayaCode);
+  const { tempC, humidity, windKph, rainMm } = wilaya.climate;
+  const rand = mulberry32(seedFrom(`w-${wilaya.code}`));
+
+  const hours: HourPoint[] = HOUR_LABELS.map((label, i) => {
+    // Diurnal curve: coolest at dawn, peak early afternoon.
+    const curve = [-3.6, -1.2, 1.8, 2.6, 0.4, -2.2][i];
+    const jitter = (rand() - 0.5) * 1.2;
+    return {
+      label,
+      tempC: round1(tempC + curve + jitter),
+      rainPct: Math.round(Math.min(85, Math.max(0, 90 - humidity + (rand() - 0.4) * 30))),
+    };
+  });
+
+  const days: DayPoint[] = DAY_KEYS.map((labelKey, i) => {
+    const drift = Math.sin(i * 0.9) * 2.4 + (rand() - 0.5) * 2;
+    const maxC = round1(tempC + drift);
+    const minC = round1(maxC - (7 + rand() * 5));
+    const rainPct = Math.round(Math.min(90, Math.max(0, humidity - 18 + (rand() - 0.5) * 34)));
+    return { labelKey, minC, maxC, rainPct };
+  });
+
+  return {
+    wilaya,
+    tempC,
+    humidity,
+    windKph,
+    rainMmYear: rainMm,
+    et0: referenceEt0(wilaya.climate),
+    hours,
+    days,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Irrigation                                                         */
+/* ------------------------------------------------------------------ */
+
+/** Mid-season crop coefficients (FAO-56 ballpark, mid-season stage). */
+const KC: Record<CropKey, number> = {
+  dates: 0.95,
+  tomato: 1.15,
+  potato: 1.15,
+  onion: 1.05,
+  pepper: 1.05,
+  wheat: 1.1,
+  barley: 1.05,
+  olive: 0.7,
+  citrus: 0.75,
+  grape: 0.8,
+  apple: 1.0,
+  peach: 1.0,
+  apricot: 1.0,
+  pomegranate: 0.9,
+  fig: 0.85,
+  almond: 0.95,
+  watermelon: 1.0,
+  melon: 1.0,
+  carrot: 1.05,
+  garlic: 1.0,
+  faba: 1.15,
+  pea: 1.1,
+  chickpea: 1.0,
+  lentil: 1.05,
+  artichoke: 1.05,
+  alfalfa: 0.95,
+  alfa: 0.6,
+  sorghum: 1.0,
+  henna: 0.9,
+  groundnut: 1.05,
+  rice: 1.2,
+  sunflower: 1.05,
+};
+
+/** Extra demand from soil texture (sandy soils leach and evaporate faster). */
+const SOIL_FACTOR: Record<SoilKey, number> = {
+  sandy: 1.16,
+  loamy: 1.0,
+  clayey: 0.94,
+  calcareous: 1.08,
+  silty: 1.04,
+  saline: 1.12,
+  gravelly: 1.14,
+};
+
+export type IrrigationSystem = "drip" | "sprinkler" | "furrow";
+
+/** Application efficiency per system (share of applied water the crop uses). */
+export const SYSTEM_EFFICIENCY: Record<IrrigationSystem, number> = {
+  drip: 0.9,
+  sprinkler: 0.75,
+  furrow: 0.55,
+};
+
+export interface IrrigationInput {
+  wilayaCode: string | null | undefined;
+  crop: CropKey;
+  /** Irrigated area in hectares. */
+  areaHa: number;
+  soil: SoilKey;
+  system: IrrigationSystem;
+}
+
+export interface IrrigationResult {
+  /** Net crop water requirement, mm/day. */
+  netMmDay: number;
+  /** Water to apply (gross), litres per hectare per day. */
+  litresPerHaDay: number;
+  /** Gross daily volume for the parcel, m³/day (1 mm over 1 ha = 10 m³). */
+  dailyM3: number;
+  /** Gross weekly volume, m³/week. */
+  weeklyM3: number;
+  /** Litres saved per day on this parcel compared with furrow irrigation. */
+  savedLitresPerDay: number;
+  /** Share of water saved versus furrow, %. */
+  savedPct: number;
+  et0: number;
+  kc: number;
+}
+
+export function computeIrrigation({
+  wilayaCode,
+  crop,
+  areaHa,
+  soil,
+  system,
+}: IrrigationInput): IrrigationResult {
+  const weather = weatherFor(wilayaCode);
+  const kc = KC[crop];
+  const soilFactor = SOIL_FACTOR[soil];
+  const netMmDay = weather.et0 * kc * soilFactor;
+  const efficiency = SYSTEM_EFFICIENCY[system];
+  const grossMmDay = netMmDay / efficiency;
+
+  const mmToM3 = (mm: number) => Math.round(mm * areaHa * 10);
+  const litresPerHaDay = Math.round(grossMmDay * 10000); // 1 mm over 1 ha = 10 000 L
+  const dailyM3 = mmToM3(grossMmDay);
+  const weeklyM3 = mmToM3(grossMmDay * 7);
+
+  const furrowEfficiency = SYSTEM_EFFICIENCY.furrow;
+  const furrowMmDay = netMmDay / furrowEfficiency;
+  const savedLitresPerDay = Math.round((furrowMmDay - grossMmDay) * areaHa * 10000);
+  const savedPct = Math.max(0, Math.round(((furrowMmDay - grossMmDay) / furrowMmDay) * 100));
+
+  return {
+    netMmDay: round1(netMmDay),
+    litresPerHaDay,
+    dailyM3,
+    weeklyM3,
+    savedLitresPerDay,
+    savedPct,
+    et0: weather.et0,
+    kc,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Vegetation index (NDVI)                                            */
+/* ------------------------------------------------------------------ */
+
+export interface NdviReading {
+  /** 0–1 vegetation index. */
+  value: number;
+  /** % change over the observed window. */
+  trendPct: number;
+  /** 8-point history, oldest → newest. */
+  series: number[];
+  /** 0–1 share of the parcel showing stress. */
+  stressShare: number;
+}
+
+export function ndviFor(wilayaCode: string | null | undefined, crop: CropKey): NdviReading {
+  const wilaya = getWilaya(wilayaCode);
+  const vigour =
+    0.34 +
+    (wilaya.climate.humidity / 100) * 0.35 +
+    (wilaya.climate.rainMm / 1000) * 0.14 +
+    (KC[crop] - 0.9) * 0.08;
+  const base = Math.min(Math.max(vigour, 0.28), 0.86);
+  const clean = seededSeries(`ndvi-${wilaya.code}-${crop}`, 8, base - 0.1, base + 0.09).map(
+    (v) => Math.round(Math.min(Math.max(v, 0.2), 0.92) * 100) / 100,
+  );
+  const first = clean[0];
+  const last = clean[clean.length - 1];
+  const trendPct = Math.round(((last - first) / first) * 100);
+
+  return {
+    value: last,
+    trendPct,
+    series: clean,
+    stressShare: Math.round(Math.min(0.42, Math.max(0.03, 0.3 - (last - 0.5))) * 100) / 100,
+  };
+}
+
+export function ndviBand(value: number): "poor" | "fair" | "good" | "excellent" {
+  if (value < 0.35) return "poor";
+  if (value < 0.55) return "fair";
+  if (value < 0.72) return "good";
+  return "excellent";
+}
+
+/* ------------------------------------------------------------------ */
+/*  On-device leaf scan (demo engine)                                  */
+/* ------------------------------------------------------------------ */
+
+export type DiagnosisKey =
+  | "healthy"
+  | "early_blight"
+  | "powdery_mildew"
+  | "leaf_rust"
+  | "nitrogen_gap"
+  | "water_stress";
+
+export interface Diagnosis {
+  key: DiagnosisKey;
+  /** 0–1 model confidence. */
+  confidence: number;
+  /** 0–1 severity. */
+  severity: number;
+  /** Crop keys the finding is most common on. */
+  crops: CropKey[];
+}
+
+const DIAGNOSES: Omit<Diagnosis, "confidence" | "severity">[] = [
+  { key: "healthy", crops: ["tomato", "potato", "citrus", "olive"] },
+  { key: "early_blight", crops: ["tomato", "potato", "pepper"] },
+  { key: "powdery_mildew", crops: ["grape", "melon", "watermelon", "apricot"] },
+  { key: "leaf_rust", crops: ["wheat", "barley", "alfalfa"] },
+  { key: "nitrogen_gap", crops: ["wheat", "barley", "potato", "tomato"] },
+  { key: "water_stress", crops: ["dates", "potato", "onion", "citrus", "olive"] },
+];
+
+/**
+ * Deterministic demo classifier. It hashes the picked file's name + size +
+ * wilaya so the "diagnosis" is stable per photo but varies between photos.
+ * Replace with the real model call when the inference service is wired.
+ */
+export function diagnoseImage(file: { name: string; size: number }, wilayaCode: string | null): Diagnosis {
+  const rand = mulberry32(seedFrom(`${file.name}:${file.size}:${wilayaCode ?? "na"}`));
+  const pick = DIAGNOSES[Math.floor(rand() * DIAGNOSES.length)];
+  const confidence = Math.round((0.78 + rand() * 0.18) * 100) / 100;
+  const severity = pick.key === "healthy" ? 0 : Math.round((0.15 + rand() * 0.6) * 100) / 100;
+  return { ...pick, confidence, severity };
+}
+
+export const DIAGNOSIS_CROPS = DIAGNOSES;
+
+/* ------------------------------------------------------------------ */
+/*  Recommendations                                                    */
+/* ------------------------------------------------------------------ */
+
+export interface Advice {
+  key: string;
+  tone: "good" | "watch" | "alert";
+  params?: Record<string, string | number>;
+}
+
+/** Ranks the crop list for the wilaya, keeping the on-file order as weight. */
+export function recommendedCrops(wilayaCode: string | null | undefined, limit = 4): CropKey[] {
+  const wilaya = getWilaya(wilayaCode);
+  return wilaya.crops.slice(0, limit);
+}
+
+export function cropLabel(crop: CropKey, lang: "ar" | "fr"): string {
+  return CROPS[crop][lang];
+}
+
+export function soilLabel(soil: SoilKey, lang: "ar" | "fr"): string {
+  return SOILS[soil][lang];
+}

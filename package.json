@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "test:walk": "node tools/walkthrough.mjs all"
   },
   "dependencies": {
     "framer-motion": "^13.4.0",

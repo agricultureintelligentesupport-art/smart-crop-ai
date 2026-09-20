@@ -29,6 +29,17 @@
     height: 100%;
   }
 
+  /* Keyboard-first focus: one visible ring everywhere, never on mouse clicks. */
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid #059669;
+    outline-offset: 2px;
+  }
+
   body {
     /* Stability: the app manages its own layout — no page scroll, no bounce */
     overflow: hidden;
@@ -88,6 +99,82 @@
     will-change: transform, opacity;
   }
 
+  /* Long-lived surfaces (dashboard cards, list rows, form panels).
+     Same glass recipe as `.glass` but WITHOUT a permanent `will-change`: these
+     nodes stay on screen for a long time and would otherwise pin a compositor
+     layer each. `transform: translateZ(0)` alone still isolates the blur. */
+  .glass-card {
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid #e2f1e8;
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
+    backdrop-filter: blur(12px) saturate(150%);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.9) inset,
+      0 10px 30px -20px rgba(6, 78, 59, 0.28);
+    transform: translateZ(0);
+  }
+
+  /* Form fields: 16px text avoids the iOS zoom-on-focus jump. */
+  .field-input {
+    width: 100%;
+    font-size: 16px;
+    font-weight: 600;
+    color: #064e3b;
+    background: rgba(255, 255, 255, 0.88);
+    border: 1px solid #d6ece0;
+    border-radius: 1rem;
+    transition:
+      border-color 0.18s ease,
+      box-shadow 0.18s ease,
+      background-color 0.18s ease;
+  }
+
+  .field-input::placeholder {
+    color: rgba(6, 78, 59, 0.38);
+    font-weight: 500;
+  }
+
+  .field-input:hover:not(:disabled) {
+    border-color: rgba(16, 185, 129, 0.55);
+  }
+
+  .field-input:focus {
+    outline: none;
+    background: #ffffff;
+    border-color: #10b981;
+    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.22);
+  }
+
+  .field-input[aria-invalid="true"] {
+    border-color: #e11d48;
+    box-shadow: 0 0 0 4px rgba(225, 29, 72, 0.16);
+  }
+
+  .field-input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* Thin emerald scrollbar for the long wilaya list. */
+  .scroll-area {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(6, 78, 59, 0.28) transparent;
+  }
+
+  .scroll-area::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scroll-area::-webkit-scrollbar-thumb {
+    background: rgba(6, 78, 59, 0.22);
+    border-radius: 999px;
+  }
+
+  .scroll-area::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
   /* Vibrant emerald glow for primary CTAs.
      GPU: isolate the large blurred box-shadow onto a dedicated composite
      layer so hover/tap transitions and slide swipes never re-paint it. */
@@ -120,5 +207,42 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Glass fallbacks (design rules: web glass is an approximation)      */
+/* ------------------------------------------------------------------ */
+
+/* Browsers without backdrop-filter, and users who ask for less
+   transparency, get an opaque surface instead of a washed-out one. */
+@supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  .glass,
+  .glass-card {
+    background: #ffffff;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .glass-card {
+    background: #ffffff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .glass,
+  .glass-card {
+    background: #ffffff;
+    border-color: #064e3b;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .field-input {
+    background: #ffffff;
+    border-color: #064e3b;
   }
 }
