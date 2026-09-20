@@ -26,19 +26,25 @@ export default function HeaderBar({
     <header className="pt-safe relative z-30 flex shrink-0 items-center justify-between gap-1.5 px-3.5 pb-1 sm:px-4">
       {/* App badge — starts at the right in RTL, left in LTR */}
       <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
-        <span className="hidden h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_16px_rgba(16,185,129,0.6)] min-[360px]:grid">
+        <span className="hidden h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)] min-[360px]:grid">
           <Leaf size={15} strokeWidth={2.4} className="text-white" />
         </span>
         <span className="flex min-w-0 flex-col leading-tight">
-          <span className="truncate text-[11.5px] font-black tracking-tight whitespace-nowrap">{t.brand}</span>
-          <span className="hidden truncate whitespace-nowrap text-[8px] font-bold text-emerald-600/85 min-[360px]:block dark:text-emerald-300/75">
+          <span className="truncate text-[11.5px] font-black tracking-tight whitespace-nowrap text-emerald-950">
+            {t.brand}
+          </span>
+          <span className="hidden truncate whitespace-nowrap text-[8px] font-bold text-emerald-700/80 min-[360px]:block">
             {t.brandTag}
           </span>
         </span>
       </div>
 
       {/* Language selector pill — 48px touch targets, compact footprint */}
-      <div role="group" aria-label={t.languageAria} className="glass flex shrink-0 items-center rounded-full p-1 shadow-sm">
+      <div
+        role="group"
+        aria-label={t.languageAria}
+        className="glass flex shrink-0 items-center rounded-full p-1 shadow-sm"
+      >
         {LANGS.map((l) => {
           const active = lang === l.code;
           return (
@@ -49,13 +55,15 @@ export default function HeaderBar({
               aria-pressed={active}
               aria-label={l.full}
               className={`relative grid h-12 min-w-[46px] place-items-center rounded-full px-2 text-[11.5px] font-black transition-colors ${
-                active ? "text-white" : "text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-300"
+                active
+                  ? "text-white"
+                  : "text-emerald-800/70 hover:text-emerald-700"
               }`}
             >
               {active && (
                 <motion.span
                   layoutId="lang-thumb"
-                  className="absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600 shadow-[0_4px_14px_rgba(16,185,129,0.45)]"
+                  className="absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500 to-green-600 shadow-[0_6px_16px_rgba(16,185,129,0.5)]"
                   transition={{ type: "spring", stiffness: 480, damping: 34 }}
                 />
               )}
@@ -78,7 +86,7 @@ export default function HeaderBar({
               exit={{ opacity: 0, x: 8 }}
               transition={{ duration: 0.22 }}
               whileTap={{ scale: 0.94 }}
-              className="h-12 rounded-xl px-2 text-[12.5px] font-bold text-slate-500 transition-colors hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-300"
+              className="h-12 rounded-xl px-2 text-[12.5px] font-bold text-emerald-800/70 transition-colors hover:text-emerald-600"
             >
               {t.skip}
             </motion.button>

@@ -41,7 +41,7 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${cairo.variable} ${jakarta.variable}`}
     >
-      <body className="min-h-full overflow-hidden bg-slate-100 text-slate-900 antialiased dark:bg-black dark:text-slate-100">
+      <body className="min-h-full overflow-hidden antialiased">
         {children}
       </body>
     </html>
