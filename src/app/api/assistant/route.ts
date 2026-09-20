@@ -1,20 +1,27 @@
 /**
- * `/api/assistant` — hybrid AI pipeline for the agricultural assistant.
+ * `/api/assistant` — strict 2-step sequential AI pipeline for the agricultural assistant.
  *
- * Step 1 (vision): when the request carries a leaf photo, it is classified
- *   with a PlantVillage disease model on the Hugging Face Inference API
- *   (`HUGGINGFACE_API_KEY`), producing a disease label + confidence.
+ * Strict pipeline:
+ *   Step 1 (mandatory when image is attached): Hugging Face Inference API
+ *     PlantVillage disease classifier → parse returned array to extract
+ *     primary predicted disease class + confidence percentage.
+ *     Handles 503/530 model-loading responses with a clear status message.
  *
- * Step 2 (reasoning): the label, confidence, the user's question and the
- *   Firestore-mirrored profile context (wilaya, preferred crop, role) are fed
- *   into Google Gemini 1.5 Flash (`GEMINI_API_KEY`) behind a system prompt
- *   that frames it as an expert Algerian agricultural advisor answering in
- *   natural Arabic / Algerian Darija.
+ *   Step 2 (always): Google Gemini 1.5 Flash localized reasoning.
+ *     The PlantVillage label + confidence from Step 1, alongside the user's
+ *     text message and Firestore profile context (Wilaya, crop type), are fed
+ *     into Gemini behind a system prompt that frames it as an expert Algerian
+ *     agricultural advisor ("مستشار زراعي جزائري خبير") answering in natural
+ *     Arabic / Algerian Darija with a treatment + irrigation plan.
  *
  * Both keys are read from `process.env` on the server only — they are never
- * shipped to the browser. Missing configuration returns a server error. Vision
- * without Gemini still yields a templated Arabic plan; if neither provider
- * produces a result, the request fails rather than claiming keys are missing.
+ * shipped to the browser. Missing configuration returns a server error.
+ *
+ * Error reporting: each stage logs to the server console
+ * (`[Step 1: HF Success]` / `[Step 2: Gemini Success]` and corresponding
+ * error logs). If either API errors, the handler returns a descriptive JSON
+ * error `{ error: "HF Error: ..." }` or `{ error: "Gemini Error: ..." }`
+ * with HTTP 500 so the caller can identify exactly which stage failed.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -72,12 +79,17 @@ function bad(message: string, status = 400): NextResponse {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 1 — Hugging Face PlantVillage vision diagnosis                */
+/*  Step 1 — Hugging Face PlantVillage vision diagnosis (STRICT)       */
 /* ------------------------------------------------------------------ */
 
 interface HfClassification {
   label: string;
   score: number;
+}
+
+interface HfLoadingPayload {
+  error?: string;
+  estimated_time?: number;
 }
 
 function isHfClassificationArray(value: unknown): value is HfClassification[] {
@@ -94,13 +106,23 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
   );
 }
 
-async function classifyPlantImage(
+/**
+ * Strict Step 1: classify leaf image via Hugging Face.
+ * - Sends the raw image bytes to the PlantVillage model.
+ * - Parses the returned array to extract the primary predicted class + confidence.
+ * - Handles 503/530 model-loading responses with a clear message.
+ * - Throws an Error prefixed with "HF Error:" on any failure so the caller
+ *   can return `{ error: "HF Error: ..." }` with 500.
+ */
+async function classifyPlantImageStrict(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
-  warnings: string[],
-): Promise<AssistantDiagnosis | null> {
+): Promise<AssistantDiagnosis> {
   const body = Buffer.from(imageBase64, "base64");
+
+  let lastErrorDetail: string | null = null;
+  let loadingEstimate: number | null = null;
 
   for (const model of HF_PLANT_MODELS) {
     try {
@@ -109,31 +131,73 @@ async function classifyPlantImage(
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": mimeType || "application/octet-stream",
-          // Wait for the model to spin up instead of failing with a 503.
+          // Ask the HF router to wait for the model instead of instantly 503ing.
           "X-Wait-For-Model": "true",
         },
         body,
       });
 
+      // --- Model loading (503 / 530) -------------------------------------------------
+      if (res.status === 503 || res.status === 530) {
+        let estimated: number | null = null;
+        let errText: string | null = null;
+        try {
+          const payload = (await res.json()) as HfLoadingPayload;
+          if (typeof payload?.estimated_time === "number") estimated = payload.estimated_time;
+          if (typeof payload?.error === "string") errText = payload.error;
+        } catch {
+          // ignore json parse failure, fall back to status text
+        }
+        if (estimated !== null) loadingEstimate = estimated;
+        const detail = errText
+          ? `${errText}${estimated !== null ? ` — estimated_time: ${estimated}s` : ""}`
+          : `Model ${model} is loading (HTTP ${res.status})${estimated !== null ? ` — retry after ~${Math.ceil(estimated)}s` : ""}`;
+        lastErrorDetail = detail;
+        console.warn(`[Step 1: HF Loading] ${model} → ${detail}`);
+        // Try next model before giving up — the fallback may be warm.
+        continue;
+      }
+
       if (!res.ok) {
-        warnings.push(`vision(${model}): HTTP ${res.status}`);
+        let bodyText = "";
+        try {
+          bodyText = await res.text();
+        } catch {
+          bodyText = res.statusText;
+        }
+        // Try to surface JSON error message if present
+        let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+        try {
+          const j = JSON.parse(bodyText) as { error?: string };
+          if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
+        } catch {
+          // keep raw detail
+        }
+        lastErrorDetail = `${model}: ${detail}`;
+        console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
         continue;
       }
 
       const json: unknown = await res.json();
+
+      // HF should return an array of { label, score }. Validate and parse.
       if (!isHfClassificationArray(json)) {
-        warnings.push(`vision(${model}): unexpected payload shape`);
+        const detail = `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`;
+        lastErrorDetail = detail;
+        console.warn(`[Step 1: HF Warning] ${detail}`);
         continue;
       }
 
+      // Properly parse returned array: sort descending and extract primary class + confidence.
       const ranked = [...json].sort((a, b) => b.score - a.score);
       const top = ranked[0];
+      const pct = Math.round(top.score * 100);
       const parsed = parsePlantLabel(top.label);
       const candidates: DiagnosisCandidate[] = ranked
         .slice(0, 3)
         .map(({ label, score }) => ({ label, score }));
 
-      return {
+      const diagnosis: AssistantDiagnosis = {
         label: top.label,
         labelAr: parsed.labelAr,
         cropAr: parsed.cropAr,
@@ -143,17 +207,36 @@ async function classifyPlantImage(
         model,
         candidates,
       };
-    } catch (error) {
-      warnings.push(
-        `vision(${model}): ${error instanceof Error ? error.name : "request failed"}`,
+
+      console.log(
+        `[Step 1: HF Success] label=${top.label} confidence=${pct}% model=${model} candidates=${candidates.length}`,
       );
+      return diagnosis;
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+      // Network / timeout / abort errors
+      lastErrorDetail = `${model}: ${detail}`;
+      console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
     }
   }
-  return null;
+
+  // All models exhausted — surface a clear HF Error.
+  if (loadingEstimate !== null || (lastErrorDetail && /loading/i.test(lastErrorDetail))) {
+    const msg = lastErrorDetail ?? `Model is loading, please retry after ~${Math.ceil(loadingEstimate ?? 20)}s`;
+    throw new Error(
+      `HF Error: Model is loading — ${msg}. The PlantVillage model is warming up on Hugging Face; please retry after ${loadingEstimate ? Math.ceil(loadingEstimate) : 20}s.`,
+    );
+  }
+  throw new Error(
+    `HF Error: ${lastErrorDetail ?? "Unable to classify image with PlantVillage model (all HF endpoints failed)"}`,
+  );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 2 — Gemini 1.5 Flash localized reasoning                      */
+/*  Step 2 — Gemini 1.5 Flash localized reasoning (STRICT)             */
 /* ------------------------------------------------------------------ */
 
 const SYSTEM_PROMPT = `أنت "مستشار زراعي جزائري خبير" داخل تطبيق "محصولي الذكي" (Smart Crop AI).
@@ -162,7 +245,7 @@ const SYSTEM_PROMPT = `أنت "مستشار زراعي جزائري خبير" د
 قواعد إلزامية:
 - أجب بالعربية الفصحى المبسطة مع لمسات من الدارجة الجزائرية عندما تكون طبيعية (مثل: "السقي"، "الفلاّح"، "البرّاد الصباحي")، إلا إذا طُلبت الفرنسية صراحةً.
 - خصّص الجواب حسب سياق المستخدم المرفق: الولاية ومناخها، المحصول المفضل، ودوره (فلاح / مهندس زراعي / مستثمر).
-- عند وجود تشخيص من نموذج الرؤية (PlantVillage): اعتمد عليه، اذكر اسم المرض بالعربية مع نسبة الثقة، وإذا كانت الثقة ضعيفة (<45%) نبّه المستخدم بلطف واطلب صورة أوضح مع اقتراح التشخيصات المحتملة.
+- عند وجود تشخيص من نموذج الرؤية (PlantVillage): اعتمد عليه مباشرة، اذكر اسم المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، وإذا كانت الثقة ضعيفة (<45%) نبّه المستخدم بلطف واطلب صورة أوضح مع اقتراح التشخيصات المحتملة.
 - عند تشخيص مرض، قدّم دائماً خطة علاجية ووقائية محلية منظمة بهذا الشكل (Markdown):
   ## 🔬 التشخيص
   ## 💊 خطة العلاج
@@ -225,24 +308,33 @@ interface GeminiPart {
   inline_data?: { mime_type: string; data: string };
 }
 
-async function askGemini(
+/**
+ * Strict Step 2: localized reasoning via Gemini 1.5 Flash.
+ * - Passes the PlantVillage label + confidence from Step 1 directly into Gemini,
+ *   alongside the user's text message and Firestore profile (Wilaya, crop type).
+ * - Uses the Algerian advisor system prompt.
+ * - Throws an Error prefixed with "Gemini Error:" on any failure.
+ */
+async function askGeminiStrict(
   apiKey: string,
   message: string,
   context: AssistantContext | undefined,
   diagnosis: AssistantDiagnosis | null,
   image: { data: string; mimeType: string } | null,
-  warnings: string[],
-): Promise<string | null> {
+): Promise<string> {
   const userParts: GeminiPart[] = [];
 
   const sections = [
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
+    diagnosis
+      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى Gemini): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      : "",
     message
       ? `سؤال المستخدم: ${message}`
       : diagnosis
-        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة."
-        : "حيّ المستخدم وقدّم نفسك بإيجاز كمستشار زراعي.",
+        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة PlantVillage أعلاه."
+        : "حيّ المستخدم وقدّم نفسك بإيجاز كمستشار زراعي جزائري خبير.",
   ].filter(Boolean);
   userParts.push({ text: sections.join("\n\n") });
 
@@ -271,8 +363,21 @@ async function askGemini(
     });
 
     if (!res.ok) {
-      warnings.push(`gemini: HTTP ${res.status}`);
-      return null;
+      let bodyText = "";
+      try {
+        bodyText = await res.text();
+      } catch {
+        bodyText = res.statusText;
+      }
+      let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 600)}` : ""}`;
+      try {
+        const j = JSON.parse(bodyText) as { error?: { message?: string } | string };
+        if (typeof j?.error === "string") detail = `HTTP ${res.status} — ${j.error}`;
+        else if (typeof j?.error?.message === "string") detail = `HTTP ${res.status} — ${j.error.message}`;
+      } catch {
+        // keep raw
+      }
+      throw new Error(`Gemini Error: ${detail}`);
     }
 
     const json: unknown = await res.json();
@@ -285,53 +390,31 @@ async function askGemini(
       .join("")
       .trim();
 
-    return text && text.length > 0 ? text : null;
+    if (!text || text.length === 0) {
+      throw new Error(
+        `Gemini Error: Empty response from Gemini 1.5 Flash (no candidates). Raw: ${JSON.stringify(json).slice(0, 800)}`,
+      );
+    }
+
+    console.log(
+      `[Step 2: Gemini Success] diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? Math.round(diagnosis.confidence * 100) + "%" : "n/a"} replyLength=${text.length}`,
+    );
+    return text;
   } catch (error) {
-    warnings.push(`gemini: ${error instanceof Error ? error.name : "request failed"}`);
-    return null;
+    if (error instanceof Error && error.message.startsWith("Gemini Error:")) {
+      console.error(`[Step 2: Gemini Error] ${error.message}`);
+      throw error;
+    }
+    const detail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const wrapped = new Error(`Gemini Error: ${detail}`);
+    console.error(`[Step 2: Gemini Error] ${detail}`);
+    throw wrapped;
   }
 }
 
 /* ------------------------------------------------------------------ */
-/*  Degraded advice (vision succeeded, reasoning unavailable)          */
-/* ------------------------------------------------------------------ */
-
-function templatedDiagnosisReply(
-  diagnosis: AssistantDiagnosis,
-  context: AssistantContext | undefined,
-): string {
-  const pct = Math.round(diagnosis.confidence * 100);
-  const where = context?.wilayaName ? ` في ولاية ${context.wilayaName}` : "";
-  if (diagnosis.healthy) {
-    return [
-      `## 🔬 التشخيص`,
-      `النبتة تبدو **سليمة** حسب نموذج الرؤية (ثقة ${pct}%). واصل على نفس العناية${where}. 🌿`,
-      ``,
-      `## 🛡️ الوقاية مستقبلاً`,
-      `- افحص الأوراق أسبوعياً من الوجهين.`,
-      `- اسقِ في الصباح الباكر وتجنّب تبليل الأوراق.`,
-      `- حافظ على تهوية جيدة بين النباتات.`,
-    ].join("\n");
-  }
-  return [
-    `## 🔬 التشخيص`,
-    `النتيجة الأعلى: **${diagnosis.labelAr}** بنسبة ثقة **${pct}%**.`,
-    ``,
-    `## 💊 خطة العلاج (عامة)`,
-    `- اعزل النباتات المصابة وأزل الأوراق المتضررة واحرقها بعيداً عن الحقل.`,
-    `- استشر مهندساً زراعياً محلياً لاختيار المبيد المناسب والجرعة الدقيقة.`,
-    `- تجنّب السقي بالرش فوق الأوراق حتى تنحصر الإصابة.`,
-    ``,
-    `## 🛡️ الوقاية مستقبلاً`,
-    `- ناوب المحاصيل ولا تزرع نفس العائلة في نفس القطعة موسمين متتاليين.`,
-    `- عقّم الأدوات وقلّل الرطوبة على المجموع الخضري.`,
-    ``,
-    `> ملاحظة: خدمة النصائح الذكية غير متاحة حالياً، هذه إرشادات عامة اعتماداً على تشخيص الصورة فقط.`,
-  ].join("\n");
-}
-
-/* ------------------------------------------------------------------ */
-/*  Handler                                                            */
+/*  Handler — strict 2-step sequential pipeline                        */
 /* ------------------------------------------------------------------ */
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -376,42 +459,45 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const warnings: string[] = [];
-
-  // ---- Step 1: vision diagnosis (only when a photo was sent) ----
+  // ---- Strict sequential pipeline ---------------------------------
+  // Step 1: Mandatory Hugging Face Vision Classification (when image attached)
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
-    diagnosis = await classifyPlantImage(image.data, image.mimeType, huggingfaceKey, warnings);
+    try {
+      diagnosis = await classifyPlantImageStrict(image.data, image.mimeType, huggingfaceKey);
+    } catch (error) {
+      const msg =
+        error instanceof Error ? error.message : String(error);
+      const hfMessage = msg.startsWith("HF Error:") ? msg : `HF Error: ${msg}`;
+      console.error(`[Step 1: HF Error] ${hfMessage}`);
+      return NextResponse.json({ error: hfMessage }, { status: 500 });
+    }
   }
 
-  // ---- Step 2: localized reasoning with Gemini 1.5 Flash ----
-  let reply = await askGemini(
-    geminiKey,
-    message,
-    context,
-    diagnosis,
-    image ? { data: image.data, mimeType: image.mimeType } : null,
-    warnings,
-  );
-  let source: AssistantSource = diagnosis ? "hybrid" : "gemini";
-
-  // ---- Degraded paths ----
-  if (!reply && diagnosis) {
-    reply = templatedDiagnosisReply(diagnosis, context);
-    source = "vision-only";
-  }
-  if (!reply) {
-    return NextResponse.json(
-      { error: "AI service temporarily unavailable", code: "UPSTREAM_ERROR" },
-      { status: 502 },
+  // Step 2: Gemini Localized Reasoning & Advisory
+  // Pass the output label + confidence from Step 1 directly into Gemini,
+  // alongside the user's text message and Firestore profile (Wilaya, crop type).
+  let reply: string;
+  try {
+    reply = await askGeminiStrict(
+      geminiKey,
+      message,
+      context,
+      diagnosis,
+      image ? { data: image.data, mimeType: image.mimeType } : null,
     );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const geminiMessage = msg.startsWith("Gemini Error:") ? msg : `Gemini Error: ${msg}`;
+    console.error(`[Step 2: Gemini Error] ${geminiMessage}`);
+    return NextResponse.json({ error: geminiMessage }, { status: 500 });
   }
 
+  const source: AssistantSource = diagnosis ? "hybrid" : "gemini";
   const payload: AssistantResponseBody = {
     reply,
     diagnosis,
     source,
-    warnings: warnings.length > 0 ? warnings : undefined,
   };
   return NextResponse.json(payload);
 }
