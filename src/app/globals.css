@@ -1,9 +1,14 @@
+@import url("https://fonts.googleapis.com/css2?family=Cairo:wght@200..1000&family=Plus+Jakarta+Sans:wght@200..800&display=swap");
 @import "tailwindcss";
 
-/* Fonts are wired from next/font CSS variables in app/layout.tsx */
+:root {
+  --font-cairo: "Cairo", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-jakarta: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+}
+
 @theme inline {
-  --font-arabic: var(--font-cairo), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  --font-latin: var(--font-jakarta), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-arabic: var(--font-cairo), -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-latin: var(--font-jakarta), -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 }
 
 /* ------------------------------------------------------------------ */

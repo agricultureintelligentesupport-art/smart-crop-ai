@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
 import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
+import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
@@ -50,6 +51,7 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
   const t = DASHBOARD[lang];
   const brand = AUTH[lang].header;
   const { profile, ready, patch, save, clear } = useProfile();
+  const { user: authUser, profile: authProfile, signOut: authSignOut, updateProfile } = useAuth();
 
   /** `null` = follow the stored profile; a value = the user overrode it here. */
   const [wilayaOverride, setWilayaOverride] = useState<string | null>(null);
@@ -60,14 +62,15 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
 
   // Derived from the stored profile (server renders the default, so hydration
   // is stable and no effect has to copy state around).
-  const wilayaCode = wilayaOverride ?? profile?.wilayaCode ?? DEFAULT_WILAYA_CODE;
-  const role = roleOverride ?? profile?.role ?? null;
+  const wilayaCode =
+    wilayaOverride ?? profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? DEFAULT_WILAYA_CODE;
+  const role = roleOverride ?? profile?.role ?? (authProfile?.role as AuthRole | null) ?? null;
 
   // /dashboard is member-only: no session → back to the auth flow.
   useEffect(() => {
     if (mode !== "member" || !ready) return;
-    if (!profile) router.replace("/auth");
-  }, [mode, profile, ready, router]);
+    if (!profile && !authUser) router.replace("/auth");
+  }, [authUser, mode, profile, ready, router]);
 
   // A guest arriving without a record still gets one, so choices stick.
   useEffect(() => {
@@ -96,7 +99,11 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
   });
 
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
-  const displayName = profile?.displayName ?? (mode === "guest" ? t.welcome.guest : "");
+  const displayName =
+    profile?.displayName ??
+    authProfile?.displayName ??
+    authUser?.displayName ??
+    (mode === "guest" ? t.welcome.guest : "");
   const greeting =
     mode === "guest"
       ? t.welcome.guest
@@ -105,14 +112,25 @@ export default function DashboardView({ mode }: { mode: "guest" | "member" }) {
   const updateWilaya = (code: string) => {
     setWilayaOverride(code);
     patch({ wilayaCode: code });
+    if (authUser) {
+      void updateProfile({ wilaya: code, wilayaCode: code });
+    }
   };
 
   const updateRole = (next: AuthRole) => {
     setRoleOverride(next);
     patch({ role: next });
+    if (authUser) {
+      void updateProfile({ role: next });
+    }
   };
 
   const signOut = async () => {
+    try {
+      await authSignOut();
+    } catch {
+      // ignore
+    }
     clear();
     router.push("/auth");
   };

@@ -34,6 +34,8 @@ export interface OtpChallenge {
   expiresAt: number;
   /** Epoch ms when a resend becomes possible. */
   resendAt: number;
+  /** Confirmation handle when backed by Firebase. */
+  result?: unknown;
 }
 
 export const AUTH_ERROR_CODES = [
@@ -64,6 +66,33 @@ export class AuthError extends Error {
 
 export function toAuthErrorCode(error: unknown): AuthErrorCode {
   if (error instanceof AuthError) return error.code;
+  const fbCode = (error as { code?: string })?.code;
+  if (typeof fbCode === "string") {
+    switch (fbCode) {
+      case "auth/invalid-email":
+      case "auth/invalid-password":
+        return "invalid-input";
+      case "auth/email-already-in-use":
+        return "email-in-use";
+      case "auth/user-not-found":
+        return "user-not-found";
+      case "auth/wrong-password":
+      case "auth/invalid-credential":
+        return "wrong-password";
+      case "auth/invalid-verification-code":
+        return "invalid-code";
+      case "auth/code-expired":
+        return "code-expired";
+      case "auth/too-many-requests":
+        return "too-many-requests";
+      case "auth/popup-closed-by-user":
+        return "popup-closed";
+      case "auth/network-request-failed":
+        return "network";
+      default:
+        break;
+    }
+  }
   return "unknown";
 }
 
