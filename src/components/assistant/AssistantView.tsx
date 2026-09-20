@@ -1,0 +1,527 @@
+"use client";
+
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  Bot,
+  Home,
+  ImagePlus,
+  LayoutDashboard,
+  LoaderCircle,
+  Send,
+  Sparkles,
+  X,
+} from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+} from "react";
+import AmbientBackdrop from "@/components/AmbientBackdrop";
+import LanguageSwitch from "@/components/auth/LanguageSwitch";
+import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
+import { useAuth } from "@/context/AuthContext";
+import { ASSISTANT } from "@/lib/assistant/copy";
+import type {
+  AssistantResponseBody,
+  AssistantSource,
+  AssistantDiagnosis,
+} from "@/lib/assistant/types";
+import { useProfile } from "@/lib/auth/profile";
+import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
+import { useLang } from "@/lib/use-lang";
+import DiagnosisCard from "./DiagnosisCard";
+import Markdown from "./Markdown";
+
+/* ------------------------------------------------------------------ */
+/*  Local chat model                                                   */
+/* ------------------------------------------------------------------ */
+
+interface PendingImage {
+  /** Full data-URL for the <img> preview. */
+  previewUrl: string;
+  /** Raw base64 (no prefix) sent to the API. */
+  data: string;
+  mimeType: string;
+}
+
+interface ChatMessage {
+  id: string;
+  author: "user" | "assistant";
+  text: string;
+  imageUrl?: string;
+  diagnosis?: AssistantDiagnosis | null;
+  source?: AssistantSource;
+  error?: boolean;
+}
+
+let idCounter = 0;
+const nextId = () => `msg-${Date.now()}-${idCounter++}`;
+
+/** Max source file accepted from the picker (before downscaling). */
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** Longest edge sent to the API — plenty for leaf classification. */
+const MAX_EDGE_PX = 1024;
+
+/**
+ * Read + downscale a photo on-device so a 12 MP phone shot becomes a compact
+ * JPEG (~150–400 KB) before it travels to `/api/assistant`.
+ */
+async function prepareImage(file: File): Promise<PendingImage> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("read-failed"));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("decode-failed"));
+    el.src = dataUrl;
+  });
+
+  const scale = Math.min(1, MAX_EDGE_PX / Math.max(img.naturalWidth, img.naturalHeight));
+  if (scale >= 1 && file.size < 1024 * 1024) {
+    const [prefix, data] = dataUrl.split(",", 2);
+    const mimeType = /^data:([^;]+)/.exec(prefix)?.[1] ?? file.type ?? "image/jpeg";
+    return { previewUrl: dataUrl, data: data ?? "", mimeType };
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("decode-failed");
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const jpegUrl = canvas.toDataURL("image/jpeg", 0.88);
+  return { previewUrl: jpegUrl, data: jpegUrl.split(",", 2)[1] ?? "", mimeType: "image/jpeg" };
+}
+
+/* ------------------------------------------------------------------ */
+/*  View                                                               */
+/* ------------------------------------------------------------------ */
+
+export default function AssistantView() {
+  const router = useRouter();
+  const { lang, setLang } = useLang("ar");
+  const t = ASSISTANT[lang];
+  const { profile, ready } = useProfile();
+  const { user: authUser, profile: authProfile } = useAuth();
+
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [busy, setBusy] = useState(false);
+  /** Whether the in-flight request carries a photo (drives the thinking label). */
+  const [busyWithImage, setBusyWithImage] = useState(false);
+  const [composerError, setComposerError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Snapshot of the last request so the retry chip can resend it. */
+  const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
+
+  // Same session gate as the dashboard: assistant answers are personalised,
+  // so an authenticated profile is required.
+  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  useEffect(() => {
+    if (!ready) return;
+    if (!authenticated) router.replace("/auth");
+  }, [authenticated, ready, router]);
+
+  // Pin the conversation to the newest message.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages, busy]);
+
+  const wilayaCode = profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? null;
+  const wilaya = wilayaCode ? getWilaya(wilayaCode) : null;
+  const preferredCropKey = (authProfile?.preferredCrop as CropKey | undefined) ?? wilaya?.crops[0];
+  const role = profile?.role ?? (authProfile?.role as string | null) ?? null;
+
+  const buildContext = useCallback(
+    () => ({
+      wilayaCode,
+      wilayaName: wilaya ? wilayaName(wilaya, lang) : null,
+      crop:
+        preferredCropKey && preferredCropKey in CROPS
+          ? CROPS[preferredCropKey as CropKey][lang]
+          : null,
+      role,
+      lang,
+      displayName: profile?.displayName ?? authProfile?.displayName ?? null,
+    }),
+    [wilayaCode, wilaya, preferredCropKey, role, lang, profile?.displayName, authProfile?.displayName],
+  );
+
+  const send = useCallback(
+    async (messageText: string, image: PendingImage | null) => {
+      const text = messageText.trim();
+      if ((!text && !image) || busy) return;
+
+      lastRequestRef.current = { message: text, image };
+      setMessages((prev) => [
+        ...prev,
+        { id: nextId(), author: "user", text, imageUrl: image?.previewUrl },
+      ]);
+      setDraft("");
+      setPendingImage(null);
+      setComposerError(null);
+      setBusy(true);
+      setBusyWithImage(image !== null);
+
+      try {
+        const res = await fetch("/api/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
+            context: buildContext(),
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const payload = (await res.json()) as AssistantResponseBody;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextId(),
+            author: "assistant",
+            text: payload.reply,
+            diagnosis: payload.diagnosis ?? null,
+            source: payload.source,
+          },
+        ]);
+      } catch {
+        setMessages((prev) => [
+          ...prev,
+          { id: nextId(), author: "assistant", text: t.chat.error, error: true },
+        ]);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, buildContext, t.chat.error],
+  );
+
+  const retryLast = useCallback(() => {
+    const last = lastRequestRef.current;
+    if (!last || busy) return;
+    // Drop the failed bubble + its user message duplicate stays (history is honest).
+    setMessages((prev) => prev.filter((m) => !m.error));
+    void send(last.message, last.image);
+  }, [busy, send]);
+
+  const onPickFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      if (file.size > MAX_FILE_BYTES) {
+        setComposerError(t.composer.imageTooLarge);
+        return;
+      }
+      try {
+        setComposerError(null);
+        setPendingImage(await prepareImage(file));
+        textareaRef.current?.focus();
+      } catch {
+        setComposerError(t.composer.imageUnreadable);
+      }
+    },
+    [t.composer.imageTooLarge, t.composer.imageUnreadable],
+  );
+
+  const onChip = useCallback(
+    (chip: { message: string; withImage?: boolean }) => {
+      if (chip.withImage && !pendingImage) {
+        setDraft(chip.message);
+        fileInputRef.current?.click();
+        return;
+      }
+      void send(chip.message, pendingImage);
+    },
+    [pendingImage, send],
+  );
+
+  const onComposerKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        void send(draft, pendingImage);
+      }
+    },
+    [draft, pendingImage, send],
+  );
+
+  const canSend = (draft.trim().length > 0 || pendingImage !== null) && !busy;
+  const emptyChat = messages.length === 0;
+
+  return (
+    <div
+      dir={lang === "ar" ? "rtl" : "ltr"}
+      className={`screen-h relative flex flex-col overflow-hidden text-emerald-950 ${
+        lang === "ar" ? "font-arabic" : "font-latin"
+      }`}
+      style={{ background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 58%, #DCF5E6 100%)" }}
+    >
+      <AmbientBackdrop variant="dashboard" />
+
+      {/* Header */}
+      <header className="pt-safe relative z-30 mx-auto flex w-full max-w-[860px] shrink-0 items-center justify-between gap-2 px-3.5 pb-1.5 sm:px-5">
+        <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)]">
+            <Bot size={15} strokeWidth={2.4} className="text-white" aria-hidden />
+          </span>
+          <span className="flex min-w-0 flex-col leading-tight">
+            <span className="truncate text-[11.5px] font-black whitespace-nowrap text-emerald-950">
+              {t.header.title}
+            </span>
+            <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
+              {t.header.subtitle}
+            </span>
+          </span>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
+          <LanguageSwitch
+            lang={lang}
+            onChange={setLang}
+            ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
+            labels={{ ar: t.header.langAr, fr: t.header.langFr }}
+            layoutId="assistant-lang-thumb"
+          />
+          <Link
+            href="/dashboard"
+            aria-label={t.header.navDashboard}
+            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+          >
+            <LayoutDashboard size={16} strokeWidth={2.4} aria-hidden />
+          </Link>
+          <Link
+            href="/"
+            aria-label={t.header.navHome}
+            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+          >
+            <Home size={16} strokeWidth={2.4} aria-hidden />
+          </Link>
+        </div>
+      </header>
+
+      {/* Conversation */}
+      <main
+        ref={scrollRef}
+        className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        aria-live="polite"
+      >
+        <div className="mx-auto flex w-full max-w-[860px] flex-col gap-3 px-3.5 pb-4 pt-2 sm:px-5">
+          {emptyChat && (
+            <motion.section
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.45, ease: EASE_OUT }}
+              className={`glass-card ${GPU} mt-4 rounded-3xl p-5 sm:mt-10 sm:p-7`}
+            >
+              <span className="mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_28px_rgba(16,185,129,0.45)]">
+                <Sparkles size={24} strokeWidth={2.2} className="text-white" aria-hidden />
+              </span>
+              <h1 className="text-[19px] font-black leading-7 text-emerald-950">{t.hero.greeting}</h1>
+              <p className="mt-1.5 max-w-[52ch] text-[13px] font-semibold leading-6 text-emerald-900/70">
+                {t.hero.intro}
+              </p>
+            </motion.section>
+          )}
+
+          <AnimatePresence initial={false}>
+            {messages.map((msg) => (
+              <motion.div
+                key={msg.id}
+                initial={{ opacity: 0, y: 12, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.32, ease: EASE_OUT }}
+                className={`${GPU} flex ${msg.author === "user" ? "justify-start flex-row-reverse" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[92%] sm:max-w-[78%] ${
+                    msg.author === "user"
+                      ? "rounded-3xl rounded-es-lg bg-gradient-to-br from-emerald-500 to-green-600 px-4 py-3 text-white shadow-[0_10px_28px_rgba(16,185,129,0.32)]"
+                      : "glass-card rounded-3xl rounded-ss-lg px-4 py-3.5"
+                  }`}
+                >
+                  {msg.author === "assistant" && (
+                    <p className="mb-1.5 flex items-center gap-1.5 text-[10px] font-black text-emerald-700/70">
+                      <Bot size={11} strokeWidth={2.8} aria-hidden />
+                      {t.chat.assistant}
+                    </p>
+                  )}
+
+                  {msg.imageUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element -- local data-URL preview, next/image cannot optimise it
+                    <img
+                      src={msg.imageUrl}
+                      alt={t.composer.imageAlt}
+                      className="mb-2 max-h-56 w-full rounded-2xl object-cover"
+                    />
+                  )}
+
+                  {msg.diagnosis && (
+                    <div className="mb-3">
+                      <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
+                    </div>
+                  )}
+
+                  {msg.author === "assistant" ? (
+                    <Markdown text={msg.text} />
+                  ) : (
+                    msg.text && (
+                      <p className="whitespace-pre-wrap text-[13.5px] font-bold leading-6">{msg.text}</p>
+                    )
+                  )}
+
+                  {msg.source === "offline" && (
+                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.offlineNote}</p>
+                  )}
+                  {msg.source === "vision-only" && (
+                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.visionOnlyNote}</p>
+                  )}
+                  {msg.error && (
+                    <button
+                      type="button"
+                      onClick={retryLast}
+                      className={`mt-2 rounded-xl bg-emerald-100 px-3 py-1.5 text-[11px] font-black text-emerald-800 transition-colors hover:bg-emerald-200 ${FOCUS_RING}`}
+                    >
+                      {t.chat.retry}
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+
+          {busy && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={`${GPU} flex justify-start`}
+            >
+              <div className="glass-card flex items-center gap-2.5 rounded-3xl rounded-ss-lg px-4 py-3">
+                <LoaderCircle size={15} strokeWidth={2.6} className="animate-spin text-emerald-600" aria-hidden />
+                <span className="text-[12px] font-bold text-emerald-900/70">
+                  {busyWithImage ? t.chat.thinkingVision : t.chat.thinking}
+                </span>
+              </div>
+            </motion.div>
+          )}
+        </div>
+      </main>
+
+      {/* Composer */}
+      <footer className="relative z-20 mx-auto w-full max-w-[860px] shrink-0 px-3.5 pb-3.5 sm:px-5 sm:pb-5">
+        {/* Quick-action chips */}
+        <div className="scroll-area mb-2 flex gap-1.5 overflow-x-auto pb-0.5">
+          {t.chips.map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              disabled={busy}
+              onClick={() => onChip(chip)}
+              className={`glass ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-3.5 py-2 text-[11.5px] font-black text-emerald-800 transition-colors hover:bg-white/95 disabled:opacity-50`}
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="glass-card rounded-3xl p-2">
+          <AnimatePresence>
+            {pendingImage && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.24, ease: EASE_OUT }}
+                className="overflow-hidden"
+              >
+                <div className="relative m-1 mb-2 w-fit">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- local data-URL preview */}
+                  <img
+                    src={pendingImage.previewUrl}
+                    alt={t.composer.imageAlt}
+                    className="h-24 w-24 rounded-2xl object-cover ring-2 ring-emerald-200"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPendingImage(null)}
+                    aria-label={t.composer.removeImage}
+                    className={`absolute -end-2 -top-2 grid h-7 w-7 place-items-center rounded-full bg-emerald-900 text-white shadow-md transition-colors hover:bg-emerald-700 ${FOCUS_RING}`}
+                  >
+                    <X size={13} strokeWidth={3} aria-hidden />
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {composerError && (
+            <p role="alert" className="mx-2 mb-1.5 text-[11px] font-bold text-orange-600">
+              {composerError}
+            </p>
+          )}
+
+          <div className="flex items-end gap-1.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => void onPickFile(e)}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label={t.composer.attach}
+              disabled={busy}
+              className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 transition-colors hover:bg-emerald-100 disabled:opacity-50 ${FOCUS_RING}`}
+            >
+              <ImagePlus size={17} strokeWidth={2.4} aria-hidden />
+            </button>
+
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onComposerKeyDown}
+              placeholder={t.composer.placeholder}
+              rows={1}
+              disabled={busy}
+              className="max-h-32 min-h-[44px] flex-1 resize-none bg-transparent px-2 py-2.5 text-[13.5px] font-bold leading-6 text-emerald-950 outline-none placeholder:text-emerald-900/40 disabled:opacity-60"
+            />
+
+            <motion.button
+              type="button"
+              whileTap={canSend ? { scale: 0.92 } : undefined}
+              onClick={() => void send(draft, pendingImage)}
+              disabled={!canSend}
+              aria-label={t.composer.send}
+              className={`glow-emerald ${GPU} ${FOCUS_RING} grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 via-emerald-500 to-green-600 text-white transition-all hover:from-emerald-400 hover:to-green-500 disabled:cursor-not-allowed disabled:opacity-45`}
+            >
+              {busy ? (
+                <LoaderCircle size={17} strokeWidth={2.6} className="animate-spin" aria-hidden />
+              ) : (
+                <Send size={16} strokeWidth={2.5} className={lang === "ar" ? "-scale-x-100" : ""} aria-hidden />
+              )}
+            </motion.button>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
