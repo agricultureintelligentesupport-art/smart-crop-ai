@@ -5,7 +5,7 @@
  * labels shaped like `Tomato___Late_blight`, `Corn_(maize)___Common_rust_` or
  * `Apple___healthy` (exact casing/underscores vary per checkpoint). This
  * module parses those labels robustly and maps both halves to natural Arabic
- * so the UI and the Gemini prompt can talk about "الطماطم — اللفحة المتأخرة"
+ * so the UI and the LLM prompt can talk about "الطماطم — اللفحة المتأخرة"
  * instead of a raw machine label.
  *
  * Server-safe: no browser APIs, no React.

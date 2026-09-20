@@ -8,7 +8,7 @@ import type { AssistantDiagnosis } from "@/lib/assistant/types";
 /**
  * Structured card for the PlantVillage vision verdict: localized disease
  * name, a confidence meter with color-coded buckets and the runner-up
- * candidates — displayed above the Gemini treatment plan.
+ * candidates — displayed above the LLM treatment plan.
  */
 export default function DiagnosisCard({
   diagnosis,
