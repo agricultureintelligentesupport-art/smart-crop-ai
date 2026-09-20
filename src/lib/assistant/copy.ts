@@ -87,7 +87,7 @@ const AR: AssistantCopy = {
     error: "وقع خطأ أثناء الاتصال بالمساعد. حاول مرة أخرى.",
     retry: "إعادة المحاولة",
     unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
-    visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (Gemini غير متاح).",
+    visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
   },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
@@ -138,7 +138,7 @@ const FR: AssistantCopy = {
     error: "Erreur de connexion à l'assistant. Réessayez.",
     retry: "Réessayer",
     unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
-    visionOnlyNote: "Diagnostic image seul — conseils généraux (Gemini indisponible).",
+    visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",

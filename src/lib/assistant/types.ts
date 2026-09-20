@@ -1,7 +1,7 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the hybrid
  * pipeline behind `/api/assistant` (Hugging Face PlantVillage vision +
- * Google Gemini 2.0 Flash reasoning, with 1.5 model fallbacks).
+ * Hugging Face LLM reasoning, with a smaller-model fallback).
  *
  * Kept dependency-free and importable from both server and client code.
  */
@@ -58,11 +58,11 @@ export interface AssistantDiagnosis {
 }
 
 export type AssistantSource =
-  /** Vision diagnosis + Gemini reasoning. */
+  /** Vision diagnosis + HF LLM reasoning. */
   | "hybrid"
-  /** Gemini only (no image, or vision unavailable). */
-  | "gemini"
-  /** Vision only (Gemini unavailable) with templated advice. */
+  /** HF LLM only (no image attached). */
+  | "llm"
+  /** Vision only (LLM unavailable) with templated advice. */
   | "vision-only";
 
 export interface AssistantResponseBody {

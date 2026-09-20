@@ -45,7 +45,7 @@ test("chat mounts without configuration warnings and reports missing keys only a
   // A corrected server configuration recovers through the existing retry flow.
   await page.unroute("**/api/assistant");
   await page.route("**/api/assistant", route => route.fulfill({
-    json: { reply: "اسقِ في الصباح الباكر.", source: "gemini", diagnosis: null },
+    json: { reply: "اسقِ في الصباح الباكر.", source: "llm", diagnosis: null },
   }));
   await page.getByRole("button", { name: copy.chat.retry }).click();
   await expect(page.getByText("اسقِ في الصباح الباكر.", { exact: true })).toBeVisible();
