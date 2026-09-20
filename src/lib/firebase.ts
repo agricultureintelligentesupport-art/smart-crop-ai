@@ -44,6 +44,19 @@ const firebaseConfig = {
   measurementId,
 };
 
+/**
+ * One Google provider for every sign-in entry point (popup AND redirect).
+ *
+ * `prompt: select_account` forces Google's account chooser, so clicking
+ * "Continue with Google" always shows the account selection screen instead of
+ * silently re-using the previously signed-in account.
+ */
+function createGoogleProvider(): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  return provider;
+}
+
 let app: FirebaseApp;
 let auth: Auth;
 let db: Firestore;
@@ -53,20 +66,19 @@ try {
   app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
-  googleProvider = new GoogleAuthProvider();
-  googleProvider.setCustomParameters({ prompt: "select_account" });
+  googleProvider = createGoogleProvider();
 } catch {
   // Safe build-time and SSR fallback when invalid or dummy environment variables are provided
   try {
     app = getApps().length > 0 ? getApp() : initializeApp(DEFAULT_FIREBASE_CONFIG);
     auth = getAuth(app);
     db = getFirestore(app);
-    googleProvider = new GoogleAuthProvider();
+    googleProvider = createGoogleProvider();
   } catch {
     app = (getApps().length > 0 ? getApp() : {}) as FirebaseApp;
     auth = {} as Auth;
     db = {} as Firestore;
-    googleProvider = new GoogleAuthProvider();
+    googleProvider = createGoogleProvider();
   }
 }
 

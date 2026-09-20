@@ -47,6 +47,9 @@ export const AUTH_ERROR_CODES = [
   "code-expired",
   "too-many-requests",
   "popup-closed",
+  "popup-blocked",
+  "unauthorized-domain",
+  "operation-not-supported",
   "network",
   "unknown",
 ] as const;
@@ -86,7 +89,16 @@ export function toAuthErrorCode(error: unknown): AuthErrorCode {
       case "auth/too-many-requests":
         return "too-many-requests";
       case "auth/popup-closed-by-user":
+      case "auth/cancelled-popup-request":
+      case "auth/cancelled-redirect":
+      case "auth/redirect-cancelled-by-user":
         return "popup-closed";
+      case "auth/popup-blocked":
+        return "popup-blocked";
+      case "auth/unauthorized-domain":
+        return "unauthorized-domain";
+      case "auth/operation-not-supported-in-this-environment":
+        return "operation-not-supported";
       case "auth/network-request-failed":
         return "network";
       default:

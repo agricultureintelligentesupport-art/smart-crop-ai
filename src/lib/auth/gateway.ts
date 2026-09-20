@@ -117,8 +117,12 @@ export function createDemoGateway(): AuthGateway {
     demoOtp: DEMO_OTP,
 
     /**
-     * Firebase: `signInWithPopup(auth, new GoogleAuthProvider())`
-     * then `setDoc(doc(db, "users", cred.user.uid), { ...profile }, { merge: true })`.
+     * On-device stand-in for Google sign-in (kept for the AuthGateway
+     * interface). NOTE: `useAuthFlow.handleGoogleAuth` never calls it — the
+     * Google button ALWAYS performs real Firebase Auth (popup → redirect
+     * fallback → getRedirectResult, see src/lib/auth/googleFlow.ts) so the
+     * wizard can only advance with a real Firebase user. See
+     * `docs/firebase-adapter.md` §7.
      */
     async signInWithGoogle() {
       const users = readUsers();

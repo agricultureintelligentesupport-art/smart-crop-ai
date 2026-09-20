@@ -26,6 +26,8 @@ import {
   type SessionUser,
 } from "./types";
 import { isValidDzMobile, normalizeDzPhone, toE164 } from "./validation";
+import { logAuthError, logAuthInfo } from "./logging";
+import { syncUserDoc } from "./userDoc";
 import { getWilaya } from "@/lib/wilayas";
 
 type FirebaseChallenge = OtpChallenge & { result: ConfirmationResult };
@@ -60,29 +62,31 @@ export function createFirebaseAuthGateway(): AuthGateway {
           }
         }
         const cred = await signInWithPopup(auth, googleProvider);
-        const data = await loadProfile(cred.user.uid);
-        await setDoc(
-          doc(db, "users", cred.user.uid),
+        logAuthInfo("signInWithPopup", `complete (uid ${cred.user.uid})`);
+        // Reliable users/{uid} sync (merge + retry + logging) — the same
+        // helper the popup and redirect paths in useAuthFlow use, so the
+        // profile document is maintained identically on every entry point.
+        const { ok, data, error } = await syncUserDoc(
           {
             uid: cred.user.uid,
-            displayName: cred.user.displayName ?? data.displayName ?? "",
-            email: cred.user.email ?? "",
-            photoURL: cred.user.photoURL ?? null,
-            lastLoginAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
+            displayName: cred.user.displayName,
+            email: cred.user.email,
+            photoURL: cred.user.photoURL,
           },
-          { merge: true },
+          { lastLoginAt: new Date().toISOString() },
         );
+        if (!ok) logAuthError("google-profile-sync", error);
         return {
           uid: cred.user.uid,
           method: "google",
           displayName: cred.user.displayName ?? data.displayName ?? "",
-          email: cred.user.email ?? undefined,
+          email: cred.user.email ?? data.email ?? undefined,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
           isGuest: false,
         };
       } catch (error) {
+        logAuthError("signInWithGoogle (gateway)", error);
         throw new AuthError(toAuthErrorCode(error));
       }
     },

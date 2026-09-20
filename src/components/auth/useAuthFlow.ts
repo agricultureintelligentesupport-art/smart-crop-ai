@@ -4,15 +4,21 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createUserWithEmailAndPassword,
+  getRedirectResult,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut as fbSignOut,
   updateProfile,
+  type User,
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db, googleProvider } from "@/lib/firebase";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
+import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
+import { runGoogleSignIn } from "@/lib/auth/googleFlow";
 import { createAuthGateway } from "@/lib/auth/gateway";
+import { syncUserDoc } from "@/lib/auth/userDoc";
 import {
   guestProfile,
   profileFromUser,
@@ -97,6 +103,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const [user, setUser] = useState<SessionUser | null>(null);
   const [busy, setBusy] = useState<BusyState>(null);
   const [errorCode, setErrorCode] = useState<AuthErrorCode | null>(null);
+  /** Google-specific failure copy, rendered right under the Google button. */
+  const [googleError, setGoogleError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
@@ -240,72 +248,129 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
 
   /* ---------------- Step 1 · Google ---------------- */
 
-  const handleGoogleAuth = useCallback(async () => {
-    clearErrors();
-    setNotice(null);
-    setBusy("google");
-    try {
-      let session: SessionUser;
-      try {
-        const cred = await signInWithPopup(auth, googleProvider);
-        const fbUser = cred.user;
-        const userDocRef = doc(db, "users", fbUser.uid);
-        const snap = await getDoc(userDocRef);
-        const existingData = snap.exists() ? snap.data() : {};
-
-        const resolvedRole = (existingData.role ?? role) as AuthRole | null;
-        const resolvedWilaya = (existingData.wilayaCode ?? existingData.wilaya ?? wilayaCode) as string | null;
-        const wilayaData = resolvedWilaya ? getWilaya(resolvedWilaya) : null;
-        const preferredCrop = existingData.preferredCrop ?? wilayaData?.crops?.[0] ?? null;
-
-        await setDoc(
-          userDocRef,
-          {
-            uid: fbUser.uid,
-            displayName: fbUser.displayName || existingData.displayName || "",
-            email: fbUser.email || existingData.email || "",
-            photoURL: fbUser.photoURL || existingData.photoURL || null,
-            role: resolvedRole,
-            wilaya: resolvedWilaya,
-            wilayaCode: resolvedWilaya,
-            preferredCrop,
-            lastLoginAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true },
-        );
-
-        session = {
+  /**
+   * Shared post-sign-in work for real Google users (popup path AND redirect
+   * path): sync `users/{uid}` in Firestore via the retrying
+   * `syncUserDoc()`, then build the SessionUser. The profile write never
+   * blocks the session — on final failure it logs and warns instead.
+   */
+  const buildGoogleSession = useCallback(
+    async (fbUser: User): Promise<SessionUser> => {
+      const { ok, data, error } = await syncUserDoc(
+        {
           uid: fbUser.uid,
-          method: "google",
-          displayName: fbUser.displayName || existingData.displayName || "",
-          email: fbUser.email ?? undefined,
-          role: resolvedRole,
-          wilayaCode: resolvedWilaya,
-          isGuest: false,
-        };
-      } catch (popupErr: unknown) {
-        const errCode = (popupErr as { code?: string })?.code;
-        if (
-          gateway.isDemo ||
-          errCode === "auth/popup-closed-by-user" ||
-          errCode === "auth/cancelled-popup-request" ||
-          errCode === "auth/operation-not-supported-in-this-environment"
-        ) {
-          session = await gateway.signInWithGoogle();
-        } else {
-          throw popupErr;
-        }
+          displayName: fbUser.displayName,
+          email: fbUser.email,
+          photoURL: fbUser.photoURL,
+        },
+        { role: role ?? null, wilayaCode: wilayaCode ?? null, lastLoginAt: new Date().toISOString() },
+      );
+      if (!ok) {
+        logAuthError("google-profile-sync", error);
+        if (mounted.current) setNotice(t.errors.profileSave);
       }
 
+      const resolvedRole = (data.role ?? role) as AuthRole | null;
+      const resolvedWilaya = (data.wilayaCode ?? data.wilaya ?? wilayaCode) as string | null;
+
+      return {
+        uid: fbUser.uid,
+        method: "google",
+        displayName: fbUser.displayName || data.displayName || "",
+        email: fbUser.email ?? data.email ?? undefined,
+        role: resolvedRole,
+        wilayaCode: resolvedWilaya,
+        isGuest: false,
+      };
+    },
+    [role, t, wilayaCode],
+  );
+
+  /* ---------------- Google redirect result ----------------
+   * signInWithRedirect() (mobile first, or the popup-blocked fallback)
+   * navigates the whole browser away; the credential only comes back with the
+   * next load of this page. getRedirectResult() consumes the pending redirect
+   * exactly once — on every normal load it simply resolves to null, so this
+   * is safe on every mount.
+   */
+  const redirectHandled = useRef(false);
+  useEffect(() => {
+    if (redirectHandled.current) return;
+    if (typeof window === "undefined") return;
+    if (!auth || !(auth as { app?: unknown }).app) return;
+    redirectHandled.current = true;
+
+    (async () => {
+      let redirect: { user: User } | null;
+      try {
+        redirect = await getRedirectResult(auth);
+      } catch (error) {
+        logAuthError("getRedirectResult", error);
+        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+        return;
+      }
+      // Strict gate: a redirect only completes the sign-in when it yields a
+      // valid Firebase user object — otherwise the wizard stays on step 1.
+      if (!redirect?.user?.uid) return;
+      logAuthInfo("google", `redirect sign-in complete (uid ${redirect.user.uid})`);
+      try {
+        const session = await buildGoogleSession(redirect.user);
+        if (mounted.current) afterAuth(session);
+      } catch (error) {
+        logAuthError("google-profile-sync", error);
+        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+      }
+    })();
+  }, [afterAuth, buildGoogleSession, copyFor]);
+
+  const handleGoogleAuth = useCallback(async () => {
+    clearErrors();
+    setGoogleError(null);
+    setNotice(null);
+    setBusy("google");
+
+    try {
+      // Google sign-in ALWAYS goes through real Firebase Auth — there is no
+      // on-device/mock session for it. runGoogleSignIn() only ever produces
+      // `signed-in` from a valid Firebase user object (popup, or the redirect
+      // consumed below), so the wizard can never advance without real auth.
+      const outcome = await runGoogleSignIn({
+        signInWithPopup: () => signInWithPopup(auth, googleProvider),
+        signInWithRedirect: () => signInWithRedirect(auth, googleProvider),
+        onRedirectStart: () => {
+          if (mounted.current) setNotice(t.method.googleRedirecting);
+        },
+      });
+
+      if (outcome.kind === "signed-in") {
+        logAuthInfo("google", `sign-in complete (uid ${outcome.user.uid})`);
+        const session = await buildGoogleSession(outcome.user);
+        if (!mounted.current) return;
+        afterAuth(session);
+        return;
+      }
+
+      if (outcome.kind === "redirect-started") {
+        // The browser is navigating to Google's account chooser. The wizard
+        // stays put until the real session comes back via getRedirectResult().
+        logAuthInfo("google", "redirect started — waiting for getRedirectResult on return");
+        return;
+      }
+
+      // user-cancelled / unauthorized-domain / failed: keep the user on step
+      // 1 with an explicit, localised message (the `finally` below resets the
+      // loading state).
       if (!mounted.current) return;
-      afterAuth(session);
-    } catch (error) {
-      if (mounted.current) setErrorCode(toAuthErrorCode(error));
+      if (outcome.kind === "user-cancelled") setGoogleError(copyFor("popup-closed"));
+      else if (outcome.kind === "unauthorized-domain") setGoogleError(copyFor("unauthorized-domain"));
+      else setGoogleError(copyFor(outcome.code));
+    } catch (error: unknown) {
+      logAuthError("handleGoogleAuth", error);
+      if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, clearErrors, gateway, role, wilayaCode]);
+  }, [afterAuth, buildGoogleSession, clearErrors, copyFor, t]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 
@@ -695,6 +760,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     busy,
     errorCode,
     errorMessage,
+    googleError,
     fieldErrors,
     notice,
     emailStrength,
@@ -739,6 +805,12 @@ function codeKey(code: AuthErrorCode): keyof AuthCopy["errors"] {
       return "tooMany";
     case "popup-closed":
       return "popupClosed";
+    case "popup-blocked":
+      return "popupBlocked";
+    case "unauthorized-domain":
+      return "unauthorizedDomain";
+    case "operation-not-supported":
+      return "operationNotSupported";
     case "network":
       return "network";
     default:
