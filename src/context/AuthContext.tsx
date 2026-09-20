@@ -52,73 +52,88 @@ export const AuthContext = createContext<AuthContextType>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(() => Boolean(auth && (auth as { app?: unknown }).app));
 
   useEffect(() => {
     let profileUnsub: Unsubscribe | null = null;
+    let authUnsub: (() => void) | null = null;
 
-    const authUnsub = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
+    if (!auth || !(auth as { app?: unknown }).app) {
+      return;
+    }
 
-      if (profileUnsub) {
-        profileUnsub();
-        profileUnsub = null;
-      }
+    try {
+      authUnsub = onAuthStateChanged(auth, (currentUser) => {
+        setUser(currentUser);
 
-      if (currentUser) {
-        const userDocRef = doc(db, "users", currentUser.uid);
-        profileUnsub = onSnapshot(
-          userDocRef,
-          (snapshot) => {
-            if (snapshot.exists()) {
-              const data = snapshot.data() as UserProfile;
-              setProfile(data);
+        if (profileUnsub) {
+          profileUnsub();
+          profileUnsub = null;
+        }
 
-              // Sync with local session storage for offline / quick hydration
-              const role = (data.role as AuthRole | null) ?? null;
-              const wilaya = data.wilaya ?? data.wilayaCode ?? null;
-              const method =
-                currentUser.providerData?.[0]?.providerId === "google.com" ? "google" : "email";
+        if (currentUser && db && (db as { app?: unknown }).app) {
+          try {
+            const userDocRef = doc(db, "users", currentUser.uid);
+            profileUnsub = onSnapshot(
+              userDocRef,
+              (snapshot) => {
+                if (snapshot.exists()) {
+                  const data = snapshot.data() as UserProfile;
+                  setProfile(data);
 
-              const stored: StoredProfile = {
-                uid: currentUser.uid,
-                method,
-                displayName:
-                  data.displayName || currentUser.displayName || currentUser.email?.split("@")[0] || "",
-                email: currentUser.email ?? undefined,
-                role,
-                wilayaCode: wilaya,
-                isGuest: false,
-                updatedAt: Date.now(),
-              };
-              writeProfile(stored);
-            } else {
-              setProfile(null);
-            }
+                  // Sync with local session storage for offline / quick hydration
+                  const role = (data.role as AuthRole | null) ?? null;
+                  const wilaya = data.wilaya ?? data.wilayaCode ?? null;
+                  const method =
+                    currentUser.providerData?.[0]?.providerId === "google.com" ? "google" : "email";
+
+                  const stored: StoredProfile = {
+                    uid: currentUser.uid,
+                    method,
+                    displayName:
+                      data.displayName || currentUser.displayName || currentUser.email?.split("@")[0] || "",
+                    email: currentUser.email ?? undefined,
+                    role,
+                    wilayaCode: wilaya,
+                    isGuest: false,
+                    updatedAt: Date.now(),
+                  };
+                  writeProfile(stored);
+                } else {
+                  setProfile(null);
+                }
+                setLoading(false);
+              },
+              (error) => {
+                console.warn("Firestore user profile subscription error:", error);
+                setLoading(false);
+              },
+            );
+          } catch (err) {
+            console.warn("Firestore listener initialization skipped:", err);
             setLoading(false);
-          },
-          (error) => {
-            console.error("Firestore user profile subscription error:", error);
-            setLoading(false);
-          },
-        );
-      } else {
-        setProfile(null);
-        setLoading(false);
-      }
-    });
+          }
+        } else {
+          setProfile(null);
+          setLoading(false);
+        }
+      });
+    } catch (err) {
+      console.warn("Auth listener initialization skipped:", err);
+      queueMicrotask(() => setLoading(false));
+    }
 
     return () => {
-      authUnsub();
-      if (profileUnsub) {
-        profileUnsub();
-      }
+      if (authUnsub) authUnsub();
+      if (profileUnsub) profileUnsub();
     };
   }, []);
 
   const signOut = async () => {
     try {
-      await fbSignOut(auth);
+      if (auth && (auth as { app?: unknown }).app) {
+        await fbSignOut(auth);
+      }
       clearProfile();
       setUser(null);
       setProfile(null);
@@ -129,9 +144,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateProfile = async (data: Partial<UserProfile>) => {
-    if (!user) return;
-    const userDocRef = doc(db, "users", user.uid);
-    await setDoc(userDocRef, data, { merge: true });
+    if (!user || !db || !(db as { app?: unknown }).app) return;
+    try {
+      const userDocRef = doc(db, "users", user.uid);
+      await setDoc(userDocRef, data, { merge: true });
+    } catch (err) {
+      console.warn("Update profile error:", err);
+    }
   };
 
   const role = (profile?.role as string | null) ?? null;

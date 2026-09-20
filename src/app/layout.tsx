@@ -1,19 +1,6 @@
 import type { Metadata, Viewport } from "next";
-import { Cairo, Plus_Jakarta_Sans } from "next/font/google";
 import { AuthProvider } from "@/context/AuthContext";
 import "./globals.css";
-
-const cairo = Cairo({
-  variable: "--font-cairo",
-  subsets: ["arabic", "latin"],
-  display: "swap",
-});
-
-const jakarta = Plus_Jakarta_Sans({
-  variable: "--font-jakarta",
-  subsets: ["latin"],
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "محصولي الذكي · Smart Crop AI",
@@ -40,9 +27,8 @@ export default function RootLayout({
       lang="ar"
       dir="rtl"
       suppressHydrationWarning
-      className={`${cairo.variable} ${jakarta.variable}`}
     >
-      <body className="min-h-full overflow-hidden antialiased">
+      <body className="min-h-full overflow-hidden antialiased font-arabic">
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>

@@ -220,7 +220,9 @@ export function createFirebaseAuthGateway(): AuthGateway {
     },
 
     async signOut(): Promise<void> {
-      await signOut(auth);
+      if (auth && (auth as { app?: unknown }).app) {
+        await signOut(auth);
+      }
     },
   };
 }
