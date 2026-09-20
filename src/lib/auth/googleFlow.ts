@@ -1,7 +1,7 @@
 import type { User } from "firebase/auth";
 import { describeAuthError, type AuthErrorReport } from "./errorReport";
 import { logAuthError, logAuthInfo } from "./logging";
-import { isMobileBrowser } from "./platform";
+
 import { AuthError, type AuthErrorCode } from "./types";
 
 /**
@@ -91,18 +91,28 @@ async function startRedirect(runner: GoogleAuthRunner): Promise<GoogleAuthOutcom
   }
 }
 
+/**
+ * Popup-blocking / unsupported-environment codes that SHOULD trigger the
+ * full-page redirect fallback. User-closed codes are deliberately NOT here —
+ * dragging a user into a redirect after they already cancelled the chooser is
+ * poor UX; those stay on step 1 with a retry offer.
+ */
+const POPUP_FALLBACK_CODES: readonly string[] = [
+  "auth/popup-blocked",
+  "auth/popup-blocked-by-browser",
+  "auth/operation-not-supported-in-this-environment",
+];
+
+/**
+ * Runs the Google sign-in flow with `signInWithPopup` as the primary method
+ * on every browser (desktop and mobile). The old mobile-first redirect bypass
+ * is removed: cross-domain storage partitioning between `vercel.app` and
+ * `firebaseapp.com` was causing `getRedirectResult(auth)` to resolve to `null`
+ * on mobile, so the popup path is now always tried first and only falls back
+ * to `signInWithRedirect` when the popup is actually blocked.
+ */
 export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleAuthOutcome> {
-  const mobile = runner.isMobile ?? isMobileBrowser();
-
-  // Mobile browsers block or botch OAuth popups: use the full-page redirect
-  // from the start. Google still shows its account chooser there (the shared
-  // provider carries prompt=select_account); the `getRedirectResult` effect
-  // in useAuthFlow finishes the sign-in on the way back.
-  if (mobile) {
-    logAuthInfo("google", "mobile browser → using signInWithRedirect instead of a popup");
-    return startRedirect(runner);
-  }
-
+  // 1. Always try the popup first — on desktop AND mobile.
   await ensurePersistenceBeforeSignIn(runner, "signInWithPopup");
 
   let cred: { user: User } | undefined;
@@ -119,16 +129,23 @@ export async function runGoogleSignIn(runner: GoogleAuthRunner): Promise<GoogleA
       return { kind: "user-cancelled", report };
     }
 
-    // A redirect would fail identically: this is a Firebase-console setup
-    // problem (Authorized domains), so surface it instead of retrying.
+    // Firebase console setup problem (Authorized domains): surface, don't retry.
     if (errCode === "auth/unauthorized-domain") {
       return { kind: "unauthorized-domain", report };
     }
 
-    // Popup blocked or unsupported environment (mobile web view, headless,
-    // pop-up blocker): fall back to the full-page redirect.
-    logAuthInfo("google", "popup blocked/unsupported → falling back to signInWithRedirect");
-    return startRedirect(runner);
+    // Popup was blocked by the browser / unsupported environment: fall back to
+    // the full-page redirect, which still works on mobile (the shared provider
+    // carries `prompt=select_account` so Google still shows its account chooser).
+    if (POPUP_FALLBACK_CODES.includes(errCode ?? "")) {
+      logAuthInfo("google", "popup blocked/unsupported → falling back to signInWithRedirect");
+      return startRedirect(runner);
+    }
+
+    // Any other unexpected popup error: surface it rather than silently
+    // redirecting (which would lose the original error context).
+    logAuthInfo("google", `popup failed with unexpected code ${errCode ?? "unknown"} — surfacing`);
+    return { kind: "failed", code: report.appCode, report };
   }
 
   // Strict gate: the wizard only advances with a valid Firebase user object.
