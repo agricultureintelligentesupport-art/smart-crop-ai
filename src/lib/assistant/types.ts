@@ -1,7 +1,10 @@
 /**
- * Shared contracts between the assistant UI (`/assistant`) and the hybrid
- * pipeline behind `/api/assistant` (Hugging Face PlantVillage vision +
- * Hugging Face LLM reasoning, with a smaller-model fallback).
+ * Shared contracts between the assistant UI (`/assistant`) and the fail-proof
+ * 3-stage chain behind `/api/assistant`:
+ *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
+ *   Stage 1 Google Gemini (`gemini-2.5-flash`, primary LLM),
+ *   Stage 2 Hugging Face LLM chain (fallback),
+ *   Stage 3 built-in TypeScript direct formatters (never fails).
  *
  * Kept dependency-free and importable from both server and client code.
  */
@@ -58,12 +61,16 @@ export interface AssistantDiagnosis {
 }
 
 export type AssistantSource =
-  /** Vision diagnosis + HF LLM reasoning. */
+  /** Step 1 vision diagnosis + Stage 1/2 LLM reasoning. */
   | "hybrid"
-  /** HF LLM only (no image attached). */
+  /**
+   * LLM reasoning only (no vision diagnosis attached) — Gemini
+   * (`gemini-2.5-flash`) when it answers, otherwise the Hugging Face fallback
+   * chain.
+   */
   | "llm"
   /**
-   * Built-in direct formatter — emitted whenever the Step 2 LLM chain was
+   * Built-in direct formatter — emitted whenever BOTH LLM stages were
    * unavailable (zero-failure strategy: always 200, never a 500). Carries a
    * diagnosis card when Step 1 succeeded, otherwise a friendly basic-mode
    * Arabic reply (greeting-aware for text-only queries).
