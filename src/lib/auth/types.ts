@@ -18,6 +18,8 @@ export interface SessionUser {
   displayName: string;
   email?: string;
   phone?: string;
+  /** Provider avatar (Google); mirrored into `users/{uid}` and the local profile. */
+  photoURL?: string | null;
   /** Filled in during step 2 (null until then). */
   role: AuthRole | null;
   /** Wilaya code filled in during step 3 (null until then). */

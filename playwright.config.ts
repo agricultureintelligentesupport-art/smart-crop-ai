@@ -12,9 +12,13 @@ export default defineConfig({
     baseURL: "http://localhost:3000",
     trace: "on-first-retry",
     // Sandboxes/CI images that ship their own Chromium can point at it with
-    // PW_CHROMIUM_PATH instead of downloading browsers.
+    // PW_CHROMIUM_PATH instead of downloading browsers. Such builds run
+    // unprivileged in a container, so the sandbox flags come with them.
     launchOptions: process.env.PW_CHROMIUM_PATH
-      ? { executablePath: process.env.PW_CHROMIUM_PATH }
+      ? {
+          executablePath: process.env.PW_CHROMIUM_PATH,
+          args: ["--no-sandbox", "--disable-dev-shm-usage"],
+        }
       : {},
   },
   projects: [
