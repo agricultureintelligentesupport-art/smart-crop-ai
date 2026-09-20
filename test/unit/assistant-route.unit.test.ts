@@ -64,7 +64,10 @@ function configureKeys({ gemini = true, huggingface = true } = {}) {
 /*  Stage 1 (Google Gemini) mock helpers                                */
 /* ------------------------------------------------------------------ */
 
-const isGeminiUrl = (url: string) => url.includes("generativelanguage.googleapis.com");
+const isGeminiUrl = (url: string) =>
+  url.startsWith(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=",
+  );
 
 /** `gemini-1.5-flash` extracted from the generateContent URL. */
 const requestedGeminiModel = (url: string) =>
@@ -290,6 +293,30 @@ test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async
   assert.ok(init.signal instanceof AbortSignal);
   assert.equal(init.signal?.aborted, false);
   assert.equal(new Headers(init.headers).get("Content-Type"), "application/json");
+});
+
+test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", async () => {
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    return geminiReply();
+  });
+
+  const keys = [GEMINI_KEY, "rotated-gemini-key"];
+  for (const key of keys) {
+    process.env.GEMINI_API_KEY = ` ${key} `;
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).source, "llm");
+  }
+
+  assert.deepEqual(
+    urls,
+    keys.map(
+      (key) =>
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+    ),
+  );
 });
 
 test("Stage 1 sends the concise Arabic system instruction, the query and the profile context", async () => {
