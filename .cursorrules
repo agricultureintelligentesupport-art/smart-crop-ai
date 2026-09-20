@@ -1,0 +1,46 @@
+# Smart Crop AI — Design Rules (consolidated)
+# Sources (both MIT): github.com/Leonxlnx/taste-skill + github.com/nextlevelbuilder/ui-ux-pro-max-skill
+# Full rule packs: `.cursor/rules/*.mdc` (Cursor) and `.claude/skills/` (Claude / general agents).
+# This file is always in context — keep it short. Pull a specific .mdc / SKILL.md when the task needs depth.
+
+## 0. Read the brief first (taste-skill §0)
+- Before any UI code, infer: page kind, vibe words, audience, existing brand assets, quiet constraints (a11y-first, regulated, trust-first — these OVERRIDE aesthetics).
+- State a one-line "Design Read" before generating: "Reading this as: <page kind> for <audience>, with a <vibe> language, leaning toward <system/aesthetic>."
+- Ask at most ONE clarifying question, and only if the read genuinely diverges. Otherwise proceed.
+
+## 1. The three dials (taste-skill §1)
+- DESIGN_VARIANCE 1–10 (symmetry → chaos), MOTION_INTENSITY 1–10 (static → cinematic), VISUAL_DENSITY 1–10 (airy → packed).
+- Baseline 8/6/4 for marketing surfaces. Ag-tech product UI: prefer 5–6 / 3–5 / 4–6 (calm, legible, data-aware).
+- Cross-reference these exact names; never invent aliases.
+
+## 2. Stack honesty (this repo)
+- Next.js (App Router, RSC-first) + React 19 + Tailwind v4 (@tailwindcss/postcss plugin — NOT the v3 `tailwindcss` postcss plugin).
+- Global state and any motion/scroll/pointer interactivity ONLY in `'use client'` leaf components.
+- Motion: use the installed `framer-motion` package (motion library). Never `useState` for continuous values (mouse, scroll progress, physics) — use motion values.
+- Icons: `lucide-react` (already installed). No hand-rolled SVG paths, no extra icon packs without need.
+- Fonts via `next/font`, never `<link>` to Google Fonts in production.
+- ONE design system per project. Don't hand-recreate CSS that an official package owns.
+
+## 3. Anti-slop rules (always on)
+- BANNED by default: AI-purple gradients, centered hero over dark mesh, three equal feature cards, generic glassmorphism everywhere, Inter+slate-900 defaults, "Jane Doe"/"Acme" placeholders, fake logos, scroll-cue text, section-number eyebrows (00/INDEX), decorative dots, em-dashes in copy.
+- Cards are a last resort — use spacing, dividers, and typography first.
+- Quotes ≤ 3 lines; sub-paragraphs ≤ 25 words by default.
+
+## 4. UI/UX Pro Max standards (always on)
+- Clean layout: consistent spacing scale (Tailwind steps), clear visual hierarchy, one primary action per view, generous whitespace; align to a grid.
+- Modern typography: `next/font`-loaded faces, fluid scale (clamp), tight tracking on display sizes, body ≥ 16px, line-height 1.5–1.7 for body, max line length ~65–75ch.
+- Glassmorphism (when the design read calls for glass): `backdrop-filter` blur+saturate, 1px translucent border, inner top highlight, layered shadow. ALWAYS provide an opaque fallback (`prefers-reduced-transparency` + `@supports not (backdrop-filter)`), and label web glass as an approximation — there is no official `liquid-glass.css`.
+- Mobile-first responsive: write base styles for 360px, enhance at sm/md/lg; `min-h-[100dvh]` (never `h-screen`); touch targets ≥ 44×44px; explicit mobile collapse (`w-full px-4 max-w-7xl mx-auto`); test at 360/768/1280.
+- Accessibility (WCAG 2.2 AA, non-negotiable): contrast ≥ 4.5:1 (3:1 large text), visible focus rings, full keyboard operability, semantic HTML + ARIA only when needed, labels on all inputs, honor `prefers-reduced-motion`, `prefers-contrast`, `prefers-reduced-transparency`; alt text on meaningful images.
+
+## 5. Motion & performance
+- `prefers-reduced-motion` variants for everything above MOTION_INTENSITY 3. `useEffect` animations need strict cleanup.
+- Never `window.addEventListener('scroll')` — use motion `useScroll()`, IntersectionObserver, or CSS scroll-driven animations.
+- Core Web Vitals: LCP < 2.5s, INP < 200ms, CLS < 0.1. Next/Image for images.
+
+## 6. Output discipline (output-skill)
+- Ship complete code — no `// ... rest stays the same`, no placeholder TODOs in delivered UI.
+- Provide empty / loading / error states for every async surface.
+
+## 7. Pre-flight check before delivering UI
+- Mobile layout explicit? Dark-mode tokens sane (if themed)? Reduced-motion/transparency handled? Focus + contrast pass? No banned AI tells (§3)? Motion isolated in client leaves? One design system only? If any box is unticked, fix before shipping.
