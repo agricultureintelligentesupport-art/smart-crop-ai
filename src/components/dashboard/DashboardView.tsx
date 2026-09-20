@@ -2,6 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Bot,
   Clock,
   Home,
   Leaf,
@@ -156,6 +157,13 @@ export default function DashboardView() {
             labels={{ ar: t.header.langAr, fr: t.header.langFr }}
             layoutId="dashboard-lang-thumb"
           />
+          <Link
+            href="/assistant"
+            aria-label={lang === "ar" ? "المساعد الذكي" : "Assistant IA"}
+            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+          >
+            <Bot size={16} strokeWidth={2.4} aria-hidden />
+          </Link>
           <Link
             href="/"
             aria-label={t.header.navHome}
