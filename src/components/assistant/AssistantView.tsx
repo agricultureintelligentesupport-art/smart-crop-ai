@@ -178,6 +178,7 @@ export default function AssistantView() {
       setBusy(true);
       setBusyWithImage(image !== null);
 
+      let errorMessage = t.chat.error;
       try {
         const res = await fetch("/api/assistant", {
           method: "POST",
@@ -188,7 +189,14 @@ export default function AssistantView() {
             context: buildContext(),
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // Configuration is known only by the server, never inferred on mount.
+          const failure = await res.json().catch(() => null);
+          if (res.status === 500 && failure?.code === "MISSING_KEYS") {
+            errorMessage = t.chat.unavailable;
+          }
+          throw new Error(`HTTP ${res.status}`);
+        }
         const payload = (await res.json()) as AssistantResponseBody;
         setMessages((prev) => [
           ...prev,
@@ -203,13 +211,13 @@ export default function AssistantView() {
       } catch {
         setMessages((prev) => [
           ...prev,
-          { id: nextId(), author: "assistant", text: t.chat.error, error: true },
+          { id: nextId(), author: "assistant", text: errorMessage, error: true },
         ]);
       } finally {
         setBusy(false);
       }
     },
-    [busy, buildContext, t.chat.error],
+    [busy, buildContext, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {
@@ -386,9 +394,6 @@ export default function AssistantView() {
                     )
                   )}
 
-                  {msg.source === "offline" && (
-                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.offlineNote}</p>
-                  )}
                   {msg.source === "vision-only" && (
                     <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.visionOnlyNote}</p>
                   )}

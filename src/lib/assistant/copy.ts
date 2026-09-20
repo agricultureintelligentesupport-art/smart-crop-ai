@@ -35,7 +35,7 @@ export interface AssistantCopy {
     thinkingVision: string;
     error: string;
     retry: string;
-    offlineNote: string;
+    unavailable: string;
     visionOnlyNote: string;
   };
   diagnosis: {
@@ -86,7 +86,7 @@ const AR: AssistantCopy = {
     thinkingVision: "جارٍ تحليل الصورة وتشخيص المرض…",
     error: "وقع خطأ أثناء الاتصال بالمساعد. حاول مرة أخرى.",
     retry: "إعادة المحاولة",
-    offlineNote: "وضع محدود: مفاتيح الذكاء الاصطناعي غير مضبوطة على الخادم.",
+    unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (Gemini غير متاح).",
   },
   diagnosis: {
@@ -137,7 +137,7 @@ const FR: AssistantCopy = {
     thinkingVision: "Analyse de l'image et diagnostic en cours…",
     error: "Erreur de connexion à l'assistant. Réessayez.",
     retry: "Réessayer",
-    offlineNote: "Mode limité : clés IA non configurées sur le serveur.",
+    unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
     visionOnlyNote: "Diagnostic image seul — conseils généraux (Gemini indisponible).",
   },
   diagnosis: {
