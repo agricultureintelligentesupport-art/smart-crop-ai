@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+/* Fonts are wired from next/font CSS variables in app/layout.tsx */
+@theme inline {
+  --font-arabic: var(--font-cairo), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-latin: var(--font-jakarta), "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Artwork palette — shared by the inline SVG scenes (light/dark)    */
+/* ------------------------------------------------------------------ */
+:root {
+  --art-ink: #0f172a;
+  --art-ink-soft: #64748b;
+  --art-surface: rgba(255, 255, 255, 0.82);
+  --art-surface-soft: rgba(255, 255, 255, 0.5);
+  --art-border: rgba(16, 185, 129, 0.28);
+  --art-map: #f0fbf4;
+  --art-map-line: rgba(15, 118, 82, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --art-ink: #e2e8f0;
+    --art-ink-soft: #94a3b8;
+    --art-surface: rgba(15, 23, 42, 0.78);
+    --art-surface-soft: rgba(2, 6, 23, 0.55);
+    --art-border: rgba(52, 211, 153, 0.22);
+    --art-map: #06130c;
+    --art-map-line: rgba(52, 211, 153, 0.08);
+  }
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    /* Stability: the app manages its own layout — no page scroll, no bounce */
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* SVG HUD labels are Latin/numeric — pin them LTR so RTL base direction never reorders them */
+  svg text {
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+
+  ::selection {
+    background: rgba(16, 185, 129, 0.22);
+  }
+}
+
+@layer components {
+  /* h-screen with a dynamic-viewport-height upgrade on mobile browsers */
+  .screen-h {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .pt-safe {
+    padding-top: max(0.625rem, env(safe-area-inset-top));
+  }
+
+  /* Glassmorphism overlay */
+  .glass {
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    -webkit-backdrop-filter: blur(14px) saturate(150%);
+    backdrop-filter: blur(14px) saturate(150%);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .glass {
+      background: rgba(10, 18, 32, 0.55);
+      border-color: rgba(255, 255, 255, 0.08);
+    }
+  }
+
+  .glow-emerald {
+    box-shadow:
+      0 0 24px rgba(16, 185, 129, 0.35),
+      0 12px 32px -12px rgba(16, 185, 129, 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
