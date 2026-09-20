@@ -63,9 +63,10 @@ export type AssistantSource =
   /** HF LLM only (no image attached). */
   | "llm"
   /**
-   * Vision diagnosis formatted by the built-in direct formatter — emitted
-   * when Step 1 succeeded but the Step 2 LLM chain was unavailable
-   * (zero-failure strategy: 200, never a 500).
+   * Built-in direct formatter — emitted whenever the Step 2 LLM chain was
+   * unavailable (zero-failure strategy: always 200, never a 500). Carries a
+   * diagnosis card when Step 1 succeeded, otherwise a friendly basic-mode
+   * Arabic reply (greeting-aware for text-only queries).
    */
   | "direct";
 

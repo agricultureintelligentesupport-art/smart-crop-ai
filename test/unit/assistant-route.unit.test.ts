@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { dynamic, POST } from "../../src/app/api/assistant/route";
 
 const originalKeys = {
@@ -100,6 +100,14 @@ interface ChatRequestBody {
 const parseChatBody = (init: RequestInit): ChatRequestBody =>
   JSON.parse(String(init.body ?? "{}")) as ChatRequestBody;
 
+/** Shape of the zero-failure `source: "direct"` fallback response. */
+interface DirectPayload {
+  reply: string;
+  diagnosis: unknown;
+  source: string;
+  warnings: string[];
+}
+
 test("assistant route explicitly uses dynamic rendering", () => {
   assert.equal(dynamic, "force-dynamic");
 });
@@ -113,14 +121,15 @@ for (const [name, hf] of [
   ["blank", "   "],
   ["tab-only", "\t"],
 ] as const) {
-  test(`missing keys: HF ${name} returns 500 without calling providers`, async () => {
+  test(`missing keys: HF ${name} returns 503 MISSING_KEYS without calling providers`, async () => {
     if (hf !== undefined) process.env.HUGGINGFACE_API_KEY = hf;
     // Even a valid-looking legacy Gemini key must not unlock the route.
     process.env.GEMINI_API_KEY = "test-gemini";
     const upstream = mock.method(globalThis, "fetch");
     for (const withImage of [false, true]) {
       const response = await POST(request(withImage));
-      assert.equal(response.status, 500);
+      // Misconfiguration is the ONLY non-200/4xx outcome — 503, never 500.
+      assert.equal(response.status, 503);
       assert.deepEqual(await response.json(), {
         error: "API keys missing on server",
         code: "MISSING_KEYS",
@@ -131,7 +140,7 @@ for (const [name, hf] of [
 }
 
 test("keys are read per request, not when the route module loads", async () => {
-  assert.equal((await POST(request())).status, 500);
+  assert.equal((await POST(request())).status, 503);
   process.env.HUGGINGFACE_API_KEY = " test-hf ";
   const upstream = mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
     assert.ok(isChatUrl(String(url)));
@@ -146,7 +155,7 @@ test("keys are read per request, not when the route module loads", async () => {
   });
   assert.equal(upstream.mock.callCount(), 1);
   delete process.env.HUGGINGFACE_API_KEY;
-  assert.equal((await POST(request())).status, 500);
+  assert.equal((await POST(request())).status, 503);
   assert.equal(upstream.mock.callCount(), 1);
 });
 
@@ -225,7 +234,7 @@ test("400 Model-not-supported-by-provider on the primary LLM falls back to the n
   ]);
 });
 
-test("every serverless model unsupported by provider returns LLM Error listing the whole chain", async () => {
+test("every serverless model unsupported by provider degrades to 200 basic-mode with the whole chain in warnings", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -233,13 +242,15 @@ test("every serverless model unsupported by provider returns LLM Error listing t
     return llmProviderUnsupported();
   });
   const response = await POST(request());
-  assert.equal(response.status, 500);
-  const body = (await response.json()) as { error: string };
-  assert.match(body.error, /^LLM Error:/);
-  assert.match(body.error, /Model not supported by provider hf-inference/);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.reply, /الوضع الأساسي/);
+  const warning = payload.warnings.join(" | ");
+  assert.match(warning, /Model not supported by provider hf-inference/);
   assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
   for (const model of LLM_FALLBACK_ORDER) {
-    assert.match(body.error, new RegExp(model.replace(/[./-]/g, "\\$&")));
+    assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
   }
 });
 
@@ -249,15 +260,16 @@ test("an unrelated 400 (bad request) fails fast without walking the model chain"
     Response.json({ error: "Invalid payload: messages field is required." }, { status: 400 }),
   );
   const response = await POST(request());
-  assert.equal(response.status, 500);
-  const body = (await response.json()) as { error: string };
-  assert.match(body.error, /^LLM Error:/);
-  assert.match(body.error, /HTTP 400/);
+  // Fail-proof: even a fail-fast upstream error answers 200 in basic mode.
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.warnings.join(" | "), /HTTP 400/);
   // A malformed-request 400 is not a model problem — no extra round-trips.
   assert.equal(upstream.mock.callCount(), 1);
 });
 
-test("all LLM models unavailable returns LLM Error listing every id tried", async () => {
+test("all LLM models unavailable degrades to 200 basic-mode listing every id tried in warnings", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -265,12 +277,14 @@ test("all LLM models unavailable returns LLM Error listing every id tried", asyn
     return llmModelNotFound(String(requestedChatModel(String(url))));
   });
   const response = await POST(request());
-  assert.equal(response.status, 500);
-  const body = (await response.json()) as { error: string };
-  assert.match(body.error, /^LLM Error:/);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.equal(payload.diagnosis, null);
   assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  const warning = payload.warnings.join(" | ");
   for (const model of LLM_FALLBACK_ORDER) {
-    assert.match(body.error, new RegExp(model.replace(/[./-]/g, "\\$&")));
+    assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
   }
 });
 
@@ -297,10 +311,11 @@ test("transient upstream failures do not trigger model fallback", async () => {
     new Response(null, { status: 503 }),
   );
   const response = await POST(request());
-  assert.equal(response.status, 500);
-  const body = (await response.json()) as { error: string };
-  assert.match(body.error, /^LLM Error:/);
-  assert.match(body.error, /HTTP 503/);
+  // Fail-proof: transient 503s degrade to the basic-mode reply, not an HTTP 500.
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.warnings.join(" | "), /HTTP 503/);
   // One attempt only: a 503 is not a model problem, so don't burn the request
   // budget re-trying the same failure on every id.
   assert.equal(upstream.mock.callCount(), 1);
@@ -358,8 +373,8 @@ test("zero-failure: Step 2 outage after a successful Step 1 returns 200 with sou
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
   // The failure is reported as a non-fatal warning, not a 500.
-  assert.ok(Array.isArray(payload.warnings) && payload.warnings.length === 1);
-  assert.match(payload.warnings[0], /LLM unavailable/i);
+  assert.ok(Array.isArray(payload.warnings) && payload.warnings.length >= 1);
+  assert.match(payload.warnings.join(" | "), /LLM unavailable/i);
   assert.doesNotMatch(JSON.stringify(payload), /test-hf|legacy-gemini-key-must-be-ignored/);
 });
 
@@ -430,7 +445,7 @@ test("zero-failure: an unrelated 400 on every LLM still ends in direct formattin
 });
 
 for (const failure of ["http", "network", "empty"] as const) {
-  test(`strict pipeline: upstream ${failure} failure is reported as LLM Error 500 (not MISSING_KEYS)`, async () => {
+  test(`zero-failure: text-only upstream ${failure} failure answers 200 basic-mode (not MISSING_KEYS, not 500)`, async () => {
     configureKeys();
     mock.method(globalThis, "fetch", async () => {
       if (failure === "network") throw new TypeError("fetch failed");
@@ -438,42 +453,135 @@ for (const failure of ["http", "network", "empty"] as const) {
       return new Response(null, { status: 503 });
     });
     const response = await POST(request());
-    assert.equal(response.status, 500);
-    const body = await response.json() as { error: string };
-    assert.match(body.error, /^LLM Error:/);
-    assert.notEqual(body.error, "API keys missing on server");
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as DirectPayload;
+    assert.equal(payload.source, "direct");
+    assert.equal(payload.diagnosis, null);
+    // Non-greeting question → polite basic-mode explanation, not a config error.
+    assert.match(payload.reply, /الوضع الأساسي/);
+    assert.notEqual(payload.reply, "API keys missing on server");
+    assert.match(payload.warnings.join(" | "), /Step 2 LLM unavailable/);
   });
 }
 
-test("strict pipeline: HF vision failure returns HF Error 500 with stage identifier", async () => {
+/* ------------------------------------------------------------------ */
+/*  Zero-failure strategy — text-only basic-mode replies                */
+/* ------------------------------------------------------------------ */
+
+function textRequest(message: string) {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+}
+
+for (const greeting of ["هلا", "مرحبا", "السلام عليكم", "أهلا وسهلا", "السلامُ عليكم ورحمةُ الله"] as const) {
+  test(`zero-failure: text-only LLM outage greets back a simple greeting (${greeting}) with 200 direct`, async () => {
+    configureKeys();
+    mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+    const response = await POST(textRequest(greeting));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as DirectPayload;
+    assert.equal(payload.source, "direct");
+    assert.equal(payload.diagnosis, null);
+    // Greets the user back warmly…
+    assert.match(payload.reply, /وعليكم السلام|أهلاً وسهلاً/);
+    // …and asks how it can help with the farm/crops.
+    assert.match(payload.reply, /نساعدك/);
+    assert.match(payload.reply, /ضيعتك|محصولك/);
+    assert.match(payload.warnings.join(" | "), /Step 2 LLM unavailable/);
+  });
+}
+
+test("zero-failure: text-only LLM outage answers a farm question with the polite basic-mode fallback", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async () => llmGated());
+  const response = await POST(textRequest("كيف أسقي الطماطم في بسكرة؟"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  // Explains the basic mode and invites symptoms or a leaf photo.
+  assert.match(payload.reply, /الوضع الأساسي/);
+  assert.match(payload.reply, /أعراض/);
+  assert.match(payload.reply, /صورة/);
+  // The fallback must not look like a greeting reply.
+  assert.doesNotMatch(payload.reply, /وعليكم السلام/);
+});
+
+test("zero-failure: a long message is never mistaken for a greeting", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+  const response = await POST(
+    textRequest("السلام عليكم، عندي بقع صفراء على أوراق الطماطم منذ أسبوع وبدأت تنتشر للبيت البلاستيكي المجاور فماذا أفعل"),
+  );
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.reply, /الوضع الأساسي/);
+});
+
+test("final safety net: an unexpected internal exception still answers 200 direct (never 500)", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async () => chatReply());
+  // Simulate a bug deep inside the success path: the first response
+  // serialization explodes; the route's outer try/catch must absorb it.
+  let jsonCalls = 0;
+  const original = NextResponse.json.bind(NextResponse);
+  mock.method(NextResponse, "json", ((...args: Parameters<typeof NextResponse.json>) => {
+    jsonCalls += 1;
+    if (jsonCalls === 1) throw new Error("simulated serialization bug");
+    return original(...args);
+  }) as typeof NextResponse.json);
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.warnings.join(" | "), /simulated serialization bug/);
+  assert.equal(jsonCalls, 2);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Zero-failure strategy — graceful vision degradation                 */
+/* ------------------------------------------------------------------ */
+
+test("zero-failure: HF vision failure degrades to the LLM with a Step 1 warning (never 500)", async () => {
   configureKeys();
   let chatCalls = 0;
   mock.method(globalThis, "fetch", async (url: string) => {
     if (isChatUrl(String(url))) {
       chatCalls += 1;
-      return chatReply();
+      return chatReply("Water in the morning.");
     }
-    // Step 1 fails on every vision model → Step 2 must never run.
+    // Step 1 fails on every vision model → Step 2 must still answer the text.
     return new Response(null, { status: 503 });
   });
   const response = await POST(request(true));
-  assert.equal(response.status, 500);
-  const body = await response.json() as { error: string };
-  assert.match(body.error, /^HF Error:/);
-  assert.equal(chatCalls, 0);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.diagnosis, null);
+  assert.match(payload.warnings.join(" | "), /Step 1 vision unavailable/);
+  assert.ok(chatCalls >= 1);
 });
 
-test("strict pipeline: HF 503 model-loading returns clear HF Error message", async () => {
+test("zero-failure: HF 503 model-loading with the LLM down too answers 200 asking to retry the photo", async () => {
   configureKeys();
   mock.method(globalThis, "fetch", async (url: string) => {
-    if (isChatUrl(String(url))) return chatReply();
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     return Response.json({ error: "Model linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification is currently loading", estimated_time: 23.4 }, { status: 503 });
   });
   const response = await POST(request(true));
-  assert.equal(response.status, 500);
-  const body = await response.json() as { error: string };
-  assert.match(body.error, /^HF Error:/);
-  assert.match(body.error, /loading/i);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as DirectPayload;
+  assert.equal(payload.source, "direct");
+  // The reply tells the user the photo couldn't be analysed and to retry.
+  assert.match(payload.reply, /تعذّر تحليل صورة الورقة/);
+  assert.match(payload.reply, /أعد المحاولة/);
+  const warning = payload.warnings.join(" | ");
+  assert.match(warning, /Step 1 vision unavailable/);
+  assert.match(warning, /loading/i);
+  assert.match(warning, /Step 2 LLM unavailable/);
 });
 
 test("strict pipeline: HF parses returned array to extract primary class and confidence", async () => {

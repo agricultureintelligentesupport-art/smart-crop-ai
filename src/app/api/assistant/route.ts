@@ -1,11 +1,14 @@
 /**
- * `/api/assistant` — strict 2-step sequential AI pipeline for the agricultural assistant.
+ * `/api/assistant` — fail-proof 2-step sequential AI pipeline for the
+ * agricultural assistant. The route NEVER returns HTTP 500.
  *
- * Strict pipeline (100% Hugging Face — no Google Gemini dependency):
- *   Step 1 (mandatory when image is attached): Hugging Face Inference API
+ * Pipeline (100% Hugging Face — no Google Gemini dependency):
+ *   Step 1 (when an image is attached): Hugging Face Inference API
  *     PlantVillage disease classifier → parse returned array to extract
  *     primary predicted disease class + confidence percentage.
  *     Handles 503/530 model-loading responses with a clear status message.
+ *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
+ *     continues (LLM answer, or the direct replies below).
  *
  *   Step 2 (always): Hugging Face Inference API LLM chat completion for
  *     concise text response formatting — truly open, non-gated models only:
@@ -23,27 +26,34 @@
  *     خبير…") with no small talk, no filler introductions and no long
  *     summaries.
  *
- *   Step 2.5 (zero-failure safety net): if Step 1 produced a diagnosis but
- *     the entire Step 2 LLM chain failed or is unavailable, the handler NEVER
- *     returns 500 — a built-in TypeScript formatter constructs a clean,
- *     concise Arabic Markdown diagnosis card directly from the Step 1 label +
- *     confidence (with practical general advice) and the request succeeds
- *     with HTTP 200 and `{ source: "direct" }`. Text-only requests (no
- *     diagnosis to format) still fail with `{ error: "LLM Error: ..." }`.
+ *   Step 2.5 (zero-failure formatting — runs whenever Step 2 fails):
+ *     built-in TypeScript formatters answer 200 with `{ source: "direct" }`:
+ *       • diagnosis available   → concise Arabic Markdown diagnosis card
+ *                                 built from the Step 1 label + confidence;
+ *       • text-only request     → friendly basic-mode Arabic reply: greets
+ *                                 back simple salutations ("هلا"، "مرحبا"،
+ *                                 "السلام عليكم"…) and asks how to help with
+ *                                 the farm, otherwise explains the basic mode
+ *                                 and invites crop symptoms or a leaf photo;
+ *       • image but vision down → basic-mode reply + a "photo analysis
+ *                                 unavailable, retry" note.
+ *
+ *   Final safety net: `POST` wraps the whole handler in a try/catch, so even
+ *     an unexpected internal exception becomes a 200 basic-mode reply.
  *
  * The single `HUGGINGFACE_API_KEY` is read from `process.env` on the server
- * only — it is never shipped to the browser. Missing configuration returns a
- * server error.
+ * only — it is never shipped to the browser.
+ *
+ * Status contract: 200 for every AI outcome (including all upstream
+ * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
+ * for the explicit server-misconfiguration signal. No HTTP 500 ever.
  *
  * Error reporting: each stage logs to the server console
  * (`[Step 1: HF Success]` / `[Step 2: HF LLM Success]` and corresponding
- * error logs; `[Step 2: HF LLM Fallback]` marks a model switch and
- * `[Step 2: HF LLM Unavailable → Direct]` marks the safety-net formatting).
- * Step 1 failures and text-only Step 2 failures return a descriptive JSON
- * error `{ error: "HF Error: ..." }` (vision stage) or `{ error: "LLM Error: ..." }`
- * (text stage) with HTTP 500 so the caller can identify exactly which step
- * failed. A Step 2 failure WITH a Step 1 diagnosis never fails the request
- * (zero-failure strategy — see Step 2.5 above).
+ * warning logs; `[Step 2: HF LLM Fallback]` marks a model switch,
+ * `[Step 1: HF Unavailable]` / `[Step 2: HF LLM Unavailable → Direct]` mark
+ * graceful degradation and `[Safety Net]` an unexpected internal error).
+ * Non-fatal degradations are surfaced to the client in `warnings[]`.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -53,7 +63,6 @@ import type {
   AssistantDiagnosis,
   AssistantRequestBody,
   AssistantResponseBody,
-  AssistantSource,
   DiagnosisCandidate,
 } from "@/lib/assistant/types";
 
@@ -743,10 +752,117 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Handler — strict 2-step sequential pipeline                        */
+/*  Step 2.5 (text-only) — basic-mode replies (ZERO-FAILURE)           */
 /* ------------------------------------------------------------------ */
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+/**
+ * Normalize a short user message for greeting detection: lowercase, strip
+ * Arabic diacritics/tatweel, fold alef/ta-marbuta/alef-maksura variants and
+ * drop punctuation so "هلا"،" "السلامُ عليكم" and "أهلا!" all compare equal
+ * to their plain forms.
+ */
+function normalizeForGreeting(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[\u064B-\u0652\u0640\u0670]/g, "") // harakat, tatweel, dagger alef
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/ؤ/g, "و")
+    .replace(/ئ/g, "ي")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Plain (already normalized) greetings the assistant answers warmly. */
+const GREETINGS: readonly string[] = [
+  "هلا",
+  "هلا والله",
+  "يا هلا",
+  "يا هلا والله",
+  "مرحبا",
+  "مرحبا بك",
+  "مرحبا بيك",
+  "اهلا",
+  "اهلا وسهلا",
+  "اهلا بيك",
+  "السلام",
+  "السلام عليكم",
+  "سلام",
+  "سلام عليكم",
+  "صباح الخير",
+  "مساء الخير",
+  "هاي",
+  "hi",
+  "hello",
+  "hey",
+  "good morning",
+  "good evening",
+  "bonjour",
+  "bonsoir",
+  "salut",
+];
+
+/** Max normalized length still considered "just a greeting". */
+const MAX_GREETING_CHARS = 40;
+
+/** True when the whole (short) message is a greeting, optionally extended. */
+function isGreetingMessage(message: string): boolean {
+  const normalized = normalizeForGreeting(message);
+  if (!normalized || normalized.length > MAX_GREETING_CHARS) return false;
+  return GREETINGS.some(
+    (greeting) => normalized === greeting || normalized.startsWith(`${greeting} `),
+  );
+}
+
+/**
+ * Friendly basic-mode text reply used when the whole Step 2 LLM chain is
+ * unavailable on a request without a usable diagnosis. Greets back simple
+ * salutations ("هلا"، "مرحبا"، "السلام عليكم"…) and asks how to help with the
+ * farm; otherwise explains the basic mode and invites crop symptoms or a leaf
+ * photo (which Step 1 + the direct formatter can still handle without the LLM).
+ */
+function buildTextFallbackReply(message: string): string {
+  if (isGreetingMessage(message)) {
+    const isSalam = /سلام/.test(normalizeForGreeting(message));
+    return [
+      isSalam ? "وعليكم السلام ورحمة الله وبركاته 👋" : "أهلاً وسهلاً بيك 👋",
+      `مرحبا بيك في **محصولي الذكي** — مستشارك الزراعي. كيف نقدر نساعدك اليوم في ضيعتك؟`,
+      "- اسألني عن السقي، التسميد، أو مكافحة الآفات والأمراض.",
+      "- أو أرفق صورة ورقة النبتة المريضة لتشخيص فوري مع خطة علاج.",
+    ].join("\n");
+  }
+  return [
+    "المستشار الذكي يعمل حالياً في **الوضع الأساسي** — خدمة النصوص الذكية غير متاحة مؤقتاً.",
+    "مع ذلك نقدر نعاونك:",
+    "- صف لي أعراض محصولك: نوع النبتة، شكل البقع أو الاصفرار، الولاية، وآخر معالجة.",
+    "- أو أرفق صورة واضحة لورقة مصابة — نموذج الرؤية يشخّصها ويقدم خطة علاج مباشرة حتى في الوضع الأساسي.",
+  ].join("\n");
+}
+
+/** Note appended when a photo was sent but the vision step couldn't analyse it. */
+const VISION_UNAVAILABLE_NOTE = [
+  "⚠️ تعذّر تحليل صورة الورقة حالياً — نموذج الرؤية غير متاح أو ما زال يقلع.",
+  "- أعد المحاولة بعد دقيقة بصورة أوضح (ورقة كاملة، إضاءة نهارية).",
+  "- أو صف أعراض النبتة بالنص وسأجيبك مباشرة.",
+].join("\n");
+
+/* ------------------------------------------------------------------ */
+/*  Handler — fail-proof 2-step pipeline + direct-formatting fallbacks */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fail-proof pipeline body. Every upstream stage is non-fatal:
+ * - Step 1 (vision) failure → warning, continue to Step 2 (the LLM can still
+ *   answer the text part) or straight to the direct replies.
+ * - Step 2 (LLM) failure → warning, answer 200 from the built-in formatters:
+ *   diagnosis card when Step 1 succeeded, friendly basic-mode text otherwise.
+ * - The only non-200 responses left are client input errors (400/413) and
+ *   the explicit server misconfiguration signal (503 + MISSING_KEYS) — never
+ *   an HTTP 500.
+ */
+async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let body: AssistantRequestBody;
   try {
     body = (await request.json()) as AssistantRequestBody;
@@ -782,62 +898,101 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const huggingfaceKey = process.env.HUGGINGFACE_API_KEY?.trim() || null;
 
   if (!huggingfaceKey) {
+    // Explicit misconfiguration signal (503 Service Unavailable — the route
+    // contract no longer includes any HTTP 500). The UI shows its dedicated
+    // "assistant unavailable" notice for code MISSING_KEYS.
     return NextResponse.json(
       { error: "API keys missing on server", code: "MISSING_KEYS" },
-      { status: 500 },
+      { status: 503 },
     );
   }
 
-  // ---- Strict sequential pipeline ---------------------------------
-  // Step 1: Mandatory Hugging Face Vision Classification (when image attached)
+  const warnings: string[] = [];
+
+  // ---- Fail-proof sequential pipeline ------------------------------
+  // Step 1: Hugging Face Vision Classification (when image attached).
+  // Non-fatal: a vision outage degrades to the LLM / direct replies instead
+  // of failing the request.
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
     try {
       diagnosis = await classifyPlantImageStrict(image.data, image.mimeType, huggingfaceKey);
     } catch (error) {
-      const msg =
-        error instanceof Error ? error.message : String(error);
-      const hfMessage = msg.startsWith("HF Error:") ? msg : `HF Error: ${msg}`;
-      console.error(`[Step 1: HF Error] ${hfMessage}`);
-      return NextResponse.json({ error: hfMessage }, { status: 500 });
+      const msg = error instanceof Error ? error.message : String(error);
+      const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
+      console.warn(`[Step 1: HF Unavailable] ${detail}`);
+      warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
     }
   }
 
-  // Step 2: Hugging Face LLM concise reasoning & advisory
+  // Step 2: Hugging Face LLM concise reasoning & advisory.
   // Pass the output label + confidence from Step 1 directly into the LLM,
   // alongside the user's text message and Firestore profile (Wilaya, crop type).
-  let reply: string;
-  let source: AssistantSource;
-  let warnings: string[] | undefined;
+  // Non-fatal: on total LLM failure Step 2.5 answers locally with 200.
+  let reply: string | null = null;
   try {
     reply = await askHfLlmStrict(huggingfaceKey, message, context, diagnosis);
-    source = diagnosis ? "hybrid" : "llm";
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    const llmMessage = msg.startsWith("LLM Error:") ? msg : `LLM Error: ${msg}`;
-    if (diagnosis) {
-      // Zero-failure strategy: Step 1 succeeded, so never 500 here — format a
-      // clean concise Arabic Markdown card directly from the vision result
-      // (Step 2.5) and answer 200 with `{ source: "direct" }`.
-      console.warn(`[Step 2: HF LLM Unavailable → Direct] ${llmMessage}`);
-      reply = buildDirectDiagnosisCard(diagnosis);
-      source = "direct";
-      warnings = [
-        "Step 2 LLM unavailable — reply formatted directly from the PlantVillage diagnosis.",
-      ];
-    } else {
-      // Text-only request: there is no diagnosis to format, so the LLM failure
-      // is reported as before with the stage identifier.
-      console.error(`[Step 2: HF LLM Error] ${llmMessage}`);
-      return NextResponse.json({ error: llmMessage }, { status: 500 });
-    }
+    const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
+    console.warn(`[Step 2: HF LLM Unavailable → Direct] ${detail}`);
+    warnings.push(`Step 2 LLM unavailable — ${detail}`.slice(0, 400));
   }
 
+  if (reply !== null) {
+    const payload: AssistantResponseBody = {
+      reply,
+      diagnosis,
+      source: diagnosis ? "hybrid" : "llm",
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+    return NextResponse.json(payload);
+  }
+
+  // ---- Step 2.5: direct formatting, zero-failure ---------------------
+  // The LLM is down: answer 200 from the built-in TypeScript formatters.
+  let directReply: string;
+  if (diagnosis) {
+    // Image + successful vision → concise Arabic Markdown diagnosis card.
+    directReply = buildDirectDiagnosisCard(diagnosis);
+  } else if (image) {
+    // Image but vision failed too → basic-mode text (when a message exists)
+    // plus a clear note about the photo analysis being unavailable.
+    directReply = message
+      ? `${buildTextFallbackReply(message)}\n\n${VISION_UNAVAILABLE_NOTE}`
+      : VISION_UNAVAILABLE_NOTE;
+  } else {
+    // Text-only → friendly basic-mode reply (greeting-aware).
+    directReply = buildTextFallbackReply(message);
+  }
+  warnings.push("Reply formatted locally — no upstream AI stage was available.");
+
   const payload: AssistantResponseBody = {
-    reply,
+    reply: directReply,
     diagnosis,
-    source,
-    ...(warnings ? { warnings } : {}),
+    source: "direct",
+    warnings,
   };
   return NextResponse.json(payload);
+}
+
+/**
+ * Route entrypoint wrapped in the final safety net: even an unexpected
+ * internal exception (a bug, a serialization failure…) is converted into a
+ * 200 basic-mode reply, so `/api/assistant` NEVER returns HTTP 500.
+ */
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  try {
+    return await handleAssistant(request);
+  } catch (error) {
+    const detail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.error(`[Safety Net] Unexpected handler exception → basic-mode reply: ${detail}`);
+    return NextResponse.json({
+      reply: buildTextFallbackReply(""),
+      diagnosis: null,
+      source: "direct",
+      warnings: [`Unexpected internal error — reply formatted locally: ${detail}`.slice(0, 400)],
+    } satisfies AssistantResponseBody);
+  }
 }

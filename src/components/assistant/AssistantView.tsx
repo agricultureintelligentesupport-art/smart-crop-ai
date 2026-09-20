@@ -191,8 +191,10 @@ export default function AssistantView() {
         });
         if (!res.ok) {
           // Configuration is known only by the server, never inferred on mount.
+          // The route signals it with code MISSING_KEYS (503 — the API never
+          // returns 500 anymore; it degrades to direct replies instead).
           const failure = await res.json().catch(() => null);
-          if (res.status === 500 && failure?.code === "MISSING_KEYS") {
+          if (failure?.code === "MISSING_KEYS") {
             errorMessage = t.chat.unavailable;
           }
           throw new Error(`HTTP ${res.status}`);
