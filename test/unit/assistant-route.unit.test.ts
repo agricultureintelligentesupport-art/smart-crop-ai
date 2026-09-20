@@ -49,16 +49,29 @@ function configureKeys() {
 
 /** Step 2 model chain, in order — must mirror the route's HF_LLM_MODELS. */
 const LLM_FALLBACK_ORDER = [
-  "Qwen/Qwen2.5-72B-Instruct",
+  "meta-llama/Llama-3.2-3B-Instruct",
   "meta-llama/Llama-3.1-8B-Instruct",
+  "mistralai/Mistral-7B-Instruct-v0.3",
+  "google/gemma-2-9b-it",
 ] as const;
 
 const chatReply = (content = "اسقِ في الصباح الباكر.") =>
   Response.json({ choices: [{ message: { role: "assistant", content } }] });
 
-/** Mirrors the HF router response for a model id no provider serves. */
+/** Mirrors the HF router response for a retired / mistyped model id. */
 const llmModelNotFound = (model: string) =>
   Response.json({ error: `Model ${model} not found.` }, { status: 404 });
+
+/**
+ * Mirrors the live HF serverless router rejection for an id no longer in its
+ * catalog: `400 — Model not supported by provider hf-inference`. Must behave
+ * like a model-availability error (fall through to the next id).
+ */
+const llmProviderUnsupported = () =>
+  Response.json(
+    { error: "Model not supported by provider hf-inference" },
+    { status: 400 },
+  );
 
 const isChatUrl = (url: string) => url.includes("/v1/chat/completions");
 
@@ -178,6 +191,57 @@ test("404 model-not-found on the primary LLM falls back to the next id", async (
     LLM_FALLBACK_ORDER[0],
     LLM_FALLBACK_ORDER[1],
   ]);
+});
+
+test("400 Model-not-supported-by-provider on the primary LLM falls back to the next id", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (urls.length === 1) return llmProviderUnsupported();
+    return chatReply("Water in the morning.");
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    reply: "Water in the morning.", diagnosis: null, source: "llm",
+  });
+  assert.deepEqual(urls.map(requestedChatModel), [
+    LLM_FALLBACK_ORDER[0],
+    LLM_FALLBACK_ORDER[1],
+  ]);
+});
+
+test("every serverless model unsupported by provider returns LLM Error listing the whole chain", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    return llmProviderUnsupported();
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 500);
+  const body = (await response.json()) as { error: string };
+  assert.match(body.error, /^LLM Error:/);
+  assert.match(body.error, /Model not supported by provider hf-inference/);
+  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  for (const model of LLM_FALLBACK_ORDER) {
+    assert.match(body.error, new RegExp(model.replace(/[./-]/g, "\\$&")));
+  }
+});
+
+test("an unrelated 400 (bad request) fails fast without walking the model chain", async () => {
+  configureKeys();
+  const upstream = mock.method(globalThis, "fetch", async () =>
+    Response.json({ error: "Invalid payload: messages field is required." }, { status: 400 }),
+  );
+  const response = await POST(request());
+  assert.equal(response.status, 500);
+  const body = (await response.json()) as { error: string };
+  assert.match(body.error, /^LLM Error:/);
+  assert.match(body.error, /HTTP 400/);
+  // A malformed-request 400 is not a model problem — no extra round-trips.
+  assert.equal(upstream.mock.callCount(), 1);
 });
 
 test("all LLM models unavailable returns LLM Error listing every id tried", async () => {

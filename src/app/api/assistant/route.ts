@@ -8,10 +8,12 @@
  *     Handles 503/530 model-loading responses with a clear status message.
  *
  *   Step 2 (always): Hugging Face Inference API LLM chat completion for
- *     concise text response formatting — `Qwen/Qwen2.5-72B-Instruct` primary,
- *     with automatic fallback to `meta-llama/Llama-3.1-8B-Instruct` when the
- *     router reports the primary model id itself as unavailable
- *     (e.g. `404 — Model not found`).
+ *     concise text response formatting — `meta-llama/Llama-3.2-3B-Instruct`
+ *     primary, with automatic fallback through the other models actively
+ *     served by the free HF serverless router (`meta-llama/Llama-3.1-8B-Instruct`,
+ *     `mistralai/Mistral-7B-Instruct-v0.3`, `google/gemma-2-9b-it`) when the
+ *     router reports a model id itself as unavailable (e.g. `404 — Model not
+ *     found` or `400 — Model not supported by provider hf-inference`).
  *     The PlantVillage label + confidence from Step 1, alongside the user's
  *     text message and Firestore profile context (Wilaya, crop type), are fed
  *     into the LLM behind a system prompt that enforces a concise, highly
@@ -69,14 +71,20 @@ const HF_ENDPOINT = (model: string) =>
  * Fast open-source LLM ids tried by Step 2, in order, via the HF Inference
  * API's OpenAI-compatible chat-completions endpoint.
  *
- * `Qwen/Qwen2.5-72B-Instruct` is the primary: strong multilingual (Arabic
- * included) instruct model served warm on the HF router.
- * `meta-llama/Llama-3.1-8B-Instruct` is kept as a small, fast fallback for
- * router windows where the 72B model is unavailable or cold.
+ * These are models actively served by the free HF serverless router
+ * (`hf-inference` provider). The router rotates its catalog and rejects ids
+ * it no longer serves with `400 — Model not supported by provider hf-inference`
+ * (or `404 — Model not found`), which the fallback chain treats as a
+ * model-availability error and answers with the next id.
+ *
+ * `meta-llama/Llama-3.2-3B-Instruct` is the primary: small, fast and kept
+ * warm on the serverless tier. The larger ids follow as fallbacks.
  */
 const HF_LLM_MODELS = [
-  "Qwen/Qwen2.5-72B-Instruct",
+  "meta-llama/Llama-3.2-3B-Instruct",
   "meta-llama/Llama-3.1-8B-Instruct",
+  "mistralai/Mistral-7B-Instruct-v0.3",
+  "google/gemma-2-9b-it",
 ] as const;
 
 const HF_CHAT_ENDPOINT = (model: string) =>
@@ -348,19 +356,21 @@ class HfLlmEmptyResponseError extends Error {
 
 /**
  * Message fragments the HF router returns when the *model id* is the problem
- * rather than the request itself: model not served by any provider, retired or
- * mistyped ids, endpoints that don't support chat completions. Together with
- * an HTTP 404 these are the only failures that trigger the fallback chain —
- * auth, quota, 5xx and network errors are surfaced immediately, because
- * another model id can't fix them and the extra round-trips would just burn
- * the request budget (`maxDuration`).
+ * rather than the request itself: model not served by any provider
+ * (`400 — Model not supported by provider hf-inference`), retired or mistyped
+ * ids (`404 — Model not found`), endpoints that don't support chat
+ * completions. Together with an HTTP 404 these are the only failures that
+ * trigger the fallback chain — auth, quota, 5xx, other 400s (bad request
+ * body) and network errors are surfaced immediately, because another model
+ * id can't fix them and the extra round-trips would just burn the request
+ * budget (`maxDuration`).
  */
 const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /\bmodel not found\b/i,
   /\bnot found\b/i,
   /does not (?:seem to )?exist/i,
   /no such model/i,
-  /is not supported/i,
+  /\bnot supported\b/i,
 ];
 
 /** True when the failure looks like "this model id isn't usable for this key". */
@@ -444,9 +454,9 @@ async function generateWithHfLlmModel(
 
 /**
  * Strict Step 2: concise Arabic text response formatting via the HF Inference
- * API, starting at {@link HF_LLM_MODELS Qwen/Qwen2.5-72B-Instruct} and falling
- * back to the smaller Llama id when the router reports the primary model as
- * unavailable (404 / model-not-found).
+ * API, starting at {@link HF_LLM_MODELS meta-llama/Llama-3.2-3B-Instruct} and
+ * falling back through the remaining serverless ids when the router reports a
+ * model as unavailable (404 / model-not-found / 400 not-supported-by-provider).
  * - Passes the PlantVillage label + confidence from Step 1 directly into the
  *   LLM, alongside the user's text message and Firestore profile (Wilaya, crop).
  * - Uses the concise professional Arabic advisor system prompt.
