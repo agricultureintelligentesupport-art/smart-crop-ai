@@ -75,9 +75,12 @@ export default function OnboardingScreen() {
   return (
     <div
       dir={t.dir}
-      className={`screen-h relative mx-auto flex w-full max-w-[480px] flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 sm:border-x sm:border-black/5 dark:sm:border-white/5 ${
+      className={`screen-h relative mx-auto flex w-full max-w-[480px] flex-col overflow-hidden text-emerald-950 sm:border-x sm:border-emerald-900/10 ${
         rtl ? "font-arabic" : "font-latin"
       }`}
+      style={{
+        background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 55%, #DCF5E6 100%)",
+      }}
     >
       <Backdrop />
 
@@ -141,14 +144,14 @@ function SlideView({ t, index, rtl }: { t: Copy; index: number; rtl: boolean }) 
         transition={{ delay: 0.1, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
         className="flex w-full flex-col items-center gap-2.5"
       >
-        <span className="inline-flex items-center gap-2 rounded-full border border-emerald-600/15 bg-white/65 px-3 py-[5px] text-[10px] font-bold text-emerald-700 shadow-sm backdrop-blur-md dark:border-emerald-300/15 dark:bg-white/5 dark:text-emerald-300">
+        <span className="glow-amber inline-flex items-center gap-2 rounded-full border border-amber-300/50 bg-amber-100/80 px-3 py-[5px] text-[10px] font-bold text-amber-800 shadow-sm backdrop-blur-md">
           <span className="font-extrabold tabular-nums">{String(index + 1).padStart(2, "0")}</span>
-          <span className="h-2.5 w-px bg-emerald-600/30" />
+          <span className="h-2.5 w-px bg-amber-500/40" />
           <span>{s.kicker}</span>
         </span>
 
         <h2
-          className={`mx-auto max-w-[320px] text-[clamp(19px,4.6vh,24px)] font-black text-slate-900 dark:text-white ${
+          className={`mx-auto max-w-[320px] text-[clamp(19px,4.6vh,24px)] font-black text-emerald-950 ${
             rtl ? "leading-[1.55]" : "leading-snug"
           }`}
         >
@@ -156,7 +159,7 @@ function SlideView({ t, index, rtl }: { t: Copy; index: number; rtl: boolean }) 
         </h2>
 
         <p
-          className={`mx-auto max-w-[44ch] text-[clamp(12px,3vh,13.5px)] text-slate-600 dark:text-slate-300/85 ${
+          className={`mx-auto max-w-[44ch] text-[clamp(12px,3vh,13.5px)] font-medium text-emerald-900/75 ${
             rtl ? "leading-[2]" : "leading-6"
           }`}
         >
@@ -167,7 +170,7 @@ function SlideView({ t, index, rtl }: { t: Copy; index: number; rtl: boolean }) 
           <motion.span
             animate={{ x: rtl ? [0, 4, 0, -4, 0] : [0, -4, 0, 4, 0] }}
             transition={{ duration: 1.8, ease: "easeInOut", repeat: Infinity }}
-            className="mt-0.5 inline-flex items-center gap-1.5 text-[10px] font-semibold text-slate-400 dark:text-slate-500"
+            className="mt-0.5 inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-700/70"
           >
             <MoveHorizontal size={13} className="text-emerald-500" />
             {t.swipeHint}
@@ -222,7 +225,7 @@ function Controls({
                 onClick={onCreate}
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.97 }}
-                className="grid h-12 w-full place-items-center rounded-2xl bg-emerald-500 text-[15px] font-black text-white shadow-[0_14px_30px_-10px_rgba(16,185,129,0.7)] transition-colors hover:bg-emerald-400"
+                className="glow-emerald grid h-12 w-full place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 via-emerald-500 to-green-600 text-[15px] font-black text-white transition-colors hover:from-emerald-400 hover:to-green-500"
               >
                 <span className="inline-flex items-center gap-2">
                   <UserPlus size={18} strokeWidth={2.6} />
@@ -234,7 +237,7 @@ function Controls({
                 onClick={onGuest}
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.97 }}
-                className="glass grid h-12 w-full place-items-center rounded-2xl text-[15px] font-extrabold text-emerald-800 transition-colors hover:bg-white/80 dark:text-emerald-200 dark:hover:bg-white/10"
+                className="glass grid h-12 w-full place-items-center rounded-2xl text-[15px] font-extrabold text-emerald-900 transition-colors hover:bg-white/95"
               >
                 <span className="inline-flex items-center gap-2">
                   <UserRound size={18} strokeWidth={2.2} />
@@ -256,7 +259,7 @@ function Controls({
                 onClick={onNext}
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.97 }}
-                className="glow-emerald grid h-12 w-full place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-[15px] font-black text-white transition-colors hover:from-emerald-400"
+                className="glow-emerald grid h-12 w-full place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-green-600 text-[15px] font-black text-white transition-colors hover:from-emerald-400 hover:to-green-500"
               >
                 <span className="inline-flex items-center gap-2">
                   {t.next}
@@ -295,15 +298,15 @@ function PageDots({
             aria-current={isActive ? "step" : undefined}
             className="relative grid h-12 w-11 place-items-center"
           >
-            {isActive && <span aria-hidden className="absolute h-3 w-3 animate-ping rounded-full bg-emerald-400/45" />}
+            {isActive && <span aria-hidden className="absolute h-3 w-3 animate-ping rounded-full bg-amber-400/55" />}
             <motion.span
               aria-hidden
               className={`block h-2.5 rounded-full ${
                 isActive
-                  ? "bg-gradient-to-r from-emerald-400 to-emerald-600 shadow-[0_0_12px_rgba(16,185,129,0.9)]"
-                  : "bg-slate-300/90 dark:bg-slate-700"
+                  ? "bg-gradient-to-r from-amber-400 via-emerald-400 to-emerald-600 shadow-[0_0_14px_rgba(16,185,129,0.8)]"
+                  : "bg-emerald-900/15"
               }`}
-              animate={{ width: isActive ? 26 : 10 }}
+              animate={{ width: isActive ? 28 : 10 }}
               transition={{ type: "spring", stiffness: 380, damping: 30 }}
             />
           </button>
@@ -314,20 +317,30 @@ function PageDots({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Ambient "Sunrise & High-Tech Agriculture" backdrop                */
+/*  Ambient "Sunrise over green fields" backdrop — bright & optimistic */
 /* ------------------------------------------------------------------ */
 
 function Backdrop() {
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 z-0">
-      <div className="absolute inset-0 bg-gradient-to-b from-emerald-100/70 via-transparent to-amber-100/60 dark:from-emerald-500/[0.06] dark:via-transparent dark:to-amber-500/[0.05]" />
-      <div className="absolute -start-24 -top-28 h-72 w-72 rounded-full bg-emerald-400/25 blur-3xl dark:bg-emerald-500/15" />
-      <div className="absolute -end-24 top-1/3 h-64 w-64 rounded-full bg-amber-300/30 blur-3xl dark:bg-amber-400/10" />
-      <div className="absolute -bottom-24 start-1/4 h-72 w-72 rounded-full bg-emerald-300/20 blur-3xl dark:bg-emerald-600/10" />
+    <div aria-hidden className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+      {/* Soft directional light wash */}
+      <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-transparent to-emerald-200/30" />
+
+      {/* Warm sunrise/sunshine glow (top-right amber) */}
+      <div className="absolute -end-20 -top-24 h-72 w-72 rounded-full bg-amber-300/40 blur-3xl" />
+      <div className="absolute end-4 top-6 h-40 w-40 rounded-full bg-yellow-200/50 blur-2xl" />
+
+      {/* Vibrant fresh-sprout green glow (top-left) */}
+      <div className="absolute -start-24 -top-16 h-72 w-72 rounded-full bg-emerald-300/45 blur-3xl" />
+
+      {/* Rich forest emerald pool (bottom) */}
+      <div className="absolute -bottom-28 start-1/4 h-80 w-80 rounded-full bg-emerald-400/25 blur-3xl" />
+
+      {/* Subtle dotted texture — like distant crop rows */}
       <div
-        className="absolute inset-0 opacity-60 dark:opacity-20"
+        className="absolute inset-0 opacity-40"
         style={{
-          backgroundImage: "radial-gradient(circle at 1px 1px, rgba(15,118,82,0.14) 1px, transparent 0)",
+          backgroundImage: "radial-gradient(circle at 1px 1px, rgba(6,78,59,0.12) 1px, transparent 0)",
           backgroundSize: "26px 26px",
         }}
       />
