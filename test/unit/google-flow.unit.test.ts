@@ -47,27 +47,51 @@ function makeRunner(opts: {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Mobile: full-page redirect from the start                          */
+/*  Popup is primary on ALL browsers (desktop + mobile)                */
 /* ------------------------------------------------------------------ */
 
-test("mobile: starts the redirect immediately and never attempts the popup", async () => {
+test("popup is the primary method on every browser — including mobile", async () => {
   let popupCalled = false;
   const runner = makeRunner({
     isMobile: true,
     popup: async () => {
       popupCalled = true;
-      return { user: fakeUser("should-not-be-used") };
+      return { user: fakeUser("mobile-popup-uid") };
+    },
+  });
+  const outcome = await runGoogleSignIn(runner);
+  assert.equal(outcome.kind, "signed-in");
+  assert.equal(popupCalled, true, "the popup MUST be attempted on mobile (was the old bypass)");
+  if (outcome.kind === "signed-in") assert.equal(outcome.user.uid, "mobile-popup-uid");
+  assert.deepEqual(
+    runner.calls,
+    ["persistence", "popup"],
+    "on mobile the popup is tried first; redirect is only a fallback when the popup is blocked",
+  );
+});
+
+test("mobile: when the popup is blocked, the redirect fallback is used", async () => {
+  const runner = makeRunner({
+    isMobile: true,
+    popup: async () => {
+      throw fbError("auth/popup-blocked");
     },
   });
   const outcome = await runGoogleSignIn(runner);
   assert.equal(outcome.kind, "redirect-started");
-  assert.equal(popupCalled, false, "the popup must never be attempted on mobile");
-  assert.deepEqual(runner.calls, ["persistence", "redirect-start", "redirect"]);
+  assert.deepEqual(
+    runner.calls,
+    ["persistence", "popup", "persistence", "redirect-start", "redirect"],
+    "popup blocked on mobile → redirect fallback still runs",
+  );
 });
 
-test("mobile: a redirect that fails maps to a typed failure (no sign-in)", async () => {
+test("mobile: a redirect fallback that fails maps to a typed failure (no sign-in)", async () => {
   const runner = makeRunner({
     isMobile: true,
+    popup: async () => {
+      throw fbError("auth/popup-blocked");
+    },
     redirect: async () => {
       throw fbError("auth/unauthorized-domain");
     },
@@ -192,7 +216,7 @@ for (const code of ["auth/popup-blocked", "auth/operation-not-supported-in-this-
   });
 }
 
-test("desktop: network failure on the popup still falls back to the redirect", async () => {
+test("desktop: a network failure on the popup is surfaced (not redirected)", async () => {
   const runner = makeRunner({
     isMobile: false,
     popup: async () => {
@@ -200,7 +224,15 @@ test("desktop: network failure on the popup still falls back to the redirect", a
     },
   });
   const outcome = await runGoogleSignIn(runner);
-  assert.equal(outcome.kind, "redirect-started");
+  // Network errors are NOT popup-blocking codes, so they are surfaced to the
+  // UI directly rather than silently redirecting (which would lose the original
+  // error context and could hit the same network issue again).
+  assert.equal(outcome.kind, "failed");
+  if (outcome.kind === "failed") {
+    assert.equal(outcome.code, "network");
+    assert.equal(outcome.report.code, "auth/network-request-failed");
+    assert.equal(outcome.report.scope, "signInWithPopup");
+  }
 });
 
 test("desktop: when the redirect fallback also fails, a typed failure is returned", async () => {
@@ -260,15 +292,21 @@ test("a persistence failure is logged but still attempts the popup", async () =>
 });
 
 test("a thrown persistence error never aborts the sign-in attempt", async () => {
+  // Persistence errors are caught inside ensurePersistenceBeforeSignIn() and
+  // logged — they do not propagate to runGoogleSignIn(). The popup still runs.
   const runner = makeRunner({
-    isMobile: true,
+    isMobile: false,
     persistence: async () => {
+      runner.calls.push("persistence");
       throw fbError("auth/web-storage-unsupported");
     },
-    redirect: async () => {},
+    popup: async () => ({ user: fakeUser("persistence-error-uid") }),
   });
   const outcome = await runGoogleSignIn(runner);
-  assert.equal(outcome.kind, "redirect-started");
+  assert.equal(outcome.kind, "signed-in");
+  if (outcome.kind === "signed-in") assert.equal(outcome.user.uid, "persistence-error-uid");
+  // Persistence was attempted (and threw), then the popup ran anyway.
+  assert.deepEqual(runner.calls, ["persistence", "popup"]);
 });
 
 /* ------------------------------------------------------------------ */
