@@ -1,7 +1,7 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the hybrid
  * pipeline behind `/api/assistant` (Hugging Face PlantVillage vision +
- * Google Gemini 1.5 Flash reasoning).
+ * Google Gemini 2.0 Flash reasoning, with 1.5 model fallbacks).
  *
  * Kept dependency-free and importable from both server and client code.
  */
