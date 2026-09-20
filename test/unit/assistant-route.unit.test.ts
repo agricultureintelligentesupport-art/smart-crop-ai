@@ -66,7 +66,7 @@ function configureKeys({ gemini = true, huggingface = true } = {}) {
 
 const isGeminiUrl = (url: string) => url.includes("generativelanguage.googleapis.com");
 
-/** `gemini-2.5-flash` extracted from the generateContent URL. */
+/** `gemini-1.5-flash` extracted from the generateContent URL. */
 const requestedGeminiModel = (url: string) =>
   /\/models\/([^:?]+):generateContent/.exec(url)?.[1];
 
@@ -103,7 +103,6 @@ interface GeminiRequestBody {
     temperature?: number;
     topP?: number;
     maxOutputTokens?: number;
-    thinkingConfig?: { thinkingBudget?: number };
   };
 }
 
@@ -258,7 +257,7 @@ test("keys are read per request, not when the route module loads", async () => {
 /*  Stage 1 — Google Gemini primary LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-2.5-flash with 200 { source: \"llm\" }", async () => {
+test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -282,9 +281,9 @@ test("Stage 1 answers from gemini-2.5-flash with 200 { source: \"llm\" }", async
   const { url, init } = calls[0];
   assert.match(
     url,
-    /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-2\.5-flash:generateContent\?/,
+    /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/models\/gemini-1\.5-flash:generateContent\?/,
   );
-  assert.equal(requestedGeminiModel(url), "gemini-2.5-flash");
+  assert.equal(requestedGeminiModel(url), "gemini-1.5-flash");
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
   // Bounded by an AbortController (mandated 8–10 s window).
   assert.ok(init.signal instanceof AbortSignal);
@@ -403,7 +402,7 @@ for (const [name, failure] of [
     assert.equal(payload.source, "llm");
     assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
     // Gemini was attempted first, then the HF chain's primary id.
-    assert.equal(requestedGeminiModel(urls[0]), "gemini-2.5-flash");
+    assert.equal(requestedGeminiModel(urls[0]), "gemini-1.5-flash");
     assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
     assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
   });

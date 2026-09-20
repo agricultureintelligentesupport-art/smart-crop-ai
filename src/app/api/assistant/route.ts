@@ -13,8 +13,8 @@
  *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
  *     continues through Stage 1 → 2 → 3 without a diagnosis.
  *
- *   Stage 1 — Google Gemini (`gemini-2.5-flash`) — PRIMARY LLM: REST call to
- *     https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY
+ *   Stage 1 — Google Gemini (`gemini-1.5-flash`) — PRIMARY LLM: REST call to
+ *     https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY
  *     authenticated with the server-only `GEMINI_API_KEY` and guarded by a 9 s
  *     `AbortController` timeout (the mandated 8–10 s window).
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
@@ -111,7 +111,7 @@ const HF_ENDPOINT = (model: string) =>
 /* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
 /** Primary LLM. Kept in one place so the endpoint and body stay in sync. */
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-1.5-flash";
 
 /**
  * Google Generative Language REST endpoint, called as
@@ -128,10 +128,8 @@ const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models
 const GEMINI_TIMEOUT_MS = 9_000;
 
 /**
- * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
- * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
- * `thinkingConfig.thinkingBudget = 0` keeps the model in fast, answer-first
- * mode so the 9 s budget is spent on the reply.
+ * Output cap for Stage 1. Kept modest so the 9 s budget is spent on the
+ * reply itself rather than a long completion.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
@@ -464,10 +462,10 @@ function geminiText(payload: GeminiPayload | null): string {
 }
 
 /**
- * Stage 1 — Google Gemini (`gemini-2.5-flash`), the PRIMARY LLM.
+ * Stage 1 — Google Gemini (`gemini-1.5-flash`), the PRIMARY LLM.
  *
  * POSTs to
- * `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=<GEMINI_API_KEY>`
+ * `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=<GEMINI_API_KEY>`
  * with:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
  *   • `contents[0].parts[0].text` — the user query + profile context + the
@@ -499,9 +497,6 @@ async function generateWithGemini(apiKey: string, userContent: string): Promise<
             temperature: 0.4,
             topP: 0.9,
             maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-            // Answer-first latency: skip the internal reasoning pass so most
-            // of the 9 s budget is spent on the Arabic reply itself.
-            thinkingConfig: { thinkingBudget: 0 },
           },
         }),
       });
@@ -1129,7 +1124,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const userContent = buildUserContent(message, context, diagnosis);
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
-  // gemini-2.5-flash via the Generative Language REST API, keyed with
+  // gemini-1.5-flash via the Generative Language REST API, keyed with
   // GEMINI_API_KEY and bounded by a 9 s AbortController. Non-fatal: on any
   // failure (or a missing key) the request walks to Stage 2.
   let reply: string | null = null;
