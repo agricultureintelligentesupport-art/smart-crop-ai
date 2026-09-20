@@ -111,7 +111,6 @@ function toSession(user: DemoUser, method: SessionUser["method"]): SessionUser {
     phone: user.phone,
     role: user.role,
     wilayaCode: user.wilayaCode,
-    isGuest: false,
   };
 }
 
@@ -127,7 +126,7 @@ export function createDemoGateway(): AuthGateway {
      * Google button ALWAYS performs real Firebase Auth (popup → redirect
      * fallback → getRedirectResult, see src/lib/auth/googleFlow.ts) so the
      * wizard can only advance with a real Firebase user. See
-     * `docs/firebase-adapter.md` §7.
+     * `docs/firebase-adapter.md` §6.
      */
     async signInWithGoogle() {
       const users = readUsers();

@@ -17,12 +17,13 @@ npm run dev   # http://localhost:3000
 | `/auth` | Full authentication workflow, sign-in tab |
 | `/login` | Same workflow, sign-in tab (explicit entry point) |
 | `/register` | Same workflow, create-account tab |
-| `/guest` | Guest dashboard — live on first paint, no account needed |
-| `/dashboard` | Member dashboard (redirects to `/auth` without a session) |
+| `/dashboard` | Member dashboard — requires an authenticated session |
+| `/guest` | Removed — forwards to `/auth` (guest mode is gone) |
 
 Every route is interactive end to end. There are no "coming soon" screens:
-`/guest` renders the dashboard immediately, and every CTA leads to a working
-destination.
+every CTA leads to a working destination, and every dashboard feature requires
+an authenticated account (Google, Algerian phone OTP, or e-mail). An
+unauthenticated visitor is always routed to the auth wizard.
 
 ## The auth workflow
 
@@ -71,8 +72,8 @@ Step 3 · wilaya     Searchable list of all 58 wilayas + climate preview
 
 ## The dashboard
 
-One component, two modes (`DashboardView`): `/guest` for visitors, `/dashboard`
-for members. Every number is derived from the wilaya baseline (temperature,
+One component (`DashboardView`), rendered at `/dashboard` for authenticated
+members only. Every number is derived from the wilaya baseline (temperature,
 humidity, wind, rainfall, soil, crops) through `src/lib/agronomy.ts`, which is
 deterministic and offline — no hydration mismatch, no fake "live" data.
 
@@ -84,7 +85,6 @@ deterministic and offline — no hydration mismatch, no fake "live" data.
 - **Vegetation index**: NDVI reading, 8-week sparkline, stress share.
 - **Field tasks**: checklist derived from the same weather and irrigation
   numbers, with progress.
-- **Guest → account**: conversion card linking to `/register` and `/login`.
 
 Values are labelled as decision-support estimates, not measurements.
 
@@ -97,8 +97,8 @@ src/
 │   ├── globals.css             # theme, glass + field primitives, focus ring, a11y fallbacks
 │   ├── page.tsx                # onboarding carousel
 │   ├── auth|login|register/page.tsx
-│   ├── guest/page.tsx          # guest dashboard
-│   └── dashboard/page.tsx      # member dashboard
+│   ├── guest/page.tsx          # redirect to /auth (guest mode removed)
+│   └── dashboard/page.tsx      # member dashboard (session required)
 ├── components/
 │   ├── AmbientBackdrop.tsx     # shared GPU-isolated gradient + glow layer
 │   ├── onboarding/             # carousel, header, 3 animated SVG scenes
@@ -141,8 +141,9 @@ Two projects (Pixel 7 + Desktop Chrome, 66 tests) covering:
 - **Auth + dashboard** (`e2e/auth-flow.spec.ts`): field-level validation,
   password toggle + strength meter, phone validation, wrong/expired OTP, resend
   rate limit, changing the number, role requirement, wilaya search in Arabic and
-  French (accent-insensitive), guest mode, irrigation reactivity, leaf scan,
-  personalisation persistence, and a full register → setup → dashboard walk.
+  French (accent-insensitive), the dashboard session guard, irrigation
+  reactivity, leaf scan, personalisation persistence, and a full register →
+  setup → dashboard walk.
 
 Set `PW_CHROMIUM_PATH=/path/to/chromium` to reuse an already-installed browser
 instead of downloading one (handy in sandboxes and slim CI images).

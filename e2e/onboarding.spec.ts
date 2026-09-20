@@ -89,7 +89,7 @@ test.describe("3-step carousel", () => {
     await expect(page.getByRole("button", { name: "التالي" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "تخطي" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "إنشاء حساب" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "متابعة كزائر" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "تسجيل الدخول" })).toBeVisible();
   });
 
   test("swipe (pointer drag) navigates, RTL-aware", async ({ page }) => {
@@ -168,7 +168,7 @@ test.describe("AR ⇄ FR language switch", () => {
     await page.getByRole("button", { name: "Français" }).click();
     await page.locator("button[aria-label*='Étape 3']").click();
     await expect(page.getByRole("button", { name: "Créer un compte" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Continuer comme invité" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Se connecter" })).toBeVisible();
   });
 });
 
@@ -177,7 +177,7 @@ test.describe("AR ⇄ FR language switch", () => {
 /* ------------------------------------------------------------------ */
 
 test.describe("action step wiring", () => {
-  test("create-account and guest CTAs navigate to their routes", async ({ page }) => {
+  test("create-account and sign-in CTAs navigate to their routes", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "تخطي" }).click();
     await page.getByRole("button", { name: "إنشاء حساب" }).click();
@@ -188,12 +188,13 @@ test.describe("action step wiring", () => {
     await page.getByRole("link", { name: /الرئيسية/ }).click();
     await expect(page).toHaveURL(/\/$/);
 
-    // …and the guest CTA lands on the working dashboard, not a placeholder.
+    // …and the sign-in CTA opens the same wizard on the sign-in tab. Guest
+    // mode is gone: no "متابعة كزائر" escape hatch is offered anywhere.
     await page.getByRole("button", { name: "تخطي" }).click();
-    await page.getByRole("button", { name: "متابعة كزائر" }).click();
-    await expect(page).toHaveURL(/\/guest/);
-    await expect(page.getByRole("heading", { level: 1 })).toContainText("زائر");
-    await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
+    await page.getByRole("button", { name: "تسجيل الدخول" }).click();
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /متابعة كزائر/ })).toHaveCount(0);
   });
 });
 

@@ -31,7 +31,6 @@ function storedProfile(overrides: Partial<StoredProfile> = {}): StoredProfile {
     displayName: "Farmer A",
     role: "farmer",
     wilayaCode: "16",
-    isGuest: false,
     updatedAt: Date.now(),
     ...overrides,
   };
@@ -44,7 +43,6 @@ function session(overrides: Partial<SessionUser> = {}): SessionUser {
     displayName: "Farmer A",
     role: null,
     wilayaCode: null,
-    isGuest: false,
     ...overrides,
   };
 }
@@ -113,12 +111,8 @@ test("isSwitchingAccounts detects a different signed-in uid", () => {
   assert.equal(isSwitchingAccounts(storedProfile({ uid: "user-A" }), "user-A"), false);
 });
 
-test("isSwitchingAccounts ignores guests and missing identities", () => {
+test("isSwitchingAccounts ignores missing identities", () => {
   assert.equal(isSwitchingAccounts(null, "user-B"), false);
-  assert.equal(
-    isSwitchingAccounts(storedProfile({ uid: null, isGuest: true }), "user-B"),
-    false,
-  );
   assert.equal(isSwitchingAccounts(storedProfile({ uid: "user-A" }), null), false);
   assert.equal(isSwitchingAccounts(storedProfile({ uid: "user-A" }), undefined), false);
 });
@@ -173,15 +167,6 @@ test("resolveSessionBinding: same user merges session > cached > device", () => 
     ),
     { role: "investor", wilayaCode: "31", uidChanged: false },
   );
-});
-
-test("resolveSessionBinding: guest upgrade keeps the on-device choices", () => {
-  const binding = resolveSessionBinding(
-    session({ uid: "user-B", role: null, wilayaCode: null }),
-    storedProfile({ uid: null, isGuest: true, role: "farmer", wilayaCode: "16" }),
-    { role: null, wilayaCode: null },
-  );
-  assert.deepEqual(binding, { role: "farmer", wilayaCode: "16", uidChanged: false });
 });
 
 /* ------------------------------------------------------------------ */

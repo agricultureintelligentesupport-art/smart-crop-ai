@@ -1,6 +1,6 @@
 /**
- * Bilingual copy for the dashboard (guest + member). Same shape-first
- * convention as `lib/auth/copy.ts`: `AR` defines the contract.
+ * Bilingual copy for the member dashboard. Same shape-first convention as
+ * `lib/auth/copy.ts`: `AR` defines the contract.
  */
 
 import type { Lang } from "@/lib/wilayas";
@@ -14,17 +14,13 @@ export interface DiagnosisCopy {
 
 export interface DashboardCopy {
   header: {
-    badgeGuest: string;
     badgeMember: string;
     navHome: string;
-    navCreate: string;
-    navSignIn: string;
     signOut: string;
     langAr: string;
     langFr: string;
   };
   welcome: {
-    guest: string;
     member: string;
     caption: string;
   };
@@ -115,14 +111,6 @@ export interface DashboardCopy {
     done: string;
     remaining: string;
   };
-  upgrade: {
-    title: string;
-    subtitle: string;
-    benefits: string[];
-    cta: string;
-    signIn: string;
-    note: string;
-  };
   advice: {
     title: string;
     subtitle: string;
@@ -139,17 +127,13 @@ export interface DashboardCopy {
 
 const AR: DashboardCopy = {
   header: {
-    badgeGuest: "وضع الزائر",
     badgeMember: "حساب مُفعّل",
     navHome: "الرئيسية",
-    navCreate: "إنشاء حساب",
-    navSignIn: "تسجيل الدخول",
     signOut: "تسجيل الخروج",
     langAr: "العربية",
     langFr: "Français",
   },
   welcome: {
-    guest: "مرحباً، زائر",
     member: "مرحباً، {name}",
     caption: "لوحة مرجعية مبنية على بيانات ولاية {wilaya} لموسم {month}",
   },
@@ -240,19 +224,6 @@ const AR: DashboardCopy = {
     done: "منجزة",
     remaining: "باقية {n}",
   },
-  upgrade: {
-    title: "أنشئ حسابك لحفظ المزرعة",
-    subtitle: "وضع الزائر يحفظ البيانات على هذا الجهاز فقط.",
-    benefits: [
-      "حفظ القطع والمحاصيل وأسجل السقي",
-      "تنبيهات تلقائية قبل موجات الحرارة",
-      "تقارير قابلة للمشاركة مع المهندس الزراعي",
-      "مزامنة بين الهاتف والحاسوب",
-    ],
-    cta: "إنشاء حساب الآن",
-    signIn: "لدي حساب بالفعل",
-    note: "إنشاء الحساب مجاني ولا يستغرق دقيقة.",
-  },
   advice: {
     title: "قراءة سريعة",
     subtitle: "خلاصة تعتمد على الطقس والمحصول المختار.",
@@ -300,17 +271,13 @@ const AR: DashboardCopy = {
 
 const FR: DashboardCopy = {
   header: {
-    badgeGuest: "Mode invité",
     badgeMember: "Compte actif",
     navHome: "Accueil",
-    navCreate: "Créer un compte",
-    navSignIn: "Connexion",
     signOut: "Se déconnecter",
     langAr: "العربية",
     langFr: "Français",
   },
   welcome: {
-    guest: "Bienvenue, invité",
     member: "Bienvenue, {name}",
     caption: "Tableau de référence basé sur la wilaya de {wilaya} pour la saison {month}",
   },
@@ -400,19 +367,6 @@ const FR: DashboardCopy = {
     scanDetail: "Photographiez 5 feuilles à des points différents.",
     done: "Terminées",
     remaining: "{n} restantes",
-  },
-  upgrade: {
-    title: "Créez un compte pour conserver votre exploitation",
-    subtitle: "Le mode invité garde les données uniquement sur cet appareil.",
-    benefits: [
-      "Parcelles, cultures et historique d'irrigation sauvegardés",
-      "Alertes automatiques avant les vagues de chaleur",
-      "Rapports partageables avec votre ingénieur agronome",
-      "Synchronisation téléphone et ordinateur",
-    ],
-    cta: "Créer un compte maintenant",
-    signIn: "J'ai déjà un compte",
-    note: "La création prend moins d'une minute et reste gratuite.",
   },
   advice: {
     title: "Lecture rapide",

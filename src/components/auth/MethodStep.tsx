@@ -11,7 +11,6 @@ import {
   ShieldCheck,
   Sparkles,
   UserPlus,
-  UserRound,
 } from "lucide-react";
 import { useRef, useState } from "react";
 import { interpolate } from "@/lib/auth/copy";
@@ -91,15 +90,6 @@ export default function MethodStep({ flow }: { flow: FlowController }) {
       <LiveRegion message={flow.notice} />
 
       <div id="recaptcha-container" />
-
-      <button
-        type="button"
-        onClick={() => flow.handleGuestContinue()}
-        className={`mx-auto inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-[12px] font-extrabold text-emerald-800/80 transition-colors hover:bg-white/70 hover:text-emerald-700 ${FOCUS_RING}`}
-      >
-        <UserRound size={14} strokeWidth={2.4} aria-hidden />
-        {t.header.navGuest}
-      </button>
     </section>
   );
 }
