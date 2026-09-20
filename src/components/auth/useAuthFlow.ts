@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createUserWithEmailAndPassword,
   getRedirectResult,
+  onAuthStateChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
@@ -17,6 +18,7 @@ import { auth, db, googleProvider } from "@/lib/firebase";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
 import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
 import { runGoogleSignIn } from "@/lib/auth/googleFlow";
+import { methodForFirebaseUser, resolveGoogleReturn } from "@/lib/auth/returnGate";
 import { createAuthGateway } from "@/lib/auth/gateway";
 import { syncUserDoc } from "@/lib/auth/userDoc";
 import {
@@ -248,13 +250,23 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
 
   /* ---------------- Step 1 · Google ---------------- */
 
+  /** The uid currently owned by one of the sign-in paths (popup / redirect /
+   *  restored session). Claimed synchronously so the three can never both
+   *  complete the same sign-in; released again on sign-out. */
+  const pendingGoogleUid = useRef<string | null>(null);
+  /** True while the e-mail/OTP handlers are mid sign-in — the restored-session
+   *  adopter must not hijack those flows. */
+  const manualSignIn = useRef(false);
+
   /**
-   * Shared post-sign-in work for real Google users (popup path AND redirect
-   * path): sync `users/{uid}` in Firestore via the retrying
-   * `syncUserDoc()`, then build the SessionUser. The profile write never
-   * blocks the session — on final failure it logs and warns instead.
+   * Shared post-sign-in work for every real Firebase user (popup path, the
+   * redirect return via `getRedirectResult`, and restored-session adoption):
+   * sync `users/{uid}` in Firestore via the retrying `syncUserDoc()` FIRST,
+   * then build the SessionUser from the Google/Firebase profile data
+   * (`displayName`, `email`, `photoURL`). The profile write never blocks the
+   * session — on final failure it logs and warns instead.
    */
-  const buildGoogleSession = useCallback(
+  const buildSyncedSession = useCallback(
     async (fbUser: User): Promise<SessionUser> => {
       const { ok, data, error } = await syncUserDoc(
         {
@@ -275,9 +287,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
 
       return {
         uid: fbUser.uid,
-        method: "google",
+        method: methodForFirebaseUser(fbUser),
         displayName: fbUser.displayName || data.displayName || "",
         email: fbUser.email ?? data.email ?? undefined,
+        photoURL: fbUser.photoURL ?? (data.photoURL as string | null | undefined) ?? null,
         role: resolvedRole,
         wilayaCode: resolvedWilaya,
         isGuest: false,
@@ -286,42 +299,128 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     [role, t, wilayaCode],
   );
 
+  /** Fill what Google already knows into the e-mail form (never passwords). */
+  const prefillProfileFields = useCallback((fbUser: User) => {
+    const name = fbUser.displayName?.trim() ?? "";
+    const mail = fbUser.email?.trim() ?? "";
+    if (!name && !mail) return;
+    setEmailState((prev) => ({
+      ...prev,
+      name: prev.name || name,
+      email: prev.email || mail,
+    }));
+  }, []);
+
+  /**
+   * THE post-auth success handler, shared by every path that completes a
+   * real Firebase sign-in:
+   *   1. `signInWithPopup` resolving in-page (desktop),
+   *   2. the return from `signInWithRedirect` consumed by `getRedirectResult`,
+   *   3. a restored Firebase session (see the `onAuthStateChanged` effect).
+   *
+   * The order inside is deliberate:
+   *   a) claim the uid so the other paths no-op,
+   *   b) await the `users/{uid}` Firestore sync (spec: sync BEFORE advancing),
+   *   c) pre-fill the Google profile (displayName / email / photoURL),
+   *   d) `afterAuth` — which lands a user without role + wilaya on
+   *      Step 2 of the wizard (“الصفة”, the role step) and a fully-known
+   *      user straight on the dashboard.
+   */
+  const handlePostAuthSuccess = useCallback(
+    async (fbUser: User, source: "popup" | "redirect" | "auth-state") => {
+      if (pendingGoogleUid.current === fbUser.uid) return;
+      pendingGoogleUid.current = fbUser.uid;
+      logAuthInfo(source, `Firebase sign-in captured (uid ${fbUser.uid})`);
+      try {
+        const session = await buildSyncedSession(fbUser);
+        if (!mounted.current) return;
+        prefillProfileFields(fbUser);
+        afterAuth(session);
+      } catch (error) {
+        logAuthError(`${source}-post-auth`, error);
+        pendingGoogleUid.current = null;
+        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+      }
+    },
+    [afterAuth, buildSyncedSession, copyFor, prefillProfileFields],
+  );
+
   /* ---------------- Google redirect result ----------------
    * signInWithRedirect() (mobile first, or the popup-blocked fallback)
    * navigates the whole browser away; the credential only comes back with the
    * next load of this page. getRedirectResult() consumes the pending redirect
    * exactly once — on every normal load it simply resolves to null, so this
-   * is safe on every mount.
+   * is safe on every mount. A lost/failed payload is NOT fatal: the
+   * onAuthStateChanged catcher below adopts the session Firebase restored.
    */
-  const redirectHandled = useRef(false);
+  const redirectChecked = useRef(false);
   useEffect(() => {
-    if (redirectHandled.current) return;
+    if (redirectChecked.current) return;
     if (typeof window === "undefined") return;
     if (!auth || !(auth as { app?: unknown }).app) return;
-    redirectHandled.current = true;
+    redirectChecked.current = true;
 
     (async () => {
-      let redirect: { user: User } | null;
+      let redirectUser: User | null = null;
+      let redirectError: unknown = null;
       try {
-        redirect = await getRedirectResult(auth);
+        const result = await getRedirectResult(auth);
+        redirectUser = result?.user ?? null;
       } catch (error) {
+        redirectError = error;
         logAuthError("getRedirectResult", error);
-        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+      }
+
+      // Strict gate: complete only with a Firebase user that carries a uid.
+      const decision = resolveGoogleReturn({
+        redirectUser,
+        authedUser: auth.currentUser ?? null,
+        handledUid: pendingGoogleUid.current,
+        manualSignInActive: manualSignIn.current,
+        onMethodStep: true,
+      });
+      if (decision.kind === "complete") {
+        logAuthInfo("google", `redirect sign-in complete (uid ${decision.user.uid})`);
+        void handlePostAuthSuccess(decision.user, "redirect");
         return;
       }
-      // Strict gate: a redirect only completes the sign-in when it yields a
-      // valid Firebase user object — otherwise the wizard stays on step 1.
-      if (!redirect?.user?.uid) return;
-      logAuthInfo("google", `redirect sign-in complete (uid ${redirect.user.uid})`);
-      try {
-        const session = await buildGoogleSession(redirect.user);
-        if (mounted.current) afterAuth(session);
-      } catch (error) {
-        logAuthError("google-profile-sync", error);
-        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
-      }
+      if (redirectError && mounted.current) setGoogleError(copyFor(toAuthErrorCode(redirectError)));
     })();
-  }, [afterAuth, buildGoogleSession, copyFor]);
+  }, [copyFor, handlePostAuthSuccess]);
+
+  /* ---------------- Restored Firebase session ----------------
+   * Safety net for the case the redirect payload never arrives while the
+   * sign-in itself succeeded (page reloaded mid-return, partitioned
+   * sessionStorage in embedded previews, the result consumed by an earlier
+   * mount, …). If Firebase Auth holds a user, treat it as the completed
+   * sign-in: sync users/{uid}, pre-fill the Google profile, and advance the
+   * wizard to Step 2 (“الصفة”) instead of leaving it reset on Step 1.
+   */
+  useEffect(() => {
+    if (!auth || !(auth as { app?: unknown }).app) return;
+    if (user || step !== "method") return;
+
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (!fbUser?.uid) {
+        // Signed out (or never signed in): release the claim so the same
+        // account can sign in again within this mount.
+        pendingGoogleUid.current = null;
+        return;
+      }
+      const decision = resolveGoogleReturn({
+        redirectUser: null,
+        authedUser: fbUser,
+        handledUid: pendingGoogleUid.current,
+        manualSignInActive: manualSignIn.current,
+        onMethodStep: true,
+      });
+      if (decision.kind === "complete") {
+        logAuthInfo("auth-state", "no redirect payload — adopting the restored Firebase session");
+        void handlePostAuthSuccess(decision.user, "auth-state");
+      }
+    });
+    return unsubscribe;
+  }, [handlePostAuthSuccess, step, user]);
 
   const handleGoogleAuth = useCallback(async () => {
     clearErrors();
@@ -343,10 +442,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       });
 
       if (outcome.kind === "signed-in") {
-        logAuthInfo("google", `sign-in complete (uid ${outcome.user.uid})`);
-        const session = await buildGoogleSession(outcome.user);
-        if (!mounted.current) return;
-        afterAuth(session);
+        logAuthInfo("google", `popup sign-in complete (uid ${outcome.user.uid})`);
+        // Firestore sync + profile pre-fill + step advance all happen inside
+        // the shared success handler (it claims the uid so the redirect /
+        // auth-state catchers can't double-run).
+        await handlePostAuthSuccess(outcome.user, "popup");
         return;
       }
 
@@ -370,7 +470,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, buildGoogleSession, clearErrors, copyFor, t]);
+  }, [clearErrors, copyFor, handlePostAuthSuccess, t]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 
@@ -425,9 +525,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       }
 
       setBusy("otp-verify");
+      manualSignIn.current = true;
       try {
         const session = await gateway.verifyOtp(challenge, code);
         if (!mounted.current) return;
+        pendingGoogleUid.current = session.uid;
         afterAuth(session);
       } catch (error) {
         if (!mounted.current) return;
@@ -436,6 +538,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         setErrorCode(code2);
         setFieldErrors((prev) => ({ ...prev, otp: copyFor(code2) }));
       } finally {
+        manualSignIn.current = false;
         if (mounted.current) setBusy(null);
       }
     },
@@ -463,6 +566,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     if (!validateEmailForm()) return;
     setErrorCode(null);
     setBusy("email");
+    // The e-mail form owns this sign-in: the auth-state adopter must watch,
+    // not interfere, until the credential is resolved.
+    manualSignIn.current = true;
     try {
       let session: SessionUser;
       if (mode === "register") {
@@ -554,6 +660,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       }
 
       if (!mounted.current) return;
+      // Claim the uid before afterAuth advances the wizard, so the restored
+      // session this sign-in just produced is not "adopted" a second time.
+      pendingGoogleUid.current = session.uid;
       afterAuth(session);
     } catch (error) {
       if (!mounted.current) return;
@@ -564,6 +673,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         setFieldErrors({ email: copyFor(code) });
       } else if (code === "wrong-password") setFieldErrors({ password: copyFor(code) });
     } finally {
+      manualSignIn.current = false;
       if (mounted.current) setBusy(null);
     }
   }, [afterAuth, copyFor, email, gateway, mode, role, t, validateEmailForm, wilayaCode]);
@@ -701,6 +811,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       // offline / demo fallback
     }
     await gateway.signOut();
+    // Release the redirect/adoption claim so signing back in — even on the
+    // same page instance — is captured again instead of being deduped away.
+    pendingGoogleUid.current = null;
     stored.clear();
     router.push("/auth");
   }, [clearErrors, gateway, router, stored]);

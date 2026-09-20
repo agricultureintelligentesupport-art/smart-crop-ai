@@ -27,6 +27,8 @@ export interface StoredProfile {
   wilayaCode: string | null;
   isGuest: boolean;
   lang?: Lang;
+  /** Provider avatar (Google) so the app can greet the real person. */
+  photoURL?: string | null;
   updatedAt: number;
 }
 
@@ -87,6 +89,7 @@ export function profileFromUser(user: SessionUser, extra: Partial<StoredProfile>
     role: user.role,
     wilayaCode: user.wilayaCode,
     isGuest: user.isGuest,
+    photoURL: user.photoURL ?? null,
     updatedAt: Date.now(),
     ...extra,
   };
