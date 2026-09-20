@@ -17,6 +17,7 @@ import { useRef, useState } from "react";
 import { interpolate } from "@/lib/auth/copy";
 import { DZ_COUNTRY_CODE, formatDzPhone, normalizeDzPhone } from "@/lib/auth/validation";
 import type { EmailIntent } from "@/lib/auth/types";
+import AuthErrorPanel from "./AuthErrorPanel";
 import GoogleMark from "./GoogleMark";
 import OtpInput from "./OtpInput";
 import type { AuthChannel, FlowController } from "./useAuthFlow";
@@ -189,7 +190,24 @@ function GoogleButton({ flow }: { flow: FlowController }) {
           </>
         )}
       </motion.button>
-      {flow.googleError ? (
+      {/* Errors are never console-only: the localized sentence is followed by
+          the raw `error.code` / `error.message`, the actionable hint and the
+          Firebase diagnostics (env, project, origin, persistence). */}
+      {flow.googleErrorDetail ? (
+        <AuthErrorPanel
+          report={flow.googleErrorDetail}
+          message={flow.googleError}
+          diagnostics={flow.diagnostics}
+          labels={{
+            code: t.method.errorCode,
+            message: t.method.errorMessage,
+            hint: t.method.errorHint,
+            diagnostics: t.method.errorDiagnostics,
+            copy: t.method.errorCopy,
+            copied: t.method.errorCopied,
+          }}
+        />
+      ) : flow.googleError ? (
         <FieldError>{flow.googleError}</FieldError>
       ) : (
         <p className="text-center text-[10.5px] font-semibold text-emerald-900/55">{t.method.googleNote}</p>

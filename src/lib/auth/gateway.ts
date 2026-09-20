@@ -15,6 +15,11 @@
  */
 
 import { getWilaya } from "@/lib/wilayas";
+import {
+  readAuthBackendRaw,
+  readFirebaseEnv,
+  resolveFirebaseEnv,
+} from "@/lib/firebase-env";
 import { createFirebaseAuthGateway } from "./firebase-adapter";
 import {
   AuthError,
@@ -256,13 +261,25 @@ export function createDemoGateway(): AuthGateway {
 
 let gateway: AuthGateway | null = null;
 
+/**
+ * Resolves `NEXT_PUBLIC_AUTH_BACKEND` (trimmed, case-insensitive, `auto`
+ * supported) against the `NEXT_PUBLIC_FIREBASE_*` environment, and explains the
+ * outcome. An unrecognised value no longer silently disables the switch: it
+ * falls back to the demo gateway with a warning naming the offending value, and
+ * "auto" picks Firebase only when the config is complete.
+ */
+export function resolveGatewayBackend() {
+  return resolveFirebaseEnv(readFirebaseEnv(), readAuthBackendRaw());
+}
+
 /** Single app-wide gateway instance (module-level so hot reloads do not churn it). */
 export function createAuthGateway(): AuthGateway {
   if (gateway) return gateway;
-  gateway =
-    process.env.NEXT_PUBLIC_AUTH_BACKEND === "firebase"
-      ? createFirebaseAuthGateway()
-      : createDemoGateway();
+  const env = resolveGatewayBackend();
+  gateway = env.backend === "firebase" ? createFirebaseAuthGateway() : createDemoGateway();
+  const line = `[auth] gateway: ${env.backend} — ${env.backendNote}`;
+  if (env.backendSource === "unknown" || env.backendSource === "default") console.warn(line);
+  else console.info(line);
   return gateway;
 }
 

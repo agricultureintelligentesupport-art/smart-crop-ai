@@ -14,7 +14,17 @@ import {
   type User,
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { auth, db, googleProvider } from "@/lib/firebase";
+import {
+  auth,
+  db,
+  ensureAuthPersistence,
+  firebaseDiagnosticLines,
+  googleProvider,
+  isAuthReady,
+  logFirebaseDiagnosticsOnce,
+} from "@/lib/firebase";
+import type { FirebaseDiagnosticLine } from "@/lib/firebase-env";
+import { describeAuthError, type AuthErrorReport } from "@/lib/auth/errorReport";
 import { AUTH, interpolate, type AuthCopy } from "@/lib/auth/copy";
 import { logAuthError, logAuthInfo } from "@/lib/auth/logging";
 import { runGoogleSignIn } from "@/lib/auth/googleFlow";
@@ -107,6 +117,17 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const [errorCode, setErrorCode] = useState<AuthErrorCode | null>(null);
   /** Google-specific failure copy, rendered right under the Google button. */
   const [googleError, setGoogleError] = useState<string | null>(null);
+  /**
+   * Raw `error.code` + `error.message` (plus the actionable hint) behind
+   * `googleError` — always displayed, never swallowed (see AuthErrorPanel).
+   */
+  const [googleErrorDetail, setGoogleErrorDetail] = useState<AuthErrorReport | null>(null);
+  /**
+   * Env / origin / persistence facts shown next to a failed sign-in. Filled by
+   * `failGoogle` (an event handler, not an effect) so it always reflects the
+   * state at the moment of the failure.
+   */
+  const [diagnostics, setDiagnostics] = useState<FirebaseDiagnosticLine[]>([]);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
@@ -117,6 +138,16 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     return () => {
       mounted.current = false;
     };
+  }, []);
+
+  /* ---------------- Firebase diagnostics ----------------
+   * Logs which backend/project/origin are in play, once per page load. The
+   * same table is rebuilt on demand when a sign-in fails, so it always shows
+   * the state at the moment of the failure (see `failGoogle`). Uses
+   * console.info/console.warn only, so a healthy load keeps a clean console.
+   */
+  useEffect(() => {
+    logFirebaseDiagnosticsOnce("auth-mount");
   }, []);
 
   /* ---------------- OTP clock (resend + expiry countdown) ---------------- */
@@ -148,6 +179,27 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setFieldErrors({});
   }, []);
 
+  /**
+   * Single Google-failure entry point: localized copy for the user + the raw
+   * provider facts (`code`, `message`, hint, scope) for the panel, plus a
+   * refreshed diagnostics snapshot. Every popup / redirect / getRedirectResult
+   * failure path goes through here, so nothing is only logged to the console.
+   */
+  const failGoogle = useCallback(
+    (report: AuthErrorReport) => {
+      if (!mounted.current) return;
+      setGoogleError(copyFor(report.appCode));
+      setGoogleErrorDetail(report);
+      setDiagnostics(firebaseDiagnosticLines(report.scope ?? "google"));
+    },
+    [copyFor],
+  );
+
+  const clearGoogleError = useCallback(() => {
+    setGoogleError(null);
+    setGoogleErrorDetail(null);
+  }, []);
+
   const setEmailField = useCallback((field: EmailField, value: string) => {
     setEmailState((prev) => ({ ...prev, [field]: value }));
     setFieldErrors((prev) => {
@@ -164,18 +216,20 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       setModeState(next);
       setNeedsSetup(next === "register");
       clearErrors();
+      clearGoogleError();
       setNotice(null);
     },
-    [clearErrors],
+    [clearErrors, clearGoogleError],
   );
 
   const setChannel = useCallback(
     (next: AuthChannel) => {
       setChannelState(next);
       clearErrors();
+      clearGoogleError();
       setNotice(null);
     },
-    [clearErrors],
+    [clearErrors, clearGoogleError],
   );
 
   /* ---------------- plan + navigation ---------------- */
@@ -193,10 +247,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const goToStep = useCallback(
     (next: StepId) => {
       clearErrors();
+      clearGoogleError();
       setNotice(null);
       setStep(next);
     },
-    [clearErrors],
+    [clearErrors, clearGoogleError],
   );
 
   /** Every completed authentication lands here. */
@@ -339,10 +394,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       } catch (error) {
         logAuthError(`${source}-post-auth`, error);
         pendingGoogleUid.current = null;
-        if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+        failGoogle(describeAuthError(error, `${source}-post-auth`));
       }
     },
-    [afterAuth, buildSyncedSession, copyFor, prefillProfileFields],
+    [afterAuth, buildSyncedSession, failGoogle, prefillProfileFields],
   );
 
   /* ---------------- Google redirect result ----------------
@@ -357,18 +412,22 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   useEffect(() => {
     if (redirectChecked.current) return;
     if (typeof window === "undefined") return;
-    if (!auth || !(auth as { app?: unknown }).app) return;
+    if (!isAuthReady(auth)) return;
     redirectChecked.current = true;
 
     (async () => {
       let redirectUser: User | null = null;
-      let redirectError: unknown = null;
       try {
+        // getRedirectResult() is wrapped like signInWithPopup/Redirect: any
+        // failure is logged with its code + message AND rendered in the panel.
         const result = await getRedirectResult(auth);
         redirectUser = result?.user ?? null;
+        if (redirectUser) {
+          logAuthInfo("getRedirectResult", `redirect payload received (uid ${redirectUser.uid})`);
+        }
       } catch (error) {
-        redirectError = error;
         logAuthError("getRedirectResult", error);
+        failGoogle(describeAuthError(error, "getRedirectResult"));
       }
 
       // Strict gate: complete only with a Firebase user that carries a uid.
@@ -382,11 +441,12 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       if (decision.kind === "complete") {
         logAuthInfo("google", `redirect sign-in complete (uid ${decision.user.uid})`);
         void handlePostAuthSuccess(decision.user, "redirect");
-        return;
       }
-      if (redirectError && mounted.current) setGoogleError(copyFor(toAuthErrorCode(redirectError)));
+      // Nothing else to do here: a failure is already on screen (failGoogle)
+      // and the restored-session catcher below can still complete the sign-in
+      // when Firebase holds a user despite the lost/consumed payload.
     })();
-  }, [copyFor, handlePostAuthSuccess]);
+  }, [failGoogle, handlePostAuthSuccess]);
 
   /* ---------------- Restored Firebase session ----------------
    * Safety net for the case the redirect payload never arrives while the
@@ -397,7 +457,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
    * wizard to Step 2 (“الصفة”) instead of leaving it reset on Step 1.
    */
   useEffect(() => {
-    if (!auth || !(auth as { app?: unknown }).app) return;
+    if (!isAuthReady(auth)) return;
     if (user || step !== "method") return;
 
     const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
@@ -424,7 +484,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
 
   const handleGoogleAuth = useCallback(async () => {
     clearErrors();
-    setGoogleError(null);
+    clearGoogleError();
     setNotice(null);
     setBusy("google");
 
@@ -433,7 +493,12 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       // on-device/mock session for it. runGoogleSignIn() only ever produces
       // `signed-in` from a valid Firebase user object (popup, or the redirect
       // consumed below), so the wizard can never advance without real auth.
+      //
+      // Both SDK calls are wrapped: `ensurePersistence()` runs FIRST (so the
+      // session survives the round-trip), and every rejection is turned into
+      // an on-screen report carrying the raw `error.code` + `error.message`.
       const outcome = await runGoogleSignIn({
+        ensurePersistence: () => ensureAuthPersistence("signInWithPopup"),
         signInWithPopup: () => signInWithPopup(auth, googleProvider),
         signInWithRedirect: () => signInWithRedirect(auth, googleProvider),
         onRedirectStart: () => {
@@ -457,20 +522,17 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         return;
       }
 
-      // user-cancelled / unauthorized-domain / failed: keep the user on step
-      // 1 with an explicit, localised message (the `finally` below resets the
-      // loading state).
-      if (!mounted.current) return;
-      if (outcome.kind === "user-cancelled") setGoogleError(copyFor("popup-closed"));
-      else if (outcome.kind === "unauthorized-domain") setGoogleError(copyFor("unauthorized-domain"));
-      else setGoogleError(copyFor(outcome.code));
+      // Every other outcome — a cancelled chooser, unauthorized domain, a
+      // blocked popup whose redirect fallback also failed — keeps the user on
+      // step 1 with the localised copy AND the raw provider report underneath.
+      failGoogle(outcome.report);
     } catch (error: unknown) {
       logAuthError("handleGoogleAuth", error);
-      if (mounted.current) setGoogleError(copyFor(toAuthErrorCode(error)));
+      failGoogle(describeAuthError(error, "handleGoogleAuth"));
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [clearErrors, copyFor, handlePostAuthSuccess, t]);
+  }, [clearErrors, clearGoogleError, failGoogle, handlePostAuthSuccess, t]);
 
   /* ---------------- Step 1 · Phone + OTP ---------------- */
 
@@ -874,6 +936,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     errorCode,
     errorMessage,
     googleError,
+    googleErrorDetail,
+    diagnostics,
     fieldErrors,
     notice,
     emailStrength,

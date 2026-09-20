@@ -28,15 +28,32 @@ through `toAuthErrorCode()` so the copy table keeps working.
 npm i firebase
 ```
 
-`.env.local` (already git-ignored):
+`.env.local` (already git-ignored) — every value is optional at build time, but
+a *complete* set is required in production:
 
 ```bash
-NEXT_PUBLIC_AUTH_BACKEND=firebase
+NEXT_PUBLIC_AUTH_BACKEND=firebase            # firebase | demo | auto
 NEXT_PUBLIC_FIREBASE_API_KEY=…
 NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=smart-crop-ai.firebaseapp.com
 NEXT_PUBLIC_FIREBASE_PROJECT_ID=smart-crop-ai
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=smart-crop-ai.firebasestorage.app
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=…
 NEXT_PUBLIC_FIREBASE_APP_ID=…
+NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=…
 ```
+
+Resolution rules (`src/lib/firebase-env.ts` — the only module that reads
+`process.env`, through static `process.env.NEXT_PUBLIC_*` property access so
+Next.js can inline it):
+
+| Situation | Result |
+| --- | --- |
+| Variable set | Used verbatim (trimmed) |
+| Variable blank/absent | Documented fallback value **+ a diagnostic naming the key** |
+| `NEXT_PUBLIC_AUTH_BACKEND=firebase` | Real Firebase Auth |
+| `NEXT_PUBLIC_AUTH_BACKEND=demo` / unset | On-device demo gateway (a warning is logged when Firebase is configured but unused) |
+| `NEXT_PUBLIC_AUTH_BACKEND=auto` | Firebase when apiKey + authDomain + projectId + appId are all present, demo otherwise |
+| Anything else | Demo gateway + a warning quoting the unrecognised value |
 
 Enable in the Firebase console: **Google**, **Phone** (add your SHA-1 for
 Android; for web add the hostnames under *Authorized domains*, including the
@@ -245,17 +262,54 @@ export function createFirebaseAuthGateway(): AuthGateway {
 }
 ```
 
+## 3b. Session persistence, error reporting and diagnostics
+
+Three failure modes used to be invisible; all three are handled in the shared
+code path now:
+
+1. **Persistence before sign-in.** `ensureAuthPersistence()` in
+   `src/lib/firebase.ts` awaits
+   `setPersistence(auth, browserLocalPersistence)` before *every*
+   `signInWithPopup` / `signInWithRedirect`
+   (`GoogleAuthRunner.ensurePersistence`). Without it a full-page redirect
+   comes back to an auth instance that cannot store the session, so the user
+   silently lands on step 1 again. A failure (private mode, blocked
+   IndexedDB → `auth/web-storage-unsupported`) is logged, shown in the
+   diagnostics table and never blocks sign-in.
+2. **On-screen error reporting.** `signInWithPopup`, `signInWithRedirect` and
+   `getRedirectResult` are wrapped; every rejection becomes an `AuthErrorReport`
+   (`src/lib/auth/errorReport.ts`) carrying the raw `error.code`,
+   `error.message`, the mapped app code and an actionable hint. The
+   `AuthErrorPanel` under the Google button renders the localized sentence plus
+   `code:` / `message:` / hint rows and a "copy details" button — no error is
+   console-only.
+3. **Diagnostics.** `logFirebaseDiagnosticsOnce()` prints the environment table
+   once per load (`console.info`/`console.warn`, never `console.error`), and
+   `firebaseDiagnosticLines(scope)` feeds the same table into the panel when a
+   sign-in fails: backend + why it was chosen, projectId, authDomain (redacted
+   apiKey), which `NEXT_PUBLIC_FIREBASE_*` keys fell back, the current origin
+   with an *Authorized domains* hint when it is not localhost/`*.firebaseapp.com`,
+   an iframe warning (embedded previews block Google popups/redirects) and the
+   `browserLocalPersistence` state.
+
+Gateway selection logs one line per page load, e.g.
+`[auth] gateway: firebase — NEXT_PUBLIC_AUTH_BACKEND="firebase" → real Firebase Auth.`
+or, when the switch is missing while the project is configured,
+`[auth] gateway: demo — … Set it to "firebase" to use Firebase Auth.`
+
 ## 4. Flip the switch
 
-`src/lib/auth/gateway.ts` already contains the exact two lines to uncomment:
+`src/lib/auth/gateway.ts` resolves the backend through the same environment
+module and logs the decision:
 
 ```ts
-import { createFirebaseAuthGateway } from "./firebase-adapter";
-
-gateway =
-  process.env.NEXT_PUBLIC_AUTH_BACKEND === "firebase"
-    ? createFirebaseAuthGateway()
-    : createDemoGateway();
+export function createAuthGateway(): AuthGateway {
+  if (gateway) return gateway;
+  const env = resolveGatewayBackend();            // NEXT_PUBLIC_AUTH_BACKEND + NEXT_PUBLIC_FIREBASE_*
+  gateway = env.backend === "firebase" ? createFirebaseAuthGateway() : createDemoGateway();
+  // [auth] gateway: firebase — NEXT_PUBLIC_AUTH_BACKEND="firebase" → real Firebase Auth.
+  return gateway;
+}
 ```
 
 ## 5. Companion changes
@@ -303,7 +357,8 @@ back, and the decision logic is a pure, unit-tested function:
 4. **User cancellation** — `auth/popup-closed-by-user`,
    `auth/cancelled-popup-request`, `auth/cancelled-redirect` and
    `auth/redirect-cancelled-by-user` never trigger a redirect; the user sees
-   the localised "popup closed" copy under the button and can retry.
+   the localised "popup closed" copy under the button — plus the raw
+   `error.code`/`error.message` (see §3b) — and can retry.
 5. **Setup problems** — `auth/unauthorized-domain` (the current origin is not
    in *Firebase Console → Authentication → Settings → Authorized domains*)
    is reported with that exact instruction instead of retrying into the same
@@ -314,5 +369,8 @@ back, and the decision logic is a pure, unit-tested function:
    (`logAuthError`) and surfaced as a notice without killing the session.
 7. **Logging** — every failure path goes through
    `logAuthError(scope, error)` (`src/lib/auth/logging.ts`), which prints the
-   Firebase code, the page origin and an actionable hint (see the
-   `HINTS` table), so the console alone explains what happened.
+   Firebase code, the provider message, the page origin and an actionable hint
+   (see the `HINTS` table), so the console alone explains what happened.
+8. **Reporting** — the same failure is rendered in `AuthErrorPanel` (`code:` +
+   `message:` + hint + diagnostics + copy details), so the browser console is
+   never the only place an auth error is visible (§3b).

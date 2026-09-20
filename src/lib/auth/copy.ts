@@ -52,6 +52,12 @@ export interface AuthCopy {
     googleBusy: string;
     googleNote: string;
     googleRedirecting: string;
+    errorCode: string;
+    errorMessage: string;
+    errorHint: string;
+    errorDiagnostics: string;
+    errorCopy: string;
+    errorCopied: string;
     divider: string;
     channelsAria: string;
     channelPhone: string;
@@ -122,6 +128,7 @@ export interface AuthCopy {
     tooMany: string;
     popupClosed: string;
     popupBlocked: string;
+    storageBlocked: string;
     unauthorizedDomain: string;
     operationNotSupported: string;
     profileSave: string;
@@ -218,6 +225,12 @@ const AR: AuthCopy = {
     googleBusy: "جارٍ الاتصال بـ Google…",
     googleNote: "لا نصل إلى كلمة مرورك ولا نخزّنها",
     googleRedirecting: "أعدنا تحويلك إلى Google لإكمال تسجيل الدخول…",
+    errorCode: "الرمز",
+    errorMessage: "الرسالة",
+    errorHint: "الحل المقترح",
+    errorDiagnostics: "تشخيص Firebase",
+    errorCopy: "نسخ التفاصيل",
+    errorCopied: "تم نسخ التفاصيل",
     divider: "أو",
     channelsAria: "طريقة التحقق",
     channelPhone: "الهاتف",
@@ -288,6 +301,8 @@ const AR: AuthCopy = {
     tooMany: "محاولات كثيرة، انتظر قليلاً ثم أعد المحاولة",
     popupClosed: "أُغلقت نافذة Google قبل إكمال الدخول",
     popupBlocked: "تعذّر فتح نافذة Google المنبثقة (حظر النوافذ المنبثقة أو متصفح الجوال) — أعد المحاولة",
+    storageBlocked:
+      "هذا المتصفح يمنع تخزين الجلسة (Cookies/IndexedDB) — اسمح ببيانات الموقع لهذا النطاق ليصمد تسجيل الدخول بعد إعادة التحميل",
     unauthorizedDomain:
       "نطاق هذا الموقع غير مصرّح به في Firebase — أضِفه إلى Authorized domains في لوحة Firebase ثم أعد المحاولة",
     operationNotSupported: "هذا المتصفح لا يدعم نافذة الدخول ولا التحويل — جرّب متصفحًا آخر",
@@ -404,6 +419,12 @@ const FR: AuthCopy = {
     googleBusy: "Connexion à Google…",
     googleNote: "Nous n'accédons jamais à votre mot de passe",
     googleRedirecting: "Redirection vers Google pour terminer la connexion…",
+    errorCode: "Code",
+    errorMessage: "Message",
+    errorHint: "Piste",
+    errorDiagnostics: "Diagnostic Firebase",
+    errorCopy: "Copier les détails",
+    errorCopied: "Détails copiés",
     divider: "ou",
     channelsAria: "Méthode de vérification",
     channelPhone: "Téléphone",
@@ -474,6 +495,8 @@ const FR: AuthCopy = {
     wrongPassword: "Mot de passe incorrect",
     tooMany: "Trop de tentatives, réessayez dans un instant",
     popupClosed: "La fenêtre Google a été fermée avant la fin",
+    storageBlocked:
+      "Ce navigateur bloque le stockage de session (cookies/IndexedDB) — autorisez les données de site pour ce domaine afin que la connexion survive à un rechargement.",
     popupBlocked:
       "La fenêtre Google n'a pas pu s'ouvrir (pop-up bloquée ou navigateur mobile) — réessayez",
     unauthorizedDomain:
