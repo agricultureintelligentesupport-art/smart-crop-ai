@@ -394,7 +394,7 @@ export default function AssistantView() {
                     )
                   )}
 
-                  {msg.source === "vision-only" && (
+                  {msg.source === "direct" && (
                     <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.visionOnlyNote}</p>
                   )}
                   {msg.error && (

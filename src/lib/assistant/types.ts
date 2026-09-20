@@ -62,8 +62,12 @@ export type AssistantSource =
   | "hybrid"
   /** HF LLM only (no image attached). */
   | "llm"
-  /** Vision only (LLM unavailable) with templated advice. */
-  | "vision-only";
+  /**
+   * Vision diagnosis formatted by the built-in direct formatter — emitted
+   * when Step 1 succeeded but the Step 2 LLM chain was unavailable
+   * (zero-failure strategy: 200, never a 500).
+   */
+  | "direct";
 
 export interface AssistantResponseBody {
   /** Markdown answer in Arabic (or French when requested). */

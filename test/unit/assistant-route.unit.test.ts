@@ -49,10 +49,9 @@ function configureKeys() {
 
 /** Step 2 model chain, in order — must mirror the route's HF_LLM_MODELS. */
 const LLM_FALLBACK_ORDER = [
-  "meta-llama/Llama-3.2-3B-Instruct",
-  "meta-llama/Llama-3.1-8B-Instruct",
-  "mistralai/Mistral-7B-Instruct-v0.3",
-  "google/gemma-2-9b-it",
+  "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "HuggingFaceH4/zephyr-7b-beta",
+  "TiagoPires/Xenova-Qwen1.5-0.5B-Chat",
 ] as const;
 
 const chatReply = (content = "اسقِ في الصباح الباكر.") =>
@@ -71,6 +70,20 @@ const llmProviderUnsupported = () =>
   Response.json(
     { error: "Model not supported by provider hf-inference" },
     { status: 400 },
+  );
+
+/**
+ * Mirrors HF's 403 for gated families (meta-llama/*, google/gemma-*) whose
+ * license the token owner never accepted on huggingface.co. Must walk the
+ * model chain like any other availability error.
+ */
+const llmGated = () =>
+  Response.json(
+    {
+      error:
+        "You cannot access this model unless the model owner gives you access. You can do so by accepting the terms.",
+    },
+    { status: 403 },
   );
 
 const isChatUrl = (url: string) => url.includes("/v1/chat/completions");
@@ -317,17 +330,103 @@ test("image requests use server keys and return hybrid results without secrets",
   assert.doesNotMatch(JSON.stringify(payload), /test-hf|legacy-gemini-key-must-be-ignored/);
 });
 
-test("strict pipeline: LLM failure with image returns LLM Error 500 (no vision-only fallback)", async () => {
+/* ------------------------------------------------------------------ */
+/*  Zero-failure strategy — Step 2.5 direct formatting                  */
+/* ------------------------------------------------------------------ */
+
+test("zero-failure: Step 2 outage after a successful Step 1 returns 200 with source=direct", async () => {
   configureKeys();
   mock.method(globalThis, "fetch", async (url: string) =>
     isChatUrl(String(url))
       ? new Response(null, { status: 503 })
-      : Response.json([{ label: "Tomato___healthy", score: 0.95 }]),
+      : Response.json([
+          { label: "Tomato___Late_blight", score: 0.03 },
+          { label: "Tomato___Early_blight", score: 0.95 },
+          { label: "Tomato___healthy", score: 0.02 },
+        ]),
   );
   const response = await POST(request(true));
-  assert.equal(response.status, 500);
-  const body = await response.json() as { error: string };
-  assert.match(body.error, /^LLM Error:/);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.source, "direct");
+  assert.equal(payload.diagnosis.label, "Tomato___Early_blight");
+  // Clean concise Arabic Markdown card built from the Step 1 label + confidence.
+  assert.match(payload.reply, /## 🔬 التشخيص/);
+  assert.match(payload.reply, /Tomato___Early_blight/);
+  assert.match(payload.reply, /95%/);
+  assert.match(payload.reply, /الطماطم/);
+  assert.match(payload.reply, /## 💊 خطة العلاج/);
+  assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
+  // The failure is reported as a non-fatal warning, not a 500.
+  assert.ok(Array.isArray(payload.warnings) && payload.warnings.length === 1);
+  assert.match(payload.warnings[0], /LLM unavailable/i);
+  assert.doesNotMatch(JSON.stringify(payload), /test-hf|legacy-gemini-key-must-be-ignored/);
+});
+
+test("zero-failure: gated-model 403s walk the whole chain, then answer with direct formatting", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) {
+      urls.push(String(url));
+      return llmGated();
+    }
+    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+  });
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.source, "direct");
+  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+});
+
+test("zero-failure: healthy diagnosis gets a direct reassurance card with prevention tips", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string) =>
+    isChatUrl(String(url))
+      ? llmProviderUnsupported()
+      : Response.json([{ label: "Tomato___healthy", score: 0.97 }]),
+  );
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.source, "direct");
+  assert.equal(payload.diagnosis.healthy, true);
+  assert.match(payload.reply, /سليمة/);
+  assert.match(payload.reply, /97%/);
+  assert.match(payload.reply, /## 🛡️ وقاية/);
+  assert.doesNotMatch(payload.reply, /## 💊 خطة العلاج/);
+});
+
+test("zero-failure: low-confidence diagnosis asks for a clearer photo in the direct card", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string) =>
+    isChatUrl(String(url))
+      ? new Response(null, { status: 503 })
+      : Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]),
+  );
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.source, "direct");
+  assert.match(payload.reply, /صورة أوضح/);
+});
+
+test("zero-failure: an unrelated 400 on every LLM still ends in direct formatting when Step 1 succeeded", async () => {
+  configureKeys();
+  const upstream = mock.method(globalThis, "fetch", async (url: string) =>
+    isChatUrl(String(url))
+      ? Response.json({ error: "Invalid payload." }, { status: 400 })
+      : Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]),
+  );
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).source, "direct");
+  // A bad-request 400 fails fast (1 chat attempt only) — then Step 2.5 takes over.
+  assert.equal(
+    upstream.mock.calls.filter((c) => isChatUrl(String(c.arguments[0]))).length,
+    1,
+  );
 });
 
 for (const failure of ["http", "network", "empty"] as const) {

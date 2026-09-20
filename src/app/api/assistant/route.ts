@@ -8,12 +8,14 @@
  *     Handles 503/530 model-loading responses with a clear status message.
  *
  *   Step 2 (always): Hugging Face Inference API LLM chat completion for
- *     concise text response formatting — `meta-llama/Llama-3.2-3B-Instruct`
- *     primary, with automatic fallback through the other models actively
- *     served by the free HF serverless router (`meta-llama/Llama-3.1-8B-Instruct`,
- *     `mistralai/Mistral-7B-Instruct-v0.3`, `google/gemma-2-9b-it`) when the
- *     router reports a model id itself as unavailable (e.g. `404 — Model not
- *     found` or `400 — Model not supported by provider hf-inference`).
+ *     concise text response formatting — truly open, non-gated models only:
+ *     `Qwen/Qwen2.5-Coder-7B-Instruct` primary, then
+ *     `HuggingFaceH4/zephyr-7b-beta` and `TiagoPires/Xenova-Qwen1.5-0.5B-Chat`.
+ *     Gated families (meta-llama, google/gemma) are deliberately avoided:
+ *     they 403 with a license-acceptance error on tokens that never accepted
+ *     their terms. Availability failures (`404 — Model not found`,
+ *     `400 — Model not supported by provider hf-inference`, gated 403s,
+ *     empty choices) walk the chain.
  *     The PlantVillage label + confidence from Step 1, alongside the user's
  *     text message and Firestore profile context (Wilaya, crop type), are fed
  *     into the LLM behind a system prompt that enforces a concise, highly
@@ -21,17 +23,27 @@
  *     خبير…") with no small talk, no filler introductions and no long
  *     summaries.
  *
+ *   Step 2.5 (zero-failure safety net): if Step 1 produced a diagnosis but
+ *     the entire Step 2 LLM chain failed or is unavailable, the handler NEVER
+ *     returns 500 — a built-in TypeScript formatter constructs a clean,
+ *     concise Arabic Markdown diagnosis card directly from the Step 1 label +
+ *     confidence (with practical general advice) and the request succeeds
+ *     with HTTP 200 and `{ source: "direct" }`. Text-only requests (no
+ *     diagnosis to format) still fail with `{ error: "LLM Error: ..." }`.
+ *
  * The single `HUGGINGFACE_API_KEY` is read from `process.env` on the server
  * only — it is never shipped to the browser. Missing configuration returns a
  * server error.
  *
  * Error reporting: each stage logs to the server console
  * (`[Step 1: HF Success]` / `[Step 2: HF LLM Success]` and corresponding
- * error logs; `[Step 2: HF LLM Fallback]` marks a model switch). If either
- * stage errors, the handler returns a descriptive JSON error
- * `{ error: "HF Error: ..." }` (vision stage) or `{ error: "LLM Error: ..." }`
+ * error logs; `[Step 2: HF LLM Fallback]` marks a model switch and
+ * `[Step 2: HF LLM Unavailable → Direct]` marks the safety-net formatting).
+ * Step 1 failures and text-only Step 2 failures return a descriptive JSON
+ * error `{ error: "HF Error: ..." }` (vision stage) or `{ error: "LLM Error: ..." }`
  * (text stage) with HTTP 500 so the caller can identify exactly which step
- * failed.
+ * failed. A Step 2 failure WITH a Step 1 diagnosis never fails the request
+ * (zero-failure strategy — see Step 2.5 above).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -71,20 +83,19 @@ const HF_ENDPOINT = (model: string) =>
  * Fast open-source LLM ids tried by Step 2, in order, via the HF Inference
  * API's OpenAI-compatible chat-completions endpoint.
  *
- * These are models actively served by the free HF serverless router
- * (`hf-inference` provider). The router rotates its catalog and rejects ids
- * it no longer serves with `400 — Model not supported by provider hf-inference`
- * (or `404 — Model not found`), which the fallback chain treats as a
- * model-availability error and answers with the next id.
- *
- * `meta-llama/Llama-3.2-3B-Instruct` is the primary: small, fast and kept
- * warm on the serverless tier. The larger ids follow as fallbacks.
+ * Truly open, non-gated models only: gated families (`meta-llama/*`,
+ * `google/gemma-*`) answer with `403 — You cannot access this model…` unless
+ * the token owner manually accepted their license on huggingface.co, so they
+ * are deliberately excluded. The ids below serve on the free `hf-inference`
+ * provider with no manual acceptance step. Not-found / not-supported / gated
+ * responses still walk the chain as model-availability errors, and the
+ * Step 2.5 direct formatter ({@link buildDirectDiagnosisCard}) guarantees a
+ * useful reply even when the whole chain is down.
  */
 const HF_LLM_MODELS = [
-  "meta-llama/Llama-3.2-3B-Instruct",
-  "meta-llama/Llama-3.1-8B-Instruct",
-  "mistralai/Mistral-7B-Instruct-v0.3",
-  "google/gemma-2-9b-it",
+  "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "HuggingFaceH4/zephyr-7b-beta",
+  "TiagoPires/Xenova-Qwen1.5-0.5B-Chat",
 ] as const;
 
 const HF_CHAT_ENDPOINT = (model: string) =>
@@ -358,12 +369,13 @@ class HfLlmEmptyResponseError extends Error {
  * Message fragments the HF router returns when the *model id* is the problem
  * rather than the request itself: model not served by any provider
  * (`400 — Model not supported by provider hf-inference`), retired or mistyped
- * ids (`404 — Model not found`), endpoints that don't support chat
- * completions. Together with an HTTP 404 these are the only failures that
- * trigger the fallback chain — auth, quota, 5xx, other 400s (bad request
- * body) and network errors are surfaced immediately, because another model
- * id can't fix them and the extra round-trips would just burn the request
- * budget (`maxDuration`).
+ * ids (`404 — Model not found`), gated models whose license the token owner
+ * never accepted (`403 — You cannot access this model… / accepting the terms`),
+ * and endpoints that don't support chat completions. Together with an HTTP
+ * 404 these are the only failures that trigger the fallback chain — invalid
+ * tokens, quota, 5xx, other 400s (bad request body) and network errors are
+ * surfaced immediately, because another model id can't fix them and the extra
+ * round-trips would just burn the request budget (`maxDuration`).
  */
 const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /\bmodel not found\b/i,
@@ -371,6 +383,11 @@ const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /does not (?:seem to )?exist/i,
   /no such model/i,
   /\bnot supported\b/i,
+  /\bcannot access\b/i,
+  /\baccess to this model\b/i,
+  /\bgated\b/i,
+  /\blicense\b/i,
+  /\baccept(ing)? the terms\b/i,
 ];
 
 /** True when the failure looks like "this model id isn't usable for this key". */
@@ -454,9 +471,10 @@ async function generateWithHfLlmModel(
 
 /**
  * Strict Step 2: concise Arabic text response formatting via the HF Inference
- * API, starting at {@link HF_LLM_MODELS meta-llama/Llama-3.2-3B-Instruct} and
- * falling back through the remaining serverless ids when the router reports a
- * model as unavailable (404 / model-not-found / 400 not-supported-by-provider).
+ * API, starting at {@link HF_LLM_MODELS Qwen/Qwen2.5-Coder-7B-Instruct} and
+ * falling back through the remaining non-gated ids when the router reports a
+ * model as unavailable (404 not-found / 400 not-supported-by-provider /
+ * 403 gated-license / empty choices).
  * - Passes the PlantVillage label + confidence from Step 1 directly into the
  *   LLM, alongside the user's text message and Firestore profile (Wilaya, crop).
  * - Uses the concise professional Arabic advisor system prompt.
@@ -524,6 +542,207 @@ async function askHfLlmStrict(
 }
 
 /* ------------------------------------------------------------------ */
+/*  Step 2.5 — direct formatting safety net (ZERO-FAILURE)             */
+/* ------------------------------------------------------------------ */
+
+/** Practical treatment + prevention lines for the built-in formatter. */
+interface DirectAdvice {
+  treatment: string[];
+  prevention: string[];
+}
+
+/**
+ * Disease-family advice for the direct formatter, matched against the raw
+ * PlantVillage label. Ordered most specific first; {@link DIRECT_GENERAL_ADVICE}
+ * covers anything unmatched. Same brevity contract as the LLM system prompt:
+ * short actionable bullets, products available in the Algerian market, safety
+ * and pre-harvest interval reminders.
+ */
+const DIRECT_ADVICE_BY_DISEASE: readonly { match: RegExp; advice: DirectAdvice }[] = [
+  {
+    // Viruses (mosaic, yellow leaf curl, greening…) — no cure: remove + fight vectors.
+    match: /virus|mosaic|yellow[ _]?leaf[ _]?curl|haunglongbing|greening/i,
+    advice: {
+      treatment: [
+        "لا علاج للفيروسات: اقتلع النباتات المصابة وتخلص منها خارج الحقل فوراً.",
+        "كافح الحشرات الناقلة (المنّ، الذبابة البيضاء) بمبيد حشري معتمد أو مصائد لاصقة صفراء.",
+      ],
+      prevention: [
+        "استعمل بذوراً وشتلات سليمة ومعتمدة.",
+        "أغطية شبكية مضادة للحشرات ونظافة الحقل من الأعشاب الضيفة.",
+      ],
+    },
+  },
+  {
+    // Spider mites.
+    match: /spider[ _]?mite|two[ _]?spotted/i,
+    advice: {
+      treatment: [
+        "رشّ مبيد أكاروسي معتمد (أبامكتين أو سبيروميسيفن) على وجهي الورقة.",
+        "أزل الأوراق شديدة الإصابة.",
+      ],
+      prevention: [
+        "قلّل الغبار على الأوراق — الأكاروس ينتشر في الجو الجاف.",
+        "فحص دوري للأسطح السفلية للأوراق.",
+      ],
+    },
+  },
+  {
+    // Bacterial diseases (bacterial spot/speck…).
+    match: /bacterial/i,
+    advice: {
+      treatment: [
+        "رشّ مبيد نحاسي بالجرعة المسجلة وأوقف السقي العلوي فوراً.",
+        "أزل النباتات والأوراق شديدة الإصابة وتجنب لمس السليمة بعدها.",
+      ],
+      prevention: [
+        "بذور معقمة ومعتمدة وتناوب زراعي لموسمين مع محصول غير عائلي.",
+        "لا تعمل بين النباتات وهي مبللة.",
+      ],
+    },
+  },
+  {
+    // Mildews (powdery / downy).
+    match: /mildew/i,
+    advice: {
+      treatment: [
+        "عالج بمبيد فطري معتمد (كبريت ميكروني للبياض الدقيقي، أو ميتالاكسيل-م / مانكوزيب للزغبي) حسب الجرعة المسجلة وفترة الأمان قبل الجني.",
+        "أزل الأجزاء شديدة الإصابة.",
+      ],
+      prevention: [
+        "حسّن التهوية وقلّل الرطوبة حول الأوراق وتجنب التسميد الآزوتي المفرط.",
+        "سقي صباحي عند القاعدة فقط.",
+      ],
+    },
+  },
+  {
+    // Rusts.
+    match: /rust/i,
+    advice: {
+      treatment: [
+        "عالج بمبيد فطري (مانكوزيب أو تريبازول) وفق الجرعة المسجلة مع احترام فترة الأمان قبل الجني.",
+        "أزل الأوراق شديدة الإصابة.",
+      ],
+      prevention: [
+        "تناوب زراعي وتباعد كافٍ بين الصفوف لتهوية الأوراق.",
+      ],
+    },
+  },
+  {
+    // Leaf spots (septoria, cercospora, target spot…).
+    match: /septoria|leaf[ _]?spot|cercospora|target[ _]?spot|gray[ _]?leaf/i,
+    advice: {
+      treatment: [
+        "عالج بمبيد فطري (كلوروثالونيل أو مانكوزيب) كل 7–10 أيام حسب شدة الإصابة.",
+        "أزل الأوراق السفلية المصابة.",
+      ],
+      prevention: [
+        "نظافة الحقل من بقايا المحصول السابق وتناوب زراعي.",
+        "سقي عند القاعدة وتجنب بلل الأوراق.",
+      ],
+    },
+  },
+  {
+    // Blights (early / late / northern…).
+    match: /blight/i,
+    advice: {
+      treatment: [
+        "أزل الأوراق المصابة فوراً وتخلص منها خارج الحقل.",
+        "عالج بمبيد نحاسي أو مانكوزيب حسب الجرعة المسجلة مع احترام فترة الأمان قبل الجني.",
+        "أوقف السقي العلوي؛ اسقِ عند القاعدة صباحاً.",
+      ],
+      prevention: [
+        "تناوب زراعي مع محصول غير عائلي لموسمين.",
+        "تباعد كافٍ بين النباتات للتهوية.",
+      ],
+    },
+  },
+  {
+    // Rots, scabs, molds, leaf scorch.
+    match: /rot|scab|mold|leaf[ _]?scorch|esca|measles/i,
+    advice: {
+      treatment: [
+        "أزل الأجزاء المصابة وعالج بمبيد فطري نحاسي أو معتمد حسب الجرعة المسجلة.",
+        "قلّل الجروح والرطوبة العالية حول الثمار والأوراق.",
+      ],
+      prevention: [
+        "تناوب زراعي ونظافة الحقل وتصريف جيد للمياه.",
+      ],
+    },
+  },
+];
+
+/** Used when the label matches none of the disease families above. */
+const DIRECT_GENERAL_ADVICE: DirectAdvice = {
+  treatment: [
+    "أزل الأجزاء المصابة وتخلص منها خارج الحقل.",
+    "استشر مهندساً زراعياً محلياً لاختيار المبيد المناسب والجرعة الآمنة وفترة الأمان قبل الجني.",
+  ],
+  prevention: [
+    "تناوب زراعي ونظافة الحقل من بقايا المحصول.",
+    "سقي صباحي عند القاعدة مع تهوية جيدة بين النباتات.",
+  ],
+};
+
+function adviceForLabel(label: string): DirectAdvice {
+  return (
+    DIRECT_ADVICE_BY_DISEASE.find((entry) => entry.match.test(label))?.advice ??
+    DIRECT_GENERAL_ADVICE
+  );
+}
+
+/**
+ * Zero-failure safety net (Step 2.5): builds a clean, concise Arabic Markdown
+ * diagnosis card directly from the Step 1 label + confidence, with practical
+ * general advice. Used ONLY when Step 1 succeeded but the entire Step 2 LLM
+ * chain failed or is unavailable — the request then answers 200 with
+ * `{ source: "direct" }` instead of a 500.
+ */
+function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
+  const pct = Math.round(diagnosis.confidence * 100);
+  const bucket = confidenceBucket(diagnosis.confidence);
+  const bucketAr = bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة";
+  const alternates = diagnosis.candidates
+    .slice(1)
+    .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
+    .join("، ");
+  const footer =
+    "> ⚠️ بطاقة تشخيص تلقائية مبنية مباشرة على نموذج الرؤية — خدمة النصوص الذكية غير متاحة حالياً.";
+
+  if (diagnosis.healthy) {
+    const lines = [
+      `- **النبتة سليمة** حسب نموذج الرؤية — نسبة الثقة: ${pct}% (${bucketAr}).`,
+      alternates ? `- احتمالات أخرى: ${alternates}` : "",
+    ].filter(Boolean);
+    return [
+      `## 🔬 التشخيص\n${lines.join("\n")}`,
+      "## 🛡️ وقاية\n- سقي صباحي منتظم عند القاعدة دون بلل الأوراق.\n- تسميد متوازن ومراقبة الأوراق الجديدة أسبوعياً.",
+      "## 📅 متابعة موصى بها\n- فحص أسبوعي للأوراق السفلية والبراعم؛ عند أول بقعة أرسل صورة واضحة للتشخيص المبكر.",
+      footer,
+    ].join("\n\n");
+  }
+
+  const advice = adviceForLabel(diagnosis.label);
+  const lowConfidence = diagnosis.confidence < 0.45;
+  const lines = [
+    `- الإصابة: **${diagnosis.labelAr}** — التسمية الخام: \`${diagnosis.label}\``,
+    `- نسبة الثقة: ${pct}% (${bucketAr})`,
+    alternates ? `- تشخيصات بديلة محتملة: ${alternates}` : "",
+    lowConfidence
+      ? "- الثقة ضعيفة: أرسل صورة أوضح (ورقة كاملة، إضاءة نهارية) للتأكيد قبل المعالجة."
+      : "",
+  ].filter(Boolean);
+
+  return [
+    `## 🔬 التشخيص\n${lines.join("\n")}`,
+    `## 💊 خطة العلاج\n${advice.treatment.map((line) => `- ${line}`).join("\n")}`,
+    `## 🛡️ الوقاية مستقبلاً\n${advice.prevention.map((line) => `- ${line}`).join("\n")}`,
+    "## 📅 متابعة موصى بها\n- راقب تطور الأعراض كل 3–5 أيام؛ إن انتشرت رغم العلاج، استشر مهندساً زراعياً محلياً.",
+    footer,
+  ].join("\n\n");
+}
+
+/* ------------------------------------------------------------------ */
 /*  Handler — strict 2-step sequential pipeline                        */
 /* ------------------------------------------------------------------ */
 
@@ -588,20 +807,37 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // Pass the output label + confidence from Step 1 directly into the LLM,
   // alongside the user's text message and Firestore profile (Wilaya, crop type).
   let reply: string;
+  let source: AssistantSource;
+  let warnings: string[] | undefined;
   try {
     reply = await askHfLlmStrict(huggingfaceKey, message, context, diagnosis);
+    source = diagnosis ? "hybrid" : "llm";
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     const llmMessage = msg.startsWith("LLM Error:") ? msg : `LLM Error: ${msg}`;
-    console.error(`[Step 2: HF LLM Error] ${llmMessage}`);
-    return NextResponse.json({ error: llmMessage }, { status: 500 });
+    if (diagnosis) {
+      // Zero-failure strategy: Step 1 succeeded, so never 500 here — format a
+      // clean concise Arabic Markdown card directly from the vision result
+      // (Step 2.5) and answer 200 with `{ source: "direct" }`.
+      console.warn(`[Step 2: HF LLM Unavailable → Direct] ${llmMessage}`);
+      reply = buildDirectDiagnosisCard(diagnosis);
+      source = "direct";
+      warnings = [
+        "Step 2 LLM unavailable — reply formatted directly from the PlantVillage diagnosis.",
+      ];
+    } else {
+      // Text-only request: there is no diagnosis to format, so the LLM failure
+      // is reported as before with the stage identifier.
+      console.error(`[Step 2: HF LLM Error] ${llmMessage}`);
+      return NextResponse.json({ error: llmMessage }, { status: 500 });
+    }
   }
 
-  const source: AssistantSource = diagnosis ? "hybrid" : "llm";
   const payload: AssistantResponseBody = {
     reply,
     diagnosis,
     source,
+    ...(warnings ? { warnings } : {}),
   };
   return NextResponse.json(payload);
 }
