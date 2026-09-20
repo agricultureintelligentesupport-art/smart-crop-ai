@@ -12,10 +12,9 @@
  *   natural Arabic / Algerian Darija.
  *
  * Both keys are read from `process.env` on the server only — they are never
- * shipped to the browser. Every upstream failure degrades gracefully: vision
- * without Gemini yields a templated Arabic plan, no keys at all yields a
- * deterministic offline answer, and the response always tells the UI which
- * path produced it (`source`).
+ * shipped to the browser. Missing configuration returns a server error. Vision
+ * without Gemini still yields a templated Arabic plan; if neither provider
+ * produces a result, the request fails rather than claiming keys are missing.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -29,6 +28,7 @@ import type {
   DiagnosisCandidate,
 } from "@/lib/assistant/types";
 
+export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 /** Vision + LLM round-trips; give slow cold starts room on hosted platforms. */
 export const maxDuration = 60;
@@ -293,7 +293,7 @@ async function askGemini(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Offline / degraded fallbacks (keys missing or upstream down)       */
+/*  Degraded advice (vision succeeded, reasoning unavailable)          */
 /* ------------------------------------------------------------------ */
 
 function templatedDiagnosisReply(
@@ -327,23 +327,6 @@ function templatedDiagnosisReply(
     `- عقّم الأدوات وقلّل الرطوبة على المجموع الخضري.`,
     ``,
     `> ملاحظة: خدمة النصائح الذكية غير متاحة حالياً، هذه إرشادات عامة اعتماداً على تشخيص الصورة فقط.`,
-  ].join("\n");
-}
-
-function offlineReply(context: AssistantContext | undefined, hadImage: boolean): string {
-  const who = context?.displayName ? ` يا ${context.displayName}` : "";
-  return [
-    `أهلاً${who} 🌱 أنا مساعدك الزراعي في "محصولي الذكي".`,
-    ``,
-    hadImage
-      ? `وصلتني الصورة، لكن خدمة التشخيص الذكي غير مفعّلة حالياً على هذا الخادم (مفاتيح API غير مضبوطة).`
-      : `خدمة الذكاء الاصطناعي غير مفعّلة حالياً على هذا الخادم (مفاتيح API غير مضبوطة).`,
-    ``,
-    `لتفعيلها أضف في ملف \`.env.local\`:`,
-    `- \`GEMINI_API_KEY\` — من Google AI Studio.`,
-    `- \`HUGGINGFACE_API_KEY\` — من إعدادات حساب Hugging Face.`,
-    ``,
-    `في الأثناء يمكنك استعمال لوحة التحكم لمتابعة السقي والطقس حسب ولايتك. 💧`,
   ].join("\n");
 }
 
@@ -386,35 +369,31 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const geminiKey = process.env.GEMINI_API_KEY?.trim() || null;
   const huggingfaceKey = process.env.HUGGINGFACE_API_KEY?.trim() || null;
 
+  if (!geminiKey || !huggingfaceKey) {
+    return NextResponse.json(
+      { error: "API keys missing on server", code: "MISSING_KEYS" },
+      { status: 500 },
+    );
+  }
+
   const warnings: string[] = [];
 
   // ---- Step 1: vision diagnosis (only when a photo was sent) ----
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
-    if (huggingfaceKey) {
-      diagnosis = await classifyPlantImage(image.data, image.mimeType, huggingfaceKey, warnings);
-    } else {
-      warnings.push("vision: HUGGINGFACE_API_KEY not configured — step skipped");
-    }
+    diagnosis = await classifyPlantImage(image.data, image.mimeType, huggingfaceKey, warnings);
   }
 
   // ---- Step 2: localized reasoning with Gemini 1.5 Flash ----
-  let reply: string | null = null;
-  let source: AssistantSource = "offline";
-
-  if (geminiKey) {
-    reply = await askGemini(
-      geminiKey,
-      message,
-      context,
-      diagnosis,
-      image ? { data: image.data, mimeType: image.mimeType } : null,
-      warnings,
-    );
-    if (reply) source = diagnosis ? "hybrid" : "gemini";
-  } else {
-    warnings.push("reasoning: GEMINI_API_KEY not configured");
-  }
+  let reply = await askGemini(
+    geminiKey,
+    message,
+    context,
+    diagnosis,
+    image ? { data: image.data, mimeType: image.mimeType } : null,
+    warnings,
+  );
+  let source: AssistantSource = diagnosis ? "hybrid" : "gemini";
 
   // ---- Degraded paths ----
   if (!reply && diagnosis) {
@@ -422,8 +401,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     source = "vision-only";
   }
   if (!reply) {
-    reply = offlineReply(context, Boolean(image));
-    source = "offline";
+    return NextResponse.json(
+      { error: "AI service temporarily unavailable", code: "UPSTREAM_ERROR" },
+      { status: 502 },
+    );
   }
 
   const payload: AssistantResponseBody = {

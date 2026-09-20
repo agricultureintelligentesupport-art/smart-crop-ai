@@ -63,9 +63,7 @@ export type AssistantSource =
   /** Gemini only (no image, or vision unavailable). */
   | "gemini"
   /** Vision only (Gemini unavailable) with templated advice. */
-  | "vision-only"
-  /** Deterministic offline advice (no API keys / upstream failure). */
-  | "offline";
+  | "vision-only";
 
 export interface AssistantResponseBody {
   /** Markdown answer in Arabic (or French when requested). */
