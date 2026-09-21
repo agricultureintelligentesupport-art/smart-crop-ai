@@ -2,7 +2,7 @@
 
 ## Why
 
-The PlantVillage MobileNetV3 classifier (Step 1) is a **38-class crop/disease
+The PlantVillage MobileNetV2 classifier (Step 1) is a **38-class crop/disease
 classifier with no notion of "leaf"**. When a farmer's photo contains a hand
 holding the leaf, soil, a pot or half a field, the classifier happily labels
 the *background* and returns a confident-but-wrong disease. Localising the
@@ -15,7 +15,7 @@ largest source of misdiagnosis in the pipeline.
 | --- | --- | --- | --- |
 | Step 0 · detection | Server (route) | `suryanshgoel/detr-finetuned-plantdoc` → `facebook/detr-resnet-50` (chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
-| Step 1 · classification | Server (route) | MobileNetV3 PlantVillage (ViT fallback) | Free tier, existing behaviour. |
+| Step 1 · classification | Server (route) | MobileNetV2 PlantVillage (ViT fallback) — unchanged | Free tier, existing behaviour. |
 | Stages 1–3 · LLM chain | Server (route) | Gemini → HF router LLMs → built-in formatter — unchanged | Existing behaviour. |
 
 The detector weights (166 MB DETR checkpoint) live on **Hugging Face's

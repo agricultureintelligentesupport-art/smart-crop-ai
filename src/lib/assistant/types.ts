@@ -1,8 +1,8 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the fail-proof
- * resilient chain behind `/api/assistant`:
- *   Step 1  Hugging Face MobileNetV3 plant disease vision diagnosis,
- *   Stage 1 Google Gemini (primary LLM text synthesis),
+ * 3-stage chain behind `/api/assistant`:
+ *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
+ *   Stage 1 Google Gemini (`gemini-1.5-flash`, primary LLM),
  *   Stage 2 Hugging Face LLM chain (fallback),
  *   Stage 3 built-in TypeScript direct formatters (never fails).
  *

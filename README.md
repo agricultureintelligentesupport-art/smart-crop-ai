@@ -106,7 +106,7 @@ photo (base64)
   │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
   │    frame — the outcome lands in `preprocessing` on the API response.
   │
-  ├─ Step 1 · PlantVillage classifier ── MobileNetV3 (ViT fallback) on the
+  ├─ Step 1 · PlantVillage classifier ── MobileNetV2 (ViT fallback) on the
   │    same free router; receives ONLY the Step 0 crop when detection
   │    succeeded, the full frame otherwise.
   │
