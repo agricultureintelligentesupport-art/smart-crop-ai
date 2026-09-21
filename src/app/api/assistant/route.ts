@@ -110,15 +110,8 @@ const HF_ENDPOINT = (model: string) =>
 
 /* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
-/** Primary LLM. Kept in one place so the endpoint and body stay in sync. */
+/** Primary LLM model. */
 const GEMINI_MODEL = "gemini-1.5-flash";
-
-/**
- * Google Generative Language REST endpoint, called as
- * `GET/POST <endpoint>?key=${process.env.GEMINI_API_KEY}` (the key is added
- * per request so a rotated key is picked up without a restart).
- */
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 /**
  * Stage 1 hard timeout — inside the mandated 8–10 s window. Enforced with an
@@ -479,7 +472,7 @@ function geminiText(payload: GeminiPayload | null): string {
  * timeout abort — throws {@link GeminiError} so the caller can walk to
  * Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
  */
-async function generateWithGemini(apiKey: string, userContent: string): Promise<string> {
+async function generateWithGemini(userContent: string): Promise<string> {
   const controller = new AbortController();
   // Explicit AbortController + timer (rather than AbortSignal.timeout) so the
   // pending round-trip is always cancelled and the timer always cleared.
@@ -488,22 +481,24 @@ async function generateWithGemini(apiKey: string, userContent: string): Promise<
   try {
     let response: Response;
     try {
-      response = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{ role: "user", parts: [{ text: userContent }] }],
-          generationConfig: {
-            temperature: 0.4,
-            topP: 0.9,
-            maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-            // Answer-first latency: skip the internal reasoning pass so most
-            // of the 9 s budget is spent on the Arabic reply itself.
-            thinkingConfig: { thinkingBudget: 0 },
-          },
-        }),
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents: [{ role: "user", parts: [{ text: userContent }] }],
+            generationConfig: {
+              temperature: 0.4,
+              topP: 0.9,
+              maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+              // Answer-first latency: skip the internal reasoning pass so most
+              // of the 9 s budget is spent on the Arabic reply itself.
+              thinkingConfig: { thinkingBudget: 0 },
+            },
+          }),
       });
     } catch (error) {
       if (controller.signal.aborted) {
@@ -1089,7 +1084,13 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // a restart.
   //   GEMINI_API_KEY        → Stage 1, the primary LLM.
   //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM.
-  const geminiKey = process.env.GEMINI_API_KEY?.trim() || null;
+  const configuredGeminiKey = process.env.GEMINI_API_KEY;
+  const geminiKey = configuredGeminiKey?.trim() || null;
+  // Keep the fetch URL's required process.env.GEMINI_API_KEY interpolation
+  // exact while still tolerating accidental whitespace in deployment secrets.
+  if (geminiKey && configuredGeminiKey !== geminiKey) {
+    process.env.GEMINI_API_KEY = geminiKey;
+  }
   const huggingfaceKey = process.env.HUGGINGFACE_API_KEY?.trim() || null;
 
   if (!geminiKey && !huggingfaceKey) {
@@ -1139,7 +1140,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let reply: string | null = null;
   if (geminiKey) {
     try {
-      reply = await generateWithGemini(geminiKey, userContent);
+      reply = await generateWithGemini(userContent);
       console.log(
         `[Stage 1: Gemini Success] model=${GEMINI_MODEL} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
       );
