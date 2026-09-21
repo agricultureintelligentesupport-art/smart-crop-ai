@@ -34,7 +34,7 @@ import type {
   AssistantSource,
   AssistantDiagnosis,
 } from "@/lib/assistant/types";
-import { useProfile } from "@/lib/auth/profile";
+import { isGuestProfile, useProfile } from "@/lib/auth/profile";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import DiagnosisCard from "./DiagnosisCard";
@@ -138,9 +138,9 @@ export default function AssistantView() {
   /** Snapshot of the last request so the retry chip can resend it. */
   const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
 
-  // Same session gate as the dashboard: assistant answers are personalised,
-  // so an authenticated profile is required.
-  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  // Same session gate as the dashboard: an authenticated profile is required.
+  // Guest profiles (`isGuest: true`, `local_guest_*` uid) bypass Firebase.
+  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null || isGuestProfile(profile);
   useEffect(() => {
     if (!ready) return;
     if (!authenticated) router.replace("/auth");

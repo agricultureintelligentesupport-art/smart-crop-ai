@@ -24,7 +24,8 @@ import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
-import { useProfile } from "@/lib/auth/profile";
+import { isGuestProfile, useProfile } from "@/lib/auth/profile";
+import { clearGuestFlag, GUEST_ACCOUNT_AR, GUEST_ACCOUNT_FR } from "@/lib/auth/guest";
 import type { AuthRole } from "@/lib/auth/types";
 import { CROPS, DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
@@ -69,10 +70,10 @@ export default function DashboardView() {
   const role = roleOverride ?? profile?.role ?? (authProfile?.role as AuthRole | null) ?? null;
 
   // Session gate: a signed-in Firebase user OR a stored authenticated
-  // session (Google / phone / e-mail through the gateway) is required.
-  // Legacy guest records are rejected by `readProfile()`'s guard, so former
-  // guests land on the wizard instead of the dashboard.
-  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  // session (Google / phone / e-mail) OR a guest profile is required.
+  // Guest profiles use `isGuest: true` + `local_guest_*` uid and bypass Firebase.
+  const isGuest = isGuestProfile(profile);
+  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null || isGuest;
   useEffect(() => {
     if (!ready) return;
     if (!authenticated) router.replace("/auth");
@@ -90,12 +91,12 @@ export default function DashboardView() {
   });
 
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
+  const guestLabel = lang === "ar" ? "زائر" : "Invité";
   const displayName =
     profile?.displayName ?? authProfile?.displayName ?? authUser?.displayName ?? "";
-  const greeting = t.welcome.member.replace(
-    "{name}",
-    displayName || (lang === "ar" ? "فلاح" : "Agriculteur"),
-  );
+  // For guest accounts show "زائر" instead of the generic farmer fallback.
+  const effectiveName = displayName || (isGuest ? guestLabel : lang === "ar" ? "فلاح" : "Agriculteur");
+  const greeting = t.welcome.member.replace("{name}", effectiveName);
 
   const updateWilaya = (code: string) => {
     setWilayaOverride(code);
@@ -118,6 +119,11 @@ export default function DashboardView() {
       await authSignOut();
     } catch {
       // ignore
+    }
+    try {
+      clearGuestFlag();
+    } catch {
+      /* ignore */
     }
     clear();
     router.push("/auth");
@@ -144,7 +150,7 @@ export default function DashboardView() {
               {brand.brand}
             </span>
             <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
-              {t.header.badgeMember}
+              {isGuest ? (lang === "ar" ? GUEST_ACCOUNT_AR : GUEST_ACCOUNT_FR) : t.header.badgeMember}
             </span>
           </span>
         </div>

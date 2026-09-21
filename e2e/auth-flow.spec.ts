@@ -323,7 +323,7 @@ test.describe("email sign-in", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  7. Auth-gated dashboard (guest mode removed)                       */
+/*  7. Auth-gated dashboard with Guest bypass                          */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -346,16 +346,31 @@ test.describe("dashboard session guard", () => {
     await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
   });
 
-  test("/guest is gone: the old route forwards to the auth wizard", async ({ page }) => {
+  test("/guest sets a guest session and lands on the dashboard", async ({ page }) => {
     await page.goto("/guest");
-    await expect(page).toHaveURL(/\/auth/);
-    await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole("heading", { name: /مرحباً/ })).toContainText(/زائر/);
+    await expect(page.getByText(/حساب زائر|Compte invité/)).toBeVisible();
   });
 
-  test("the auth wizard offers no guest escape hatch", async ({ page }) => {
+  test("the auth wizard offers a Continue as Guest bypass", async ({ page }) => {
     await page.goto("/auth");
-    await expect(page.getByRole("button", { name: /زائر/ })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: /زائر/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /المتابعة كزائر/ })).toBeVisible();
+    // French toggle shows the English fallback
+    await page.getByRole("button", { name: "Français" }).click();
+    await expect(page.getByRole("button", { name: /Continue as Guest/ })).toBeVisible();
+  });
+
+  test("Continue as Guest lands on dashboard with guest display", async ({ page }) => {
+    await page.goto("/auth");
+    await page.getByRole("button", { name: /المتابعة كزائر/ }).click();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole("heading", { name: /مرحباً/ })).toContainText(/زائر/);
+    // Guest badge
+    await expect(page.getByText(/حساب زائر|Compte invité/).first()).toBeVisible();
+    // Guest can also reach assistant
+    await page.goto("/assistant");
+    await expect(page).not.toHaveURL(/\/auth/);
   });
 });
 

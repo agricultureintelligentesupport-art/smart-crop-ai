@@ -30,17 +30,26 @@ export interface StoredProfile {
   /** Provider avatar (Google) so the app can greet the real person. */
   photoURL?: string | null;
   updatedAt: number;
+  /** Guest marker — when true, this profile bypasses Firebase session checks. */
+  isGuest?: boolean;
+  /** Alias for isGuest, matches Firebase Anonymous pattern. */
+  isAnonymous?: boolean;
 }
 
 function isProfile(value: unknown): value is StoredProfile {
   if (!value || typeof value !== "object") return false;
-  // Records written by the removed guest mode (uid: null, isGuest: true,
-  // method: "guest") are not sessions: treat them as absent so their owners
-  // are routed back to the auth wizard instead of a dashboard.
-  const legacy = value as { isGuest?: unknown; method?: unknown };
-  if (legacy.isGuest === true || legacy.method === "guest") return false;
   const v = value as Partial<StoredProfile>;
   return typeof v.uid === "string" && v.uid.length > 0 && typeof v.displayName === "string";
+}
+
+export function isGuestProfile(profile: StoredProfile | null): boolean {
+  if (!profile) return false;
+  if (profile.isGuest) return true;
+  if (profile.isAnonymous) return true;
+  if (profile.method === "guest") return true;
+  if (profile.uid.startsWith("local_guest")) return true;
+  if (profile.uid.startsWith("guest")) return true;
+  return false;
 }
 
 export function readProfile(): StoredProfile | null {

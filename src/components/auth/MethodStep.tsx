@@ -12,10 +12,12 @@ import {
   Sparkles,
   UserPlus,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { interpolate } from "@/lib/auth/copy";
 import { DZ_COUNTRY_CODE, formatDzPhone, normalizeDzPhone } from "@/lib/auth/validation";
 import type { EmailIntent } from "@/lib/auth/types";
+import { enterGuestMode } from "@/lib/auth/guest";
 import AuthErrorPanel from "./AuthErrorPanel";
 import GoogleMark from "./GoogleMark";
 import OtpInput from "./OtpInput";
@@ -88,6 +90,8 @@ export default function MethodStep({ flow }: { flow: FlowController }) {
       )}
 
       <LiveRegion message={flow.notice} />
+
+      <GuestBypass lang={flow.lang} />
 
       <div id="recaptcha-container" />
     </section>
@@ -592,6 +596,43 @@ function EmailPanel({ flow }: { flow: FlowController }) {
           </Badge>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Guest bypass — subtle, clean link that sets a mock session        */
+/* ------------------------------------------------------------------ */
+
+function GuestBypass({ lang }: { lang: string }) {
+  const router = useRouter();
+  const handleGuest = useCallback(() => {
+    // Keep Firebase untouched: just write a guest profile and go.
+    enterGuestMode(lang as "ar" | "fr");
+    router.push("/dashboard");
+  }, [lang, router]);
+
+  const label = lang === "ar" ? "المتابعة كزائر" : "Continue as Guest";
+  const sub = lang === "ar" ? "حساب زائر" : "Guest account";
+
+  return (
+    <div className="flex flex-col items-center gap-1 pt-1">
+      <div className="flex items-center gap-3 w-full" role="separator" aria-label={label}>
+        <span className="h-px flex-1 bg-gradient-to-r from-transparent to-emerald-900/10" />
+        <span className="text-[11px] font-bold text-emerald-900/40">{sub}</span>
+        <span className="h-px flex-1 bg-gradient-to-l from-transparent to-emerald-900/10" />
+      </div>
+      <button
+        type="button"
+        onClick={handleGuest}
+        aria-label={label}
+        className={`inline-flex h-11 items-center justify-center gap-1.5 rounded-xl border border-emerald-900/10 bg-white/60 px-4 text-[12.5px] font-extrabold text-emerald-800/70 transition-colors hover:bg-white hover:text-emerald-800 hover:border-emerald-200 ${FOCUS_RING}`}
+      >
+        {label}
+      </button>
+      <p className="text-center text-[10.5px] font-medium leading-4 text-emerald-900/45">
+        {lang === "ar" ? "دخول فوري للتجربة دون إنشاء حساب" : "Instant access for testing — no account needed"}
+      </p>
     </div>
   );
 }

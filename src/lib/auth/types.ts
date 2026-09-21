@@ -3,7 +3,7 @@
  * Firebase adapter (see `docs/firebase-adapter.md`).
  */
 
-export type AuthMethod = "google" | "phone" | "email";
+export type AuthMethod = "google" | "phone" | "email" | "guest";
 
 /** Which side of the email tab the user is on. */
 export type EmailIntent = "signin" | "register";
