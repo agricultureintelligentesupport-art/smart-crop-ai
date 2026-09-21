@@ -28,33 +28,32 @@
  *   Step 1 — Vision Model Cascade (when an image is attached):
  *     Hugging Face Serverless Inference API cascade, non-blocking after
  *     Step 0 cropping:
- *       Step 1a — PRIMARY Field-Trained Vision Model (e.g.
- *         `dima806/plant_disease_image_detection` or `fxmeng/plantdoc-vit`):
- *         high-accuracy field-trained HF model, bounded by a strict 4 s
- *         timeout (>4s → immediate fallback). ViT trained on real field
- *         imagery (PlantDoc / field datasets) — the most accurate leaf
- *         classifier in the cascade.
- *       Step 1b — SECONDARY Fallback Model (KEPT INTACT):
- *         `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
- *         — the CURRENT baseline MobileNetV2 PlantVillage classifier is NOT
- *         removed or overwritten; plus `wambugu71/crop_leaf_diseases_vit`
- *         tertiary. If the Primary fails, times out (>4s), or returns an
- *         error (503/530 loading, 4xx/5xx, network), the request seamlessly
- *         routes to this baseline. Both models parse the returned array to
- *         extract the primary predicted disease class + confidence percentage
+ *       Step 1a — PRIMARY MobileNetV3 Vision Model (e.g.
+ *         `mobilenet_v3_large_100` or `hitmonleet/PlantVillage__MobileNetV3`):
+ *         lightweight, high-accuracy MobileNetV3 plant disease classifier
+ *         endpoint via HF Serverless Inference API, bounded by a strict 4 s
+ *         timeout (>4s → immediate fallback). Replaces legacy MobileNetV2.
+ *       Step 1b — Fallback Models:
+ *         Field-trained ViT models (`dima806/plant_disease_image_detection`,
+ *         `wambugu71/crop_leaf_diseases_vit`). If the Primary MobileNetV3
+ *         fails, times out (>4s), or returns an error (503/530 loading,
+ *         4xx/5xx, network), the request seamlessly routes to these fallbacks.
+ *         Extracts the primary predicted disease class + confidence percentage
  *         + candidate diseases. Handles 503/530 loading with a clear message.
  *         Non-fatal: a vision outage is recorded in `warnings[]` and the
  *         request continues through Stage 1 → 2 → 3 without a diagnosis.
  *         Receives the Step 0 crop when detection succeeded, the full frame
  *         otherwise.
  *         Env override: `HF_VISION_PRIMARY_MODELS` (comma list) or
- *         `HF_VISION_MODEL`/`HF_PRIMARY_VISION_MODEL` — the baseline
- *         fallback is ALWAYS preserved after any custom primary.
+ *         `HF_VISION_MODEL`/`HF_PRIMARY_VISION_MODEL`.
  *
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
- *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
+ *     `gemini-2.5-flash`) — PRIMARY LLM (NLP Synthesis Only): REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
- *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
+ *     Restricted purely to text-based expert response generation (LLM mode).
+ *     Gemini receives the top disease predictions and confidence scores from
+ *     MobileNetV3, then generates formatted Arabic advice for the user.
+ *     Authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
  *     (including comma-separated values) plus numbered variants such as
  *     `GEMINI_API_KEY_2` and `GEMINI_API_KEY_3`, and guarded by one
  *     shared 18 s `AbortController` deadline for the whole model chain (an
@@ -75,7 +74,7 @@
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
- *     — the MobileNet vision diagnosis (disease label, confidence score and
+ *     — the MobileNetV3 vision diagnosis (disease label, confidence score and
  *     candidate diseases).
  *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
  *     answer ships together with a Step 1 diagnosis) carrying Gemini's
@@ -182,35 +181,30 @@ export const maxDuration = 60;
 
 /**
  * Vision Model Cascade — PlantVillage classifiers on the HF Inference API,
- * tried in order. Implements the EXACT cascade required by spec:
+ * tried in order. Implements Stage 1 Primary Image Diagnosis:
  *
- *   Step 1a — PRIMARY Field-Trained Vision Model: high-accuracy field-trained
- *     HF model via HF Serverless Inference API. Examples:
- *     `dima806/plant_disease_image_detection` (ViT trained on real field data)
- *     or `fxmeng/plantdoc-vit` (ViT trained on PlantDoc). Bounded by a tight
- *     4 s timeout — if it fails, times out, or returns error, we seamlessly
- *     route to the secondary.
+ *   Step 1a — PRIMARY MobileNetV3 Vision Model (e.g. `mobilenet_v3_large_100`
+ *     or fine-tuned plant disease classifier `hitmonleet/PlantVillage__MobileNetV3`):
+ *     fast, lightweight MobileNetV3 plant disease classifier via HF Serverless
+ *     Inference API. Replaces MobileNetV2. Bounded by a tight 4 s timeout
+ *     (>4s → immediate fallback).
  *
- *   Step 1b — SECONDARY Fallback Model (KEPT INTACT): the CURRENT baseline
- *     classifier `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
- *     is NOT removed or overwritten. It is the reliable fallback when the
- *     primary is cold, loading, or unavailable.
- *
- *   Tertiary — `wambugu71/crop_leaf_diseases_vit` kept as warm fallback for
- *     extra resilience.
+ *   Step 1b — Fallback Models: field-trained ViT models
+ *     (`dima806/plant_disease_image_detection`, `wambugu71/crop_leaf_diseases_vit`)
+ *     as resilient fallbacks if the primary is cold, loading, or unavailable.
  *
  * Environment override: `HF_VISION_PRIMARY_MODELS` (comma-separated) or
  * `HF_VISION_MODEL` / `HF_PRIMARY_VISION_MODEL` single id. When set, the
  * custom primary id(s) replace the default primary while the fallback chain
- * (baseline + tertiary) is ALWAYS preserved — the baseline is never dropped.
+ * is preserved.
  */
 export const HF_VISION_PRIMARY_MODELS = [
-  "dima806/plant_disease_image_detection",
-  "fxmeng/plantdoc-vit",
+  "mobilenet_v3_large_100",
+  "hitmonleet/PlantVillage__MobileNetV3",
 ] as const;
 
 export const HF_VISION_FALLBACK_MODELS = [
-  "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification",
+  "dima806/plant_disease_image_detection",
   "wambugu71/crop_leaf_diseases_vit",
 ] as const;
 
@@ -219,7 +213,7 @@ export const HF_PLANT_MODELS = [
   ...HF_VISION_FALLBACK_MODELS,
 ] as const;
 
-/** Primary field-trained model(s) get a tight 4 s deadline per spec (>4s → fallback). */
+/** Primary MobileNetV3 model(s) get a tight 4 s deadline per spec (>4s → fallback). */
 export const VISION_PRIMARY_TIMEOUT_MS = 4_000;
 
 const HF_ENDPOINT = (model: string) =>
@@ -698,13 +692,13 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 
 /**
  * Strict Step 1 — Vision Model Cascade: classify leaf image via Hugging Face.
- * Implements the EXACT cascade required by spec:
- *   Step 1a — PRIMARY field-trained HF model (e.g. dima806/plant_disease_image_detection
- *     or fxmeng/plantdoc-vit) via HF Serverless Inference API, bounded by
- *     VISION_PRIMARY_TIMEOUT_MS (4 s). High-accuracy ViT trained on real field data.
- *   Step 1b — SECONDARY fallback (KEPT INTACT): linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification
- *     (the CURRENT baseline MobileNetV2) + wambugu71/crop_leaf_diseases_vit tertiary.
- *     If Primary fails, times out (>4s), or returns error, seamlessly routes to Secondary.
+ * Implements Stage 1 Primary Image Diagnosis:
+ *   Step 1a — PRIMARY MobileNetV3 plant disease model (e.g. mobilenet_v3_large_100
+ *     or hitmonleet/PlantVillage__MobileNetV3) via HF Serverless Inference API, bounded by
+ *     VISION_PRIMARY_TIMEOUT_MS (4 s). Lightweight, fast plant disease classifier.
+ *   Step 1b — SECONDARY fallback models: dima806/plant_disease_image_detection
+ *     + wambugu71/crop_leaf_diseases_vit tertiary.
+ *     If Primary fails, times out (>4s), or returns error, seamlessly routes to fallbacks.
  * - Sends the raw image bytes (cropped by Step 0 when available) to the plant-disease model.
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message and walks the cascade.
@@ -948,7 +942,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   return [
-    "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
+    "نتيجة نموذج الرؤية (MobileNetV3 / PlantVillage) على صورة المستخدم:",
     `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
     `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
     alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
@@ -963,7 +957,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 /**
  * Builds the single user turn shared by Stage 1 (Gemini `contents`) and
  * Stage 2 (HF `messages[1]`): Firestore profile context (Wilaya, crop, role,
- * language, name) + the Step 1 MobileNet vision diagnosis (disease label,
+ * language, name) + the Stage 1 MobileNetV3 vision diagnosis (disease label,
  * confidence score and candidate diseases) when one is available + the user's
  * own query. Keeping one builder guarantees the fallback LLM answers from
  * exactly the same context the primary was given.
@@ -977,12 +971,12 @@ function buildUserContent(
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `تشخيص MobileNetV3 (من Stage 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
       : "",
     message
       ? `سؤال المستخدم: ${message}`
       : diagnosis
-        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة PlantVillage أعلاه."
+        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة MobileNetV3 أعلاه."
         : "قدّم نفسك في جملة واحدة كمساعد زراعي خبير واطلب سؤال المستخدم دون أي حشو.",
   ].filter(Boolean);
   return sections.join("\n\n");
@@ -1887,7 +1881,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   /** What actually reaches Step 1: the Step 0 crop or the original image. */
   let classifyImage: AssistantImagePayload | null = image ?? null;
 
-  // Step 1: Hugging Face MobileNet vision classification (when image attached).
+  // Step 1: Hugging Face MobileNetV3 vision classification (when image attached).
   // Non-fatal: a vision outage (or a missing HF key) degrades to the LLM /
   // direct replies instead of failing the request.
   let diagnosis: AssistantDiagnosis | null = null;
@@ -1918,11 +1912,14 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
 
   // One user turn for both LLM stages: user query + Firestore profile context
-  // (Wilaya, crop type, role) + the Step 1 MobileNet vision diagnosis (disease
+  // (Wilaya, crop type, role) + the Step 1 MobileNetV3 vision diagnosis (disease
   // label, confidence score, candidate diseases) whenever it exists.
   const userContent = buildUserContent(message, context, diagnosis);
 
-  // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
+  // ---- Stage 1: Google Gemini (PRIMARY LLM — NLP Synthesis Only) ---------
+  // Restrict Gemini to text-based expert response generation (LLM mode).
+  // Gemini receives the top disease predictions and confidence scores from
+  // MobileNetV3, then generates formatted Arabic advice for the user.
   // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
   // the Generative Language REST API, keyed with GEMINI_API_KEY and bounded
   // by a shared 18 s AbortController. Non-fatal: on any failure (or a missing
