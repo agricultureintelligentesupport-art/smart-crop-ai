@@ -39,7 +39,12 @@ export interface AssistantCopy {
     error: string;
     retry: string;
     unavailable: string;
-    visionOnlyNote: string;
+    /**
+     * Shown ONLY when BOTH the vision classification (Step 1) and Gemini
+     * (Step 2) failed completely — the direct formatter answered with no
+     * diagnosis. Never shown when a diagnosis is attached.
+     */
+    basicModeNote: string;
     /** Shown when Step 0 detected the leaf and cropped the background away. */
     cropApplied: string;
     /** Shown when Step 0 found no usable leaf and kept the full frame. */
@@ -95,7 +100,7 @@ const AR: AssistantCopy = {
     error: "وقع خطأ أثناء الاتصال بالمساعد. حاول مرة أخرى.",
     retry: "إعادة المحاولة",
     unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
-    visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
+    basicModeNote: "تعذّر تحليل الصورة وكان نموذج اللغة غير متاح — تم التحويل إلى الوضع الأساسي.",
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
     cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
@@ -150,7 +155,8 @@ const FR: AssistantCopy = {
     error: "Erreur de connexion à l'assistant. Réessayez.",
     retry: "Réessayer",
     unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
-    visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
+    basicModeNote:
+      "L'analyse de l'image a échoué et le modèle de langage est indisponible — bascule en mode de base.",
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
     cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",

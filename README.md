@@ -91,7 +91,7 @@ Values are labelled as decision-support estimates, not measurements.
 ## The leaf diagnosis pipeline (Detection & Cropping → classification)
 
 `/api/assistant` processes an attached photo through a staged, fail-proof
-vision pipeline before the LLM stages run:
+vision pipeline before the Gemini LLM formatter (Step 2) runs:
 
 ```
 photo (base64)
@@ -106,11 +106,23 @@ photo (base64)
   │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
   │    frame — the outcome lands in `preprocessing` on the API response.
   │
-  ├─ Step 1 · PlantVillage classifier ── MobileNetV2 (ViT fallback) on the
-  │    same free router; receives ONLY the Step 0 crop when detection
-  │    succeeded, the full frame otherwise.
+  ├─ Step 1 · Field-trained Vision Transformer ── high-accuracy ViT chain on
+  │    the same free router (the old MobileNetV2 is GONE):
+  │    kimcomehome/plantvillage-vit-leaf-disease (ViT-base, PlantVillage 38
+  │    crop-disease classes, ~99.8 % held-out) → nateraw/vit-base-beans
+  │    (field beans dataset) → wambugu71/crop_leaf_diseases_vit (ViT-tiny
+  │    multi-crop last resort). Parses the {label, score} array into primary
+  │    disease + confidence + differential diagnoses (top-3). Receives ONLY
+  │    the Step 0 crop when detection succeeded, the full frame otherwise.
   │
-  └─ Stages 1–3 · Gemini → HF LLM chain → built-in formatter (unchanged).
+  └─ Step 2 · Gemini LLM Formatter ── the SOLE conversational orchestrator
+  │    and final response generator (gemini-3.5-flash → 3.5-flash-lite →
+  │    2.5-flash). Receives the Step 1 diagnosis (disease, confidence,
+  │    alternatives) + user context (wilaya/region, crop, role) + the recent
+  │    conversation history, and writes the final Arabic reply. When BOTH the
+  │    ViT chain and Gemini are down, a built-in formatter still answers 200
+  │    (source "direct") — the only case the UI shows its amber fallback
+  │    warning.
 ```
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
