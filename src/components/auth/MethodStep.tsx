@@ -13,7 +13,9 @@ import {
   UserPlus,
 } from "lucide-react";
 import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { interpolate } from "@/lib/auth/copy";
+import { enterGuestMode } from "@/lib/auth/guest";
 import { DZ_COUNTRY_CODE, formatDzPhone, normalizeDzPhone } from "@/lib/auth/validation";
 import type { EmailIntent } from "@/lib/auth/types";
 import AuthErrorPanel from "./AuthErrorPanel";
@@ -87,10 +89,42 @@ export default function MethodStep({ flow }: { flow: FlowController }) {
         </Notice>
       )}
 
+      {/* Guest bypass: a subtle link that claims the local guest flag and
+          jumps straight to the dashboard — no Firebase call, no wizard steps.
+          Purely additive; every sign-in handler above stays untouched. */}
+      <GuestContinue flow={flow} />
+
       <LiveRegion message={flow.notice} />
 
       <div id="recaptcha-container" />
     </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Continue as Guest (local bypass)                                   */
+/* ------------------------------------------------------------------ */
+
+function GuestContinue({ flow }: { flow: FlowController }) {
+  const router = useRouter();
+  const { t } = flow;
+
+  const handleGuest = () => {
+    enterGuestMode();
+    router.push("/dashboard");
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-0.5 pt-0.5">
+      <button
+        type="button"
+        onClick={handleGuest}
+        className={`rounded-xl px-3 py-2 text-[12.5px] font-extrabold text-emerald-800/65 transition-colors hover:text-emerald-700 ${FOCUS_RING}`}
+      >
+        {t.method.guest}
+      </button>
+      <p className="text-center text-[10px] font-semibold text-emerald-900/45">{t.method.guestNote}</p>
+    </div>
   );
 }
 

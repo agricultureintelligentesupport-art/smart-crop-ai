@@ -323,7 +323,7 @@ test.describe("email sign-in", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  7. Auth-gated dashboard (guest mode removed)                       */
+/*  7. Session-gated dashboard (auth OR guest bypass)                  */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -346,16 +346,32 @@ test.describe("dashboard session guard", () => {
     await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
   });
 
-  test("/guest is gone: the old route forwards to the auth wizard", async ({ page }) => {
+  test("/guest enters guest mode and lands on the dashboard", async ({ page }) => {
     await page.goto("/guest");
-    await expect(page).toHaveURL(/\/auth/);
-    await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(/زائر/);
+    await expect(page.getByText("حساب زائر")).toBeVisible();
+    // The guard honours the flag across a full reload, too.
+    await page.reload();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByText("حساب زائر")).toBeVisible();
   });
 
-  test("the auth wizard offers no guest escape hatch", async ({ page }) => {
+  test("the auth wizard offers a subtle Continue as Guest bypass", async ({ page }) => {
     await page.goto("/auth");
-    await expect(page.getByRole("button", { name: /زائر/ })).toHaveCount(0);
-    await expect(page.getByRole("link", { name: /زائر/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /المتابعة كزائر/ })).toBeVisible();
+
+    await page.getByRole("button", { name: /المتابعة كزائر/ }).click();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(/مرحباً، زائر/);
+    await expect(page.getByText("حساب زائر")).toBeVisible();
+
+    // Signing out from the guest dashboard wipes the flag and returns to
+    // the wizard — no guest session survives the wipe.
+    await page.getByRole("button", { name: /تسجيل الخروج/ }).click();
+    await expect(page).toHaveURL(/\/auth/);
+    await page.goto("/dashboard");
+    await expect(page).toHaveURL(/\/auth/);
   });
 });
 

@@ -61,6 +61,8 @@ export interface AuthCopy {
     channelsAria: string;
     channelPhone: string;
     channelEmail: string;
+    guest: string;
+    guestNote: string;
   };
   phone: {
     title: string;
@@ -233,6 +235,8 @@ const AR: AuthCopy = {
     channelsAria: "طريقة التحقق",
     channelPhone: "الهاتف",
     channelEmail: "البريد الإلكتروني",
+    guest: "المتابعة كزائر",
+    guestNote: "دخول فوري بدون حساب — للتجربة السريعة",
   },
   phone: {
     title: "التحقق عبر الهاتف",
@@ -426,6 +430,8 @@ const FR: AuthCopy = {
     channelsAria: "Méthode de vérification",
     channelPhone: "Téléphone",
     channelEmail: "E-mail",
+    guest: "Continuer en tant qu'invité",
+    guestNote: "Accès immédiat sans compte — pour tester rapidement",
   },
   phone: {
     title: "Vérification par téléphone",

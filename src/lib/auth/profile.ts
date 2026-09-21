@@ -6,7 +6,8 @@
  * Mirrors what Firestore holds for a signed-in user (`users/{uid}`), so the
  * role + wilaya picked during onboarding immediately shape the dashboard.
  * Every record belongs to an authenticated session (Google, phone or e-mail);
- * guest mode no longer exists.
+ * guest mode lives in its OWN key (`auth/guest.ts`) and is never written
+ * here — this guard below keeps rejecting legacy guest records.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -34,9 +35,10 @@ export interface StoredProfile {
 
 function isProfile(value: unknown): value is StoredProfile {
   if (!value || typeof value !== "object") return false;
-  // Records written by the removed guest mode (uid: null, isGuest: true,
-  // method: "guest") are not sessions: treat them as absent so their owners
-  // are routed back to the auth wizard instead of a dashboard.
+  // Records written by the ORIGINAL guest mode (uid: null, isGuest: true,
+  // method: "guest") are not member sessions: treat them as absent so their
+  // owners re-enter through the auth wizard (where "المتابعة كزائر" now
+  // lives). Current guest mode uses its own key, never this profile key.
   const legacy = value as { isGuest?: unknown; method?: unknown };
   if (legacy.isGuest === true || legacy.method === "guest") return false;
   const v = value as Partial<StoredProfile>;

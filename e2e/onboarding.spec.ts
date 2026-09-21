@@ -188,13 +188,13 @@ test.describe("action step wiring", () => {
     await page.getByRole("link", { name: /الرئيسية/ }).click();
     await expect(page).toHaveURL(/\/$/);
 
-    // …and the sign-in CTA opens the same wizard on the sign-in tab. Guest
-    // mode is gone: no "متابعة كزائر" escape hatch is offered anywhere.
+    // …and the sign-in CTA opens the same wizard on the sign-in tab, which
+    // offers the subtle "متابعة كزائر" bypass alongside the real methods.
     await page.getByRole("button", { name: "تخطي" }).click();
     await page.getByRole("button", { name: "تسجيل الدخول" }).click();
     await expect(page).toHaveURL(/\/login/);
     await expect(page.getByRole("heading", { name: "تسجيل الدخول" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /متابعة كزائر/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /متابعة كزائر/ })).toHaveCount(1);
   });
 });
 
