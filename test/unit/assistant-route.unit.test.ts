@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
-import { dynamic, POST } from "../../src/app/api/assistant/route";
+import {
+  dynamic,
+  HF_PLANT_MODELS,
+  HF_VISION_FALLBACK_MODELS,
+  HF_VISION_PRIMARY_MODELS,
+  POST,
+  VISION_PRIMARY_TIMEOUT_MS,
+} from "../../src/app/api/assistant/route";
 
 /** Stage-1 keys used across the suite (values are deliberately padded). */
 const GEMINI_KEY = "test-gemini";
@@ -257,6 +264,7 @@ interface DiagnosisLike {
   labelAr: string;
   healthy: boolean;
   confidence: number;
+  model?: string;
   candidates: { label: string; score: number }[];
 }
 
@@ -487,7 +495,7 @@ test("Stage 1 sends the concise Arabic system instruction, the query and the pro
   assert.equal(body.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
 });
 
-test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candidates) and answers hybrid", async () => {
+test("Gemini receives the Step 1 MobileNetV3 diagnosis (label, confidence, candidates) and answers hybrid", async () => {
   configureKeys();
   const urls: string[] = [];
   let geminiUser = "";
@@ -497,9 +505,8 @@ test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candid
       geminiUser = geminiUserText(parseGeminiBody(init));
       return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
     }
-    // Step 1 — Vision Model Cascade: PRIMARY field-trained (dima806/plant_disease_image_detection
-    // or fxmeng/plantdoc-vit) or SECONDARY baseline (mobilenet) on Hugging Face.
-    // The cascade tries the primary first (4 s timeout) then the baseline — Step 1b is KEPT INTACT.
+    // Step 1 — Vision Model Cascade: PRIMARY MobileNetV3 (e.g. mobilenet_v3_large_100
+    // or hitmonleet/PlantVillage__MobileNetV3) on Hugging Face.
     assert.ok(isVisionUrl(String(url)));
     assert.ok(isClassifyUrl(String(url)), `vision url should be a classifier endpoint: ${url}`);
     assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
@@ -1479,7 +1486,7 @@ test("zero-failure: HF 503 model-loading plus every LLM down answers 200 asking 
     return Response.json(
       {
         error:
-          "Model linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification is currently loading",
+          "Model mobilenet_v3_large_100 is currently loading",
         estimated_time: 23.4,
       },
       { status: 503 },
@@ -1557,7 +1564,7 @@ function imageRequest(data: string, mimeType = "image/jpeg") {
 /** Step 0 detector endpoints (DETR family on the hf-inference router). */
 const isDetectUrl = (url: string) =>
   url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
-/** Step 1 classifier endpoints (Vision Model Cascade: primary field-trained ViT + fallback MobileNetV2 / ViT). */
+/** Step 1 classifier endpoints (Vision Model Cascade: primary MobileNetV3 + fallback ViT). */
 const isClassifyUrl = (url: string) =>
   url.includes("router.huggingface.co/hf-inference/models/") &&
   /mobilenet|vit|dima806|plantdoc|plant_disease/i.test(url);
@@ -1732,4 +1739,132 @@ test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip
   assert.equal(payload.preprocessing?.status, "skipped");
   assert.match(warningText(payload), /Step 1 vision unavailable/);
   assert.doesNotMatch(warningText(payload), /Step 0/);
+});
+
+/* ------------------------------------------------------------------ */
+/*  MobileNetV3 Primary Vision Model & Gemini NLP Synthesis tests      */
+/* ------------------------------------------------------------------ */
+
+test("Stage 1 Primary Vision Model uses MobileNetV3 and replaces MobileNetV2", () => {
+  // Primary vision models must use MobileNetV3 plant disease classifier endpoints
+  assert.ok(HF_VISION_PRIMARY_MODELS.length > 0);
+  assert.ok(
+    HF_VISION_PRIMARY_MODELS.some((m) => /mobilenet_v3/i.test(m)),
+    `expected MobileNetV3 model in primary list, got: ${HF_VISION_PRIMARY_MODELS.join(", ")}`,
+  );
+  assert.equal(HF_VISION_PRIMARY_MODELS[0], "mobilenet_v3_large_100");
+
+  // MobileNetV2 baseline should be replaced and not present in fallback models
+  assert.ok(
+    !HF_VISION_FALLBACK_MODELS.some((m) => /mobilenet_v2/i.test(m)),
+    "MobileNetV2 should be replaced and not present in fallback models",
+  );
+
+  // HF_PLANT_MODELS cascade starts with MobileNetV3 primary models
+  assert.equal(HF_PLANT_MODELS[0], "mobilenet_v3_large_100");
+  assert.equal(VISION_PRIMARY_TIMEOUT_MS, 4000);
+});
+
+test("Stage 1 classification queries MobileNetV3 first with a 4s timeout", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isGeminiUrl(String(url))) {
+      return geminiReply("تشخيص دقيق للمرض وعلاجه.");
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    return Response.json([
+      { label: "Tomato___Early_blight", score: 0.94 },
+      { label: "Tomato___Late_blight", score: 0.04 },
+      { label: "Tomato___healthy", score: 0.02 },
+    ]);
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(payload.diagnosis?.model, "mobilenet_v3_large_100");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 94);
+  assert.equal(payload.diagnosis?.candidates?.length, 3);
+  assert.match(urls[0], /mobilenet_v3_large_100/);
+});
+
+test("Stage 1 cascade seamlessly falls back to secondary models when MobileNetV3 is unavailable", async () => {
+  configureKeys();
+  const classifyUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) {
+      return geminiReply("علاج اللفحة.");
+    }
+    if (isClassifyUrl(String(url))) {
+      classifyUrls.push(String(url));
+      // First MobileNetV3 primary models fail (503 loading / error)
+      if (classifyUrls.length <= HF_VISION_PRIMARY_MODELS.length) {
+        return Response.json({ error: "Model loading" }, { status: 503 });
+      }
+      // Fallback model succeeds
+      return Response.json([
+        { label: "Potato___Late_blight", score: 0.88 },
+        { label: "Potato___Early_blight", score: 0.10 },
+      ]);
+    }
+    return new Response(null, { status: 404 });
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.diagnosis?.label, "Potato___Late_blight");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 88);
+  // Verify that primary MobileNetV3 was tried first, then fallback
+  assert.ok(classifyUrls.length > HF_VISION_PRIMARY_MODELS.length);
+  assert.match(classifyUrls[0], /mobilenet_v3/);
+  assert.match(classifyUrls[classifyUrls.length - 1], new RegExp(HF_VISION_FALLBACK_MODELS[0]));
+});
+
+test("Stage 2 Gemini is restricted to text-based NLP synthesis only and receives MobileNetV3 context", async () => {
+  configureKeys();
+  let geminiBody: GeminiRequestBody | null = null;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) {
+      geminiBody = parseGeminiBody(init);
+      return geminiReply("نصيحة زراعية عملية باللغة العربية.");
+    }
+    return Response.json([
+      { label: "Corn_(maize)___Common_rust_", score: 0.91 },
+      { label: "Corn_(maize)___Northern_Leaf_Blight", score: 0.07 },
+    ]);
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+
+  assert.ok(geminiBody);
+  // Gemini receives text-only contents — strictly NO inlineData / image parts
+  const userParts = (geminiBody as GeminiRequestBody).contents?.[0]?.parts ?? [];
+  assert.ok(userParts.length > 0);
+  for (const part of userParts) {
+    assert.equal(typeof part.text, "string");
+    assert.equal((part as Record<string, unknown>).inlineData, undefined);
+  }
+
+  // Gemini user context includes MobileNetV3 predictions, confidence, and candidates
+  const userText = geminiUserText(geminiBody);
+  assert.match(userText, /Corn_\(maize\)___Common_rust_/);
+  assert.match(userText, /91%/);
+  assert.match(userText, /الصدأ الشائع/);
+  assert.match(userText, /MobileNetV3/);
+
+  // Gemini system instruction preserves all mandatory baseline anchors
+  const systemText = geminiSystemText(geminiBody);
+  assert.match(systemText, /أنت مساعد زراعي خبير/);
+  assert.match(systemText, /دون مقدمات أو إطالة/);
+  assert.match(systemText, /باللغة العربية/);
+  assert.match(systemText, /عملي/);
 });
