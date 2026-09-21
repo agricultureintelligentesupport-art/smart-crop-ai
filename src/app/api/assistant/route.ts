@@ -25,15 +25,31 @@
  *     sharp adds only a few tens of ms of decode/crop work; the whole stage
  *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
  *
- *   Step 1 (when an image is attached): Hugging Face Inference API
- *     MobileNetV2 PlantVillage disease classifier → parse returned array to
- *     extract primary predicted disease class + confidence percentage +
- *     candidate diseases.
- *     Handles 503/530 model-loading responses with a clear status message.
- *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
- *     continues through Stage 1 → 2 → 3 without a diagnosis.
- *     Receives the Step 0 crop when detection succeeded, the full frame
- *     otherwise.
+ *   Step 1 — Vision Model Cascade (when an image is attached):
+ *     Hugging Face Serverless Inference API cascade, non-blocking after
+ *     Step 0 cropping:
+ *       Step 1a — PRIMARY Field-Trained Vision Model (e.g.
+ *         `dima806/plant_disease_image_detection` or `fxmeng/plantdoc-vit`):
+ *         high-accuracy field-trained HF model, bounded by a strict 4 s
+ *         timeout (>4s → immediate fallback). ViT trained on real field
+ *         imagery (PlantDoc / field datasets) — the most accurate leaf
+ *         classifier in the cascade.
+ *       Step 1b — SECONDARY Fallback Model (KEPT INTACT):
+ *         `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
+ *         — the CURRENT baseline MobileNetV2 PlantVillage classifier is NOT
+ *         removed or overwritten; plus `wambugu71/crop_leaf_diseases_vit`
+ *         tertiary. If the Primary fails, times out (>4s), or returns an
+ *         error (503/530 loading, 4xx/5xx, network), the request seamlessly
+ *         routes to this baseline. Both models parse the returned array to
+ *         extract the primary predicted disease class + confidence percentage
+ *         + candidate diseases. Handles 503/530 loading with a clear message.
+ *         Non-fatal: a vision outage is recorded in `warnings[]` and the
+ *         request continues through Stage 1 → 2 → 3 without a diagnosis.
+ *         Receives the Step 0 crop when detection succeeded, the full frame
+ *         otherwise.
+ *         Env override: `HF_VISION_PRIMARY_MODELS` (comma list) or
+ *         `HF_VISION_MODEL`/`HF_PRIMARY_VISION_MODEL` — the baseline
+ *         fallback is ALWAYS preserved after any custom primary.
  *
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
@@ -160,14 +176,46 @@ export const maxDuration = 60;
 /* ------------------------------------------------------------------ */
 
 /**
- * PlantVillage classifiers on the HF Inference API, tried in order. The
- * first is a MobileNetV2 fine-tuned on the 38-class PlantVillage dataset;
- * the second is a ViT alternative kept as a warm fallback.
+ * Vision Model Cascade — PlantVillage classifiers on the HF Inference API,
+ * tried in order. Implements the EXACT cascade required by spec:
+ *
+ *   Step 1a — PRIMARY Field-Trained Vision Model: high-accuracy field-trained
+ *     HF model via HF Serverless Inference API. Examples:
+ *     `dima806/plant_disease_image_detection` (ViT trained on real field data)
+ *     or `fxmeng/plantdoc-vit` (ViT trained on PlantDoc). Bounded by a tight
+ *     4 s timeout — if it fails, times out, or returns error, we seamlessly
+ *     route to the secondary.
+ *
+ *   Step 1b — SECONDARY Fallback Model (KEPT INTACT): the CURRENT baseline
+ *     classifier `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
+ *     is NOT removed or overwritten. It is the reliable fallback when the
+ *     primary is cold, loading, or unavailable.
+ *
+ *   Tertiary — `wambugu71/crop_leaf_diseases_vit` kept as warm fallback for
+ *     extra resilience.
+ *
+ * Environment override: `HF_VISION_PRIMARY_MODELS` (comma-separated) or
+ * `HF_VISION_MODEL` / `HF_PRIMARY_VISION_MODEL` single id. When set, the
+ * custom primary id(s) replace the default primary while the fallback chain
+ * (baseline + tertiary) is ALWAYS preserved — the baseline is never dropped.
  */
-const HF_PLANT_MODELS = [
+export const HF_VISION_PRIMARY_MODELS = [
+  "dima806/plant_disease_image_detection",
+  "fxmeng/plantdoc-vit",
+] as const;
+
+export const HF_VISION_FALLBACK_MODELS = [
   "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification",
   "wambugu71/crop_leaf_diseases_vit",
 ] as const;
+
+export const HF_PLANT_MODELS = [
+  ...HF_VISION_PRIMARY_MODELS,
+  ...HF_VISION_FALLBACK_MODELS,
+] as const;
+
+/** Primary field-trained model(s) get a tight 4 s deadline per spec (>4s → fallback). */
+export const VISION_PRIMARY_TIMEOUT_MS = 4_000;
 
 const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
@@ -520,6 +568,37 @@ const MAX_MESSAGE_CHARS = 4000;
 
 const UPSTREAM_TIMEOUT_MS = 25_000;
 
+/**
+ * Resolve the ordered vision model list for this request. Honors
+ * `HF_VISION_PRIMARY_MODELS` (comma-separated), `HF_VISION_MODEL`, or
+ * `HF_PRIMARY_VISION_MODEL` env overrides for the primary — the fallback
+ * baseline is always appended intact so the cascade never loses it.
+ * Primary models are the field-trained ones; fallback is the mobilenet
+ * baseline + ViT kept intact.
+ */
+function resolveVisionModels(): readonly string[] {
+  const raw =
+    process.env.HF_VISION_PRIMARY_MODELS?.trim() ||
+    process.env.HF_VISION_MODEL?.trim() ||
+    process.env.HF_PRIMARY_VISION_MODEL?.trim();
+  if (raw) {
+    const ids = raw
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (ids.length > 0) {
+      const fallback = [...HF_VISION_FALLBACK_MODELS] as string[];
+      const dedupedFallback = fallback.filter((id) => !ids.includes(id));
+      return [...ids, ...dedupedFallback];
+    }
+  }
+  return HF_PLANT_MODELS;
+}
+
+function visionTimeoutForIndex(index: number, primaryCount: number): number {
+  return index < primaryCount ? VISION_PRIMARY_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Small helpers                                                      */
 /* ------------------------------------------------------------------ */
@@ -584,12 +663,20 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 }
 
 /**
- * Strict Step 1: classify leaf image via Hugging Face.
- * - Sends the raw image bytes to the PlantVillage model.
+ * Strict Step 1 — Vision Model Cascade: classify leaf image via Hugging Face.
+ * Implements the EXACT cascade required by spec:
+ *   Step 1a — PRIMARY field-trained HF model (e.g. dima806/plant_disease_image_detection
+ *     or fxmeng/plantdoc-vit) via HF Serverless Inference API, bounded by
+ *     VISION_PRIMARY_TIMEOUT_MS (4 s). High-accuracy ViT trained on real field data.
+ *   Step 1b — SECONDARY fallback (KEPT INTACT): linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification
+ *     (the CURRENT baseline MobileNetV2) + wambugu71/crop_leaf_diseases_vit tertiary.
+ *     If Primary fails, times out (>4s), or returns error, seamlessly routes to Secondary.
+ * - Sends the raw image bytes (cropped by Step 0 when available) to the plant-disease model.
  * - Parses the returned array to extract the primary predicted class + confidence.
- * - Handles 503/530 model-loading responses with a clear message.
- * - Throws an Error prefixed with "HF Error:" on any failure so the caller
- *   can return `{ error: "HF Error: ..." }` with 500.
+ * - Handles 503/530 model-loading responses with a clear message and walks the cascade.
+ * - Per-model timeout: Primary 4 s, Secondary/Tertiary 25 s (UPSTREAM_TIMEOUT_MS).
+ * - Throws an Error prefixed with "HF Error:" on any failure so the caller can degrade gracefully.
+ * - DETR smart cropping remains non-blocking (Step 0 already ran before this).
  */
 async function classifyPlantImageStrict(
   imageBase64: string,
@@ -601,9 +688,24 @@ async function classifyPlantImageStrict(
   let lastErrorDetail: string | null = null;
   let loadingEstimate: number | null = null;
 
-  for (const model of HF_PLANT_MODELS) {
+  const models = resolveVisionModels();
+  // Primary count is the number of field-trained ids before the fallback.
+  // Default: HF_VISION_PRIMARY_MODELS.length (2). When env overrides, it's the custom id count.
+  const envRaw =
+    process.env.HF_VISION_PRIMARY_MODELS?.trim() ||
+    process.env.HF_VISION_MODEL?.trim() ||
+    process.env.HF_PRIMARY_VISION_MODEL?.trim();
+  const primaryCount = envRaw
+    ? envRaw.split(",").map((id) => id.trim()).filter(Boolean).length
+    : HF_VISION_PRIMARY_MODELS.length;
+
+  for (let idx = 0; idx < models.length; idx++) {
+    const model = models[idx];
+    const isPrimary = idx < primaryCount;
+    const stepLabel = isPrimary ? "1a" : "1b";
+    const timeoutMs = visionTimeoutForIndex(idx, primaryCount);
     try {
-      const res = await timedFetch(HF_ENDPOINT(model), {
+      const res = await fetch(HF_ENDPOINT(model), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -612,6 +714,7 @@ async function classifyPlantImageStrict(
           "X-Wait-For-Model": "true",
         },
         body,
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       // --- Model loading (503 / 530) -------------------------------------------------
@@ -630,7 +733,11 @@ async function classifyPlantImageStrict(
           ? `${errText}${estimated !== null ? ` — estimated_time: ${estimated}s` : ""}`
           : `Model ${model} is loading (HTTP ${res.status})${estimated !== null ? ` — retry after ~${Math.ceil(estimated)}s` : ""}`;
         lastErrorDetail = detail;
-        console.warn(`[Step 1: HF Loading] ${model} → ${detail}`);
+        if (isPrimary) {
+          console.warn(`[Step 1a: HF Loading] ${model} → ${detail} — falling back to secondary baseline`);
+        } else {
+          console.warn(`[Step 1b: HF Loading] ${model} → ${detail}`);
+        }
         // Try next model before giving up — the fallback may be warm.
         continue;
       }
@@ -651,7 +758,11 @@ async function classifyPlantImageStrict(
           // keep raw detail
         }
         lastErrorDetail = `${model}: ${detail}`;
-        console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
+        if (isPrimary) {
+          console.warn(`[Step 1a: HF Warning] ${model} → ${detail} — falling back to secondary`);
+        } else {
+          console.warn(`[Step 1b: HF Warning] ${model} → ${detail}`);
+        }
         continue;
       }
 
@@ -661,7 +772,11 @@ async function classifyPlantImageStrict(
       if (!isHfClassificationArray(json)) {
         const detail = `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`;
         lastErrorDetail = detail;
-        console.warn(`[Step 1: HF Warning] ${detail}`);
+        if (isPrimary) {
+          console.warn(`[Step 1a: HF Warning] ${detail} — falling back to secondary`);
+        } else {
+          console.warn(`[Step 1b: HF Warning] ${detail}`);
+        }
         continue;
       }
 
@@ -686,7 +801,7 @@ async function classifyPlantImageStrict(
       };
 
       console.log(
-        `[Step 1: HF Success] label=${top.label} confidence=${pct}% model=${model} candidates=${candidates.length}`,
+        `[Step 1${stepLabel}: HF Success] label=${top.label} confidence=${pct}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
       );
       return diagnosis;
     } catch (error) {
@@ -694,9 +809,18 @@ async function classifyPlantImageStrict(
         error instanceof Error
           ? `${error.name}: ${error.message}`
           : String(error);
-      // Network / timeout / abort errors
+      const isTimeout =
+        /timeout|abort|TimeoutError|AbortError/i.test(detail) || detail.includes("timed out");
+      if (isTimeout && isPrimary) {
+        console.warn(
+          `[Step 1a: Primary Vision Timeout] ${model} timed out after ${timeoutMs}ms — falling back to secondary baseline`,
+        );
+      } else if (isPrimary) {
+        console.warn(`[Step 1a: HF Warning] ${model} → ${detail} — falling back to secondary`);
+      } else {
+        console.warn(`[Step 1b: HF Warning] ${model} → ${detail}`);
+      }
       lastErrorDetail = `${model}: ${detail}`;
-      console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
     }
   }
 
