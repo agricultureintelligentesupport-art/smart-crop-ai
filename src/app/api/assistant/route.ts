@@ -64,9 +64,10 @@
  *     cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family
  *     Jun 2026, and both now answer 404 "is not found for API version
  *     v1beta" — so the model ids form a chain: a 404 / model-not-found
- *     walks to the next id within the remaining budget, while key/quota/5xx/
- *     safety/network/timeout failures fail the stage immediately (another
- *     model id can't fix them). Each generation receives its own
+ *     walks to the next id within the remaining budget, while key/safety/
+ *     network/timeout failures fail the current key immediately. Quota and
+ *     transient server errors (HTTP 429/500/503) rotate to the next Gemini
+ *     credential before the stage is declared unavailable. Each generation receives its own
  *     `thinkingConfig` — Gemini 3.x models take `thinkingLevel: "low"` and
  *     reject a numeric `thinkingBudget`, Gemini 2.5 takes
  *     `thinkingBudget: 0` and rejects `thinkingLevel` (the wrong parameter
@@ -1149,10 +1150,12 @@ interface GeminiResult {
  * retired generation)
  * walks to the next id with whatever budget remains (each walk is recorded
  * in the result's `warnings` so the client still sees the degradation),
- * while any other failure — invalid/missing key (400/403), quota (429),
- * upstream 5xx, safety block, empty candidate list, network error or the
- * timeout abort — throws {@link GeminiError} immediately so the caller can
- * walk to Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
+ * while any other failure — invalid/missing key (400/403), safety block,
+ * empty candidate list, network error or the timeout abort — throws
+ * {@link GeminiError} immediately for the outer key-rotation loop. Quota and
+ * transient upstream failures (HTTP 429/500/503) are likewise surfaced to
+ * that loop, which backs off and tries the next credential before walking to
+ * Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
  */
 async function generateWithGeminiForKey(
   userContent: string,
@@ -1213,18 +1216,22 @@ async function generateWithGeminiForKey(
   }
 }
 
-/** True when Gemini rejected this credential because its quota is exhausted. */
-function isGeminiQuotaError(error: unknown): error is GeminiError {
-  return error instanceof GeminiError && error.status === 429;
+/** True when Gemini returned a quota or transient server failure. */
+function isGeminiRetryableError(error: unknown): error is GeminiError {
+  return (
+    error instanceof GeminiError &&
+    (error.status === 429 || error.status === 500 || error.status === 503)
+  );
 }
 
 /**
  * Run the Gemini model chain against each configured credential in order.
  *
- * A 429 is credential-specific, so it gets a one-second backoff before the
- * next key is tried. Other Gemini failures also advance through the remaining
- * keys without a delay: Stage 1 only gives up to Hugging Face after every
- * configured Gemini key has had a chance to answer. API keys are represented
+ * Credential-specific quota and transient server failures (HTTP 429, 500,
+ * and 503) get a one-second backoff before the next key is tried. Other
+ * Gemini failures also advance through the remaining keys without a delay:
+ * Stage 1 only gives up to Hugging Face after every configured Gemini key has
+ * had a chance to answer. API keys are represented
  * only by their ordinal in logs and warnings; their values never leave the
  * server or appear in a client response.
  */
@@ -1251,9 +1258,10 @@ async function generateWithGemini(
       const nextKeyIndex = keyIndex + 1;
       const hasNextKey = nextKeyIndex < geminiApiKeys.length;
 
-      if (isGeminiQuotaError(error) && hasNextKey) {
+      if (isGeminiRetryableError(error) && hasNextKey) {
+        const status = error.status ?? "unknown";
         const warning =
-          `Stage 1 Gemini HTTP 429 quota/rate limit on ${keyLabel} — ` +
+          `Stage 1 Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
           `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
         rotationWarnings.push(warning);
         console.warn(
@@ -1261,7 +1269,7 @@ async function generateWithGemini(
         );
         await new Promise((res) => setTimeout(res, 1000));
       } else if (hasNextKey) {
-        // A non-quota failure can also be isolated to one credential (for
+        // A different failure can also be isolated to one credential (for
         // example an invalid or revoked key). Try the next configured key
         // before allowing the request to fall through to Hugging Face.
         const warning =

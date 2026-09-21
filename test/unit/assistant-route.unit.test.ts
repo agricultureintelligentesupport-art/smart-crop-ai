@@ -731,6 +731,29 @@ test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF ch
   }
 });
 
+for (const status of [503, 500] as const) {
+  test(`Stage 1 rotates to the next Gemini key after HTTP ${status}`, async () => {
+    process.env.GEMINI_API_KEY = "first-key,second-key";
+    const calls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      calls.push(String(url));
+      if (requestedGeminiKey(String(url)) === "first-key") {
+        return new Response(null, { status });
+      }
+      return geminiReply("إجابة بعد تدوير المفتاح.");
+    });
+
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "llm");
+    assert.equal(payload.reply, "إجابة بعد تدوير المفتاح.");
+    assert.deepEqual(calls.map(requestedGeminiKey), ["first-key", "second-key"]);
+    assert.match(warningText(payload), new RegExp(`HTTP ${status}`));
+    assert.match(warningText(payload), /key rotation attempt 2\/2/);
+  });
+}
+
 test("Stage 1: a 429 quota error fails fast without walking the Gemini model chain", async () => {
   configureKeys();
   const geminiUrls: string[] = [];
