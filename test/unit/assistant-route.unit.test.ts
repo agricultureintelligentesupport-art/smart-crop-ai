@@ -444,9 +444,11 @@ test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candid
       geminiUser = geminiUserText(parseGeminiBody(init));
       return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
     }
-    // Step 1 — MobileNetV2 PlantVillage classifier on Hugging Face.
+    // Step 1 — Vision Model Cascade: PRIMARY field-trained (dima806/plant_disease_image_detection
+    // or fxmeng/plantdoc-vit) or SECONDARY baseline (mobilenet) on Hugging Face.
+    // The cascade tries the primary first (4 s timeout) then the baseline — Step 1b is KEPT INTACT.
     assert.ok(isVisionUrl(String(url)));
-    assert.match(String(url), /mobilenet_v2_1\.0_224-plant-disease-identification/);
+    assert.ok(isClassifyUrl(String(url)), `vision url should be a classifier endpoint: ${url}`);
     assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
     return Response.json([
       { label: "Tomato___Late_blight", score: 0.03 },
@@ -463,10 +465,12 @@ test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candid
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.reply, "أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
 
-  // Vision first, then the primary LLM — one call each.
-  assert.equal(urls.length, 2);
+  // Vision first, then the primary LLM — vision may be 1 call (primary succeeds) and
+  // the cascade ensures we check the first vision url is a classifier (primary or baseline).
+  assert.ok(urls.length >= 2, `expected at least vision + Gemini, got ${urls.length}`);
   assert.ok(isVisionUrl(urls[0]));
-  assert.ok(isGeminiUrl(urls[1]));
+  assert.ok(isClassifyUrl(urls[0]));
+  assert.ok(urls.some((u) => isGeminiUrl(u)));
   // The vision verdict travels into the Gemini prompt: disease label…
   assert.match(geminiUser, /Tomato___Early_blight/);
   assert.match(geminiUser, /95%/);
@@ -1477,9 +1481,10 @@ function imageRequest(data: string, mimeType = "image/jpeg") {
 /** Step 0 detector endpoints (DETR family on the hf-inference router). */
 const isDetectUrl = (url: string) =>
   url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
-/** Step 1 classifier endpoints (MobileNetV2 / ViT on the same router). */
+/** Step 1 classifier endpoints (Vision Model Cascade: primary field-trained ViT + fallback MobileNetV2 / ViT). */
 const isClassifyUrl = (url: string) =>
-  url.includes("router.huggingface.co/hf-inference/models/") && /mobilenet|vit/i.test(url);
+  url.includes("router.huggingface.co/hf-inference/models/") &&
+  /mobilenet|vit|dima806|plantdoc|plant_disease/i.test(url);
 
 /** Raw bytes body of an upstream call, base64-encoded for comparisons. */
 const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toString("base64");
