@@ -15,6 +15,7 @@ export interface DiagnosisCopy {
 export interface DashboardCopy {
   header: {
     badgeMember: string;
+    badgeGuest: string;
     navHome: string;
     signOut: string;
     langAr: string;
@@ -128,6 +129,7 @@ export interface DashboardCopy {
 const AR: DashboardCopy = {
   header: {
     badgeMember: "حساب مُفعّل",
+    badgeGuest: "حساب زائر",
     navHome: "الرئيسية",
     signOut: "تسجيل الخروج",
     langAr: "العربية",
@@ -272,6 +274,7 @@ const AR: DashboardCopy = {
 const FR: DashboardCopy = {
   header: {
     badgeMember: "Compte actif",
+    badgeGuest: "Compte invité",
     navHome: "Accueil",
     signOut: "Se déconnecter",
     langAr: "العربية",

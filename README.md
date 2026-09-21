@@ -22,8 +22,11 @@ npm run dev   # http://localhost:3000
 
 Every route is interactive end to end. There are no "coming soon" screens:
 every CTA leads to a working destination, and every dashboard feature requires
-an authenticated account (Google, Algerian phone OTP, or e-mail). An
-unauthenticated visitor is always routed to the auth wizard.
+an authenticated account (Google, Algerian phone OTP, or e-mail) — or the
+subtle "المتابعة كزائر" / "Continue as Guest" bypass on the auth wizard, which
+claims a local guest flag (`smart-crop.guest.v1`) for rapid testing without
+touching Firebase. An unauthenticated visitor without the guest flag is always
+routed to the auth wizard.
 
 ## The auth workflow
 
@@ -125,7 +128,7 @@ src/
 │   ├── globals.css             # theme, glass + field primitives, focus ring, a11y fallbacks
 │   ├── page.tsx                # onboarding carousel
 │   ├── auth|login|register/page.tsx
-│   ├── guest/page.tsx          # redirect to /auth (guest mode removed)
+│   ├── guest/page.tsx          # enter guest mode → /dashboard (local bypass)
 │   └── dashboard/page.tsx      # member dashboard (session required)
 ├── components/
 │   ├── AmbientBackdrop.tsx     # shared GPU-isolated gradient + glow layer

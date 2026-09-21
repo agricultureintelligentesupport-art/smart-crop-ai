@@ -35,6 +35,7 @@ import type {
   AssistantDiagnosis,
 } from "@/lib/assistant/types";
 import { useProfile } from "@/lib/auth/profile";
+import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import DiagnosisCard from "./DiagnosisCard";
@@ -118,6 +119,7 @@ export default function AssistantView() {
   const t = ASSISTANT[lang];
   const { profile, ready } = useProfile();
   const { user: authUser, profile: authProfile } = useAuth();
+  const { isGuest } = useGuest();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -139,8 +141,11 @@ export default function AssistantView() {
   const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
 
   // Same session gate as the dashboard: assistant answers are personalised,
-  // so an authenticated profile is required.
-  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  // so an authenticated profile — or the local guest bypass — is required.
+  // A real member session always wins over a stale guest flag.
+  const member = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  const guestActive = isGuest && !member;
+  const authenticated = member || isGuest;
   useEffect(() => {
     if (!ready) return;
     if (!authenticated) router.replace("/auth");
@@ -178,9 +183,20 @@ export default function AssistantView() {
           : null,
       role,
       lang,
-      displayName: profile?.displayName ?? authProfile?.displayName ?? null,
+      displayName: guestActive
+        ? guestDisplayName(lang)
+        : profile?.displayName ?? authProfile?.displayName ?? null,
     }),
-    [wilayaCode, wilaya, preferredCropKey, role, lang, profile?.displayName, authProfile?.displayName],
+    [
+      wilayaCode,
+      wilaya,
+      preferredCropKey,
+      role,
+      lang,
+      guestActive,
+      profile?.displayName,
+      authProfile?.displayName,
+    ],
   );
 
   const send = useCallback(

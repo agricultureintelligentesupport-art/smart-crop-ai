@@ -24,6 +24,7 @@ import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
+import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
 import { CROPS, DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
@@ -43,9 +44,10 @@ const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
  * the wilaya + crop + parcel inputs, so the page is fully operational without
  * a backend: it is seeded, deterministic and clearly labelled as an estimate.
  *
- * Strictly session-gated: an authenticated user (Google, phone or e-mail —
- * Firebase session or gateway-backed on-device session) is required; anyone
- * else is redirected straight to the auth wizard.
+ * Session-gated with a guest escape hatch: an authenticated user (Google,
+ * phone or e-mail — Firebase session or gateway-backed on-device session)
+ * OR a local guest flag ("المتابعة كزائر") is required; anyone else is
+ * redirected straight to the auth wizard.
  */
 export default function DashboardView() {
   const router = useRouter();
@@ -54,6 +56,7 @@ export default function DashboardView() {
   const brand = AUTH[lang].header;
   const { profile, ready, patch, clear } = useProfile();
   const { user: authUser, profile: authProfile, signOut: authSignOut, updateProfile } = useAuth();
+  const { isGuest } = useGuest();
 
   /** `null` = follow the stored profile; a value = the user overrode it here. */
   const [wilayaOverride, setWilayaOverride] = useState<string | null>(null);
@@ -68,11 +71,14 @@ export default function DashboardView() {
     wilayaOverride ?? profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? DEFAULT_WILAYA_CODE;
   const role = roleOverride ?? profile?.role ?? (authProfile?.role as AuthRole | null) ?? null;
 
-  // Session gate: a signed-in Firebase user OR a stored authenticated
-  // session (Google / phone / e-mail through the gateway) is required.
-  // Legacy guest records are rejected by `readProfile()`'s guard, so former
-  // guests land on the wizard instead of the dashboard.
-  const authenticated = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  // Session gate: a signed-in Firebase user, a stored authenticated session
+  // (Google / phone / e-mail through the gateway) OR the local guest flag is
+  // accepted. Legacy guest records are still rejected by `readProfile()`'s
+  // guard — guest mode now lives in its own storage key (see auth/guest.ts).
+  // A real member session always wins over a stale guest flag.
+  const member = Boolean(authUser) || (profile?.uid ?? null) !== null;
+  const guestActive = isGuest && !member;
+  const authenticated = member || isGuest;
   useEffect(() => {
     if (!ready) return;
     if (!authenticated) router.replace("/auth");
@@ -90,8 +96,10 @@ export default function DashboardView() {
   });
 
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
-  const displayName =
-    profile?.displayName ?? authProfile?.displayName ?? authUser?.displayName ?? "";
+  // Guests render as "زائر" / "Invité"; a real identity always wins.
+  const displayName = guestActive
+    ? guestDisplayName(lang)
+    : profile?.displayName ?? authProfile?.displayName ?? authUser?.displayName ?? "";
   const greeting = t.welcome.member.replace(
     "{name}",
     displayName || (lang === "ar" ? "فلاح" : "Agriculteur"),
@@ -144,7 +152,7 @@ export default function DashboardView() {
               {brand.brand}
             </span>
             <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
-              {t.header.badgeMember}
+              {guestActive ? t.header.badgeGuest : t.header.badgeMember}
             </span>
           </span>
         </div>
