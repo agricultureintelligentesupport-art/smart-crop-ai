@@ -13,10 +13,22 @@
  *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
  *     continues through Stage 1 → 2 → 3 without a diagnosis.
  *
- *   Stage 1 — Google Gemini (`gemini-1.5-flash`) — PRIMARY LLM: REST call to
- *     https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY
- *     authenticated with the server-only `GEMINI_API_KEY` and guarded by a 9 s
- *     `AbortController` timeout (the mandated 8–10 s window).
+ *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
+ *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
+ *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
+ *     authenticated with the server-only `GEMINI_API_KEY` and guarded by one
+ *     shared 9 s `AbortController` deadline for the whole model chain (the
+ *     mandated 8–10 s window). Google retires model generations on a fast
+ *     cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family
+ *     Jun 2026, and both now answer 404 "is not found for API version
+ *     v1beta" — so the model ids form a chain: a 404 / model-not-found
+ *     walks to the next id within the remaining budget, while key/quota/5xx/
+ *     safety/network/timeout failures fail the stage immediately (another
+ *     model id can't fix them). Each generation receives its own
+ *     `thinkingConfig` — Gemini 3.x models take `thinkingLevel: "low"` and
+ *     reject a numeric `thinkingBudget`, Gemini 2.5 takes
+ *     `thinkingBudget: 0` and rejects `thinkingLevel` (the wrong parameter
+ *     is a 400, so the payload is model-aware).
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
@@ -28,14 +40,17 @@
  *
  *   Stage 2 (Gemini failed / timed out / `GEMINI_API_KEY` missing): Hugging
  *     Face Inference API LLM chat completion for concise text response
- *     formatting — truly open, non-gated models only:
- *     `Qwen/Qwen2.5-Coder-7B-Instruct` primary, then
- *     `HuggingFaceH4/zephyr-7b-beta` and `TiagoPires/Xenova-Qwen1.5-0.5B-Chat`.
- *     Gated families (meta-llama, google/gemma) are deliberately avoided:
- *     they 403 with a license-acceptance error on tokens that never accepted
- *     their terms. Availability failures (`404 — Model not found`,
+ *     formatting — active serverless-catalog, open, non-gated models only:
+ *     `meta-llama/Llama-3.2-3B-Instruct` primary, then
+ *     `Qwen/Qwen2.5-7B-Instruct` and `mistralai/Mistral-7B-Instruct-v0.3`.
+ *     The previous generation ids (Qwen2.5-Coder-7B, zephyr-7b-beta,
+ *     Xenova-Qwen1.5-0.5B) were dropped from the `hf-inference` provider
+ *     catalog and 400 with "Model not supported by provider hf-inference";
+ *     the gated large Llama releases (3.1/3.3 70B+) are still avoided
+ *     because they 403 with a license-acceptance error on tokens that never
+ *     accepted their terms. Availability failures (`404 — Model not found`,
  *     `400 — Model not supported by provider hf-inference`, gated 403s,
- *     empty choices) walk the chain.
+ *     empty choices) walk the chain and fail gracefully into Stage 3.
  *     The same system prompt, the same user query and the same Step 1 vision
  *     context are fed into the LLM behind a system prompt that enforces a
  *     concise, highly professional, direct and practical Arabic answer
@@ -69,7 +84,8 @@
  * Error reporting: each stage logs to the server console
  * (`[Step 1: HF Success]` / `[Stage 1: Gemini Success]` /
  * `[Stage 2: HF LLM Success]` and corresponding warning logs;
- * `[Stage 2: HF LLM Fallback]` marks a model switch,
+ * `[Stage 1: Gemini Fallback]` / `[Stage 2: HF LLM Fallback]` mark a model
+ * switch,
  * `[Step 1: HF Unavailable]` / `[Stage 1: Gemini Unavailable → Stage 2]` /
  * `[Stage 2: HF LLM Unavailable → Stage 3]` mark graceful degradation and
  * `[Safety Net]` an unexpected internal error).
@@ -110,21 +126,43 @@ const HF_ENDPOINT = (model: string) =>
 
 /* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
-/** Primary LLM model. */
-const GEMINI_MODEL = "gemini-1.5-flash";
+/**
+ * Stage 1 model chain, in order. Google retires whole generations on a fast
+ * cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family Jun
+ * 2026 (both now 404 "is not found for API version v1beta"), and
+ * `gemini-2.5-flash` is next in line — so a single hardcoded id is a time
+ * bomb: a retired id's fast 404 walks the chain to the next id within the
+ * remaining Stage-1 budget.
+ *
+ * `thinking` carries the per-generation `thinkingConfig`, because each
+ * generation rejects the other's parameter with 400 INVALID_ARGUMENT:
+ * Gemini 3.x models take a qualitative `thinkingLevel` (2.5 rejects it —
+ * "Thinking level is not supported for this model"), while Gemini 2.5 takes
+ * a numeric `thinkingBudget` (`0` = skip the reasoning pass, answer-first).
+ */
+const GEMINI_MODELS = [
+  { id: "gemini-3.5-flash", thinking: { thinkingLevel: "low" } },
+  { id: "gemini-3.5-flash-lite", thinking: { thinkingLevel: "low" } },
+  { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
+] as const;
+
+type GeminiModel = (typeof GEMINI_MODELS)[number];
 
 /**
- * Stage 1 hard timeout — inside the mandated 8–10 s window. Enforced with an
- * explicit `AbortController` (not `AbortSignal.timeout`) so the abort reason
- * and the timer are both inspectable/clearable per request.
+ * Stage 1 hard timeout for the WHOLE model chain — inside the mandated
+ * 8–10 s window. Enforced with an explicit `AbortController` (not
+ * `AbortSignal.timeout`) so the abort reason and the timer are both
+ * inspectable/clearable per request; a fast 404 on an earlier id hands the
+ * remaining budget to the next id.
  */
 const GEMINI_TIMEOUT_MS = 9_000;
 
 /**
  * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
- * `thinkingConfig.thinkingBudget = 0` keeps the model in fast, answer-first
- * mode so the 9 s budget is spent on the reply.
+ * the per-model thinking config (`thinkingLevel: "low"` on Gemini 3.x,
+ * `thinkingBudget: 0` on 2.5) keeps the model in fast, answer-first mode so
+ * the 9 s budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
@@ -134,19 +172,24 @@ const GEMINI_MAX_OUTPUT_TOKENS = 1024;
  * Fast open-source LLM ids tried by Stage 2, in order, via the HF Inference
  * API's OpenAI-compatible chat-completions endpoint.
  *
- * Truly open, non-gated models only: gated families (`meta-llama/*`,
- * `google/gemma-*`) answer with `403 — You cannot access this model…` unless
- * the token owner manually accepted their license on huggingface.co, so they
- * are deliberately excluded. The ids below serve on the free `hf-inference`
- * provider with no manual acceptance step. Not-found / not-supported / gated
- * responses still walk the chain as model-availability errors, and the
- * Stage 3 direct formatter ({@link buildDirectDiagnosisCard}) guarantees a
- * useful reply even when the whole chain is down.
+ * Active serverless-catalog ids only, verified against the free-tier
+ * catalog: the previous generation ids (`Qwen/Qwen2.5-Coder-7B-Instruct`,
+ * `HuggingFaceH4/zephyr-7b-beta`, `TiagoPires/Xenova-Qwen1.5-0.5B-Chat`)
+ * were dropped from the `hf-inference` provider and answer
+ * `400 — Model not supported by provider hf-inference`. The ids below serve
+ * on the free `hf-inference` provider with no manual acceptance step — the
+ * Llama pick is the open-weight 3B release; the gated large Llama models
+ * (`meta-llama/*` 3.1/3.3 70B+) still 403 with a license-acceptance error on
+ * tokens that never accepted their terms, so they stay excluded. Not-found /
+ * not-supported / gated responses still walk the chain as model-availability
+ * errors, and the Stage 3 direct formatter
+ * ({@link buildDirectDiagnosisCard}) guarantees a useful reply even when the
+ * whole chain is down.
  */
 const HF_LLM_MODELS = [
-  "Qwen/Qwen2.5-Coder-7B-Instruct",
-  "HuggingFaceH4/zephyr-7b-beta",
-  "TiagoPires/Xenova-Qwen1.5-0.5B-Chat",
+  "meta-llama/Llama-3.2-3B-Instruct",
+  "Qwen/Qwen2.5-7B-Instruct",
+  "mistralai/Mistral-7B-Instruct-v0.3",
 ] as const;
 
 const HF_CHAT_ENDPOINT = (model: string) =>
@@ -457,93 +500,187 @@ function geminiText(payload: GeminiPayload | null): string {
 }
 
 /**
- * Stage 1 — Google Gemini (`gemini-1.5-flash`), the PRIMARY LLM.
- *
- * POSTs to
- * `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=<GEMINI_API_KEY>`
- * with:
+ * Message fragments Google returns when the *model id* is the problem rather
+ * than the request: a retired or mistyped id answers
+ * `404 — models/gemini-1.5-flash is not found for API version v1beta, or is
+ * not supported for generateContent`. Together with an HTTP 404 these are the
+ * only Stage-1 failures that walk the Gemini model chain — invalid keys
+ * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
+ * abort are surfaced immediately, because another model id can't fix them.
+ */
+const GEMINI_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
+  /\bmodel not found\b/i,
+  /is not found/i,
+  /not supported for generateContent/i,
+  /\bunknown model\b/i,
+  /\bno such model\b/i,
+];
+
+/** True when the failure looks like "this Gemini model id is retired/gone". */
+function isGeminiModelAvailabilityError(error: unknown): boolean {
+  if (!(error instanceof GeminiError)) return false;
+  if (error.status === 404) return true;
+  return GEMINI_MODEL_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
+}
+
+/**
+ * One `models.generateContent` round-trip against a single Gemini id:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
  *   • `contents[0].parts[0].text` — the user query + profile context + the
- *     Step 1 MobileNet vision diagnosis (label, confidence, candidates).
+ *     Step 1 MobileNet vision diagnosis (label, confidence, candidates);
+ *   • `generationConfig` — the sampling params plus the model's own
+ *     `thinkingConfig` ({@link GeminiModel.thinking}).
  *
- * The round-trip is bounded by a 9 s `AbortController` (mandated 8–10 s
- * window); every failure mode — invalid/missing key (400/403), quota (429),
- * upstream 5xx, safety block, empty candidate list, network error or the
- * timeout abort — throws {@link GeminiError} so the caller can walk to
- * Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
+ * Throws {@link GeminiError} on every failure mode (status kept for the
+ * chain-walk decision); a fetch aborted by the shared signal is reported as
+ * the Stage-1 timeout.
  */
-async function generateWithGemini(userContent: string): Promise<string> {
+async function generateWithGeminiModel(
+  model: GeminiModel,
+  userContent: string,
+  signal: AbortSignal,
+): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: "user", parts: [{ text: userContent }] }],
+          generationConfig: {
+            temperature: 0.4,
+            topP: 0.9,
+            maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+            // Answer-first latency, per generation: Gemini 3.x →
+            // thinkingLevel "low", Gemini 2.5 → thinkingBudget 0. Each
+            // generation 400s the other's parameter, so spread the model's
+            // own config instead of hardcoding one shape.
+            thinkingConfig: { ...model.thinking },
+          },
+        }),
+      },
+    );
+  } catch (error) {
+    if (signal.aborted) {
+      throw new GeminiError(
+        `timeout after ${GEMINI_TIMEOUT_MS} ms (AbortController fired)`,
+      );
+    }
+    const detail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw new GeminiError(detail);
+  }
+
+  if (!response.ok) {
+    let bodyText = "";
+    try {
+      // Preserve the body for the existing warning parser while logging
+      // Google's exact, untruncated response on the server.
+      const errorResponse = response.clone();
+      console.error('[Gemini Error]', response.status, await response.text());
+      bodyText = await errorResponse.text();
+    } catch {
+      bodyText = response.statusText;
+    }
+    let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+    try {
+      const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
+      if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
+    } catch {
+      // keep the raw detail
+    }
+    throw new GeminiError(detail, response.status);
+  }
+
+  const payload = (await response.json().catch(() => null)) as GeminiPayload | null;
+  const text = geminiText(payload);
+  if (!text) {
+    const blocked = payload?.promptFeedback?.blockReason;
+    const finish = payload?.candidates?.[0]?.finishReason;
+    throw new GeminiError(
+      blocked
+        ? `no usable text — blocked by safety filters (${blocked})`
+        : `no usable text in response (finishReason: ${finish ?? "unknown"})`,
+    );
+  }
+  return text;
+}
+
+/** Stage-1 outcome: the model id that answered, its text and any non-fatal
+ *  degradations (retired-id 404s) the chain walked past to get there. */
+interface GeminiResult {
+  model: string;
+  text: string;
+  warnings: string[];
+}
+
+/**
+ * Stage 1 — Google Gemini, the PRIMARY LLM.
+ *
+ * POSTs to
+ * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
+ * walking {@link GEMINI_MODELS} in order — starting at `gemini-3.5-flash`.
+ *
+ * The whole chain is bounded by ONE 9 s `AbortController` deadline (mandated
+ * 8–10 s window) instead of per-call timeouts: a fast model-availability
+ * failure (404 / model-not-found — the signature of a retired generation)
+ * walks to the next id with whatever budget remains (each walk is recorded
+ * in the result's `warnings` so the client still sees the degradation),
+ * while any other failure — invalid/missing key (400/403), quota (429),
+ * upstream 5xx, safety block, empty candidate list, network error or the
+ * timeout abort — throws {@link GeminiError} immediately so the caller can
+ * walk to Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
+ */
+async function generateWithGemini(userContent: string): Promise<GeminiResult> {
   const controller = new AbortController();
-  // Explicit AbortController + timer (rather than AbortSignal.timeout) so the
-  // pending round-trip is always cancelled and the timer always cleared.
+  // Explicit AbortController + shared deadline (rather than per-call
+  // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
+  // by the 9 s window, and the pending round-trip and timer are always
+  // cancelled/cleared.
+  const deadline = Date.now() + GEMINI_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
   try {
-    let response: Response;
-    try {
-      response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents: [{ role: "user", parts: [{ text: userContent }] }],
-            generationConfig: {
-              temperature: 0.4,
-              topP: 0.9,
-              maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-              // Answer-first latency: skip the internal reasoning pass so most
-              // of the 9 s budget is spent on the Arabic reply itself.
-              thinkingConfig: { thinkingBudget: 0 },
-            },
-          }),
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw new GeminiError(
-          `timeout after ${GEMINI_TIMEOUT_MS} ms (AbortController fired)`,
-        );
-      }
-      const detail =
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-      throw new GeminiError(detail);
-    }
+    const failures: string[] = [];
+    const warnings: string[] = [];
+    for (const [index, model] of GEMINI_MODELS.entries()) {
+      // Only reachable after fast 404 walks that consumed the window — no
+      // budget left for another round-trip.
+      if (Date.now() >= deadline) break;
 
-    if (!response.ok) {
-      let bodyText = "";
       try {
-        // Preserve the body for the existing warning parser while logging
-        // Google's exact, untruncated response on the server.
-        const errorResponse = response.clone();
-        console.error('[Gemini Error]', response.status, await response.text());
-        bodyText = await errorResponse.text();
-      } catch {
-        bodyText = response.statusText;
-      }
-      let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
-      try {
-        const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
-        if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
-      } catch {
-        // keep the raw detail
-      }
-      throw new GeminiError(detail, response.status);
-    }
+        const text = await generateWithGeminiModel(model, userContent, controller.signal);
+        return { model: model.id, text, warnings };
+      } catch (error) {
+        if (!(error instanceof GeminiError)) throw error;
+        failures.push(`${model.id}: ${error.message}`);
 
-    const payload = (await response.json().catch(() => null)) as GeminiPayload | null;
-    const text = geminiText(payload);
-    if (!text) {
-      const blocked = payload?.promptFeedback?.blockReason;
-      const finish = payload?.candidates?.[0]?.finishReason;
-      throw new GeminiError(
-        blocked
-          ? `no usable text — blocked by safety filters (${blocked})`
-          : `no usable text in response (finishReason: ${finish ?? "unknown"})`,
-      );
+        if (!isGeminiModelAvailabilityError(error)) {
+          // Anything that isn't about model availability (bad key, quota,
+          // Google 5xx, timeout) fails the stage immediately — another id
+          // can't fix it.
+          throw error;
+        }
+
+        const next = GEMINI_MODELS[index + 1];
+        if (next) {
+          warnings.push(`Stage 1 Gemini unavailable — ${error.message}`.slice(0, 400));
+          console.warn(`[Stage 1: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
+          continue;
+        }
+        // Availability failure on the LAST id — fall through to the summary.
+      }
     }
-    return text;
+    // Every id in the chain was retired/gone (or the budget ran out) —
+    // report all of them so the operator can tell "Google retired these
+    // models" from "this key lacks access".
+    throw new GeminiError(
+      `no Gemini model could answer (tried ${GEMINI_MODELS.map((m) => m.id).join(", ")}) — ${failures.join(" | ")}`,
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -678,10 +815,12 @@ async function generateWithHfLlmModel(
 /**
  * Strict Stage 2 (fallback): concise Arabic text response formatting via the
  * HF Inference API, starting at
- * {@link HF_LLM_MODELS Qwen/Qwen2.5-Coder-7B-Instruct} and falling back
- * through the remaining non-gated ids when the router reports a model as
- * unavailable (404 not-found / 400 not-supported-by-provider / 403
- * gated-license / empty choices).
+ * {@link HF_LLM_MODELS meta-llama/Llama-3.2-3B-Instruct} and falling back
+ * through the remaining non-gated serverless ids when the router reports a
+ * model as unavailable (404 not-found / 400 not-supported-by-provider / 403
+ * gated-license / empty choices). Any failure throws an "LLM Error:" — the
+ * handler catches it and answers from Stage 3, so a Stage 2 outage never
+ * breaks the HTTP response.
  * - Runs only after Stage 1 (Gemini) failed, timed out or its key is missing.
  * - Receives the exact same user turn as Gemini — built by
  *   {@link buildUserContent}, so it carries the PlantVillage label +
@@ -1134,15 +1273,21 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const userContent = buildUserContent(message, context, diagnosis);
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
-  // gemini-1.5-flash via the Generative Language REST API, keyed with
-  // GEMINI_API_KEY and bounded by a 9 s AbortController. Non-fatal: on any
-  // failure (or a missing key) the request walks to Stage 2.
+  // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
+  // the Generative Language REST API, keyed with GEMINI_API_KEY and bounded
+  // by a shared 9 s AbortController. Non-fatal: on any failure (or a missing
+  // key) the request walks to Stage 2.
   let reply: string | null = null;
   if (geminiKey) {
     try {
-      reply = await generateWithGemini(userContent);
+      const geminiResult = await generateWithGemini(userContent);
+      reply = geminiResult.text;
+      // Non-fatal degradations the chain walked past (a retired primary id
+      // 404ing before its successor answered) are still surfaced to the
+      // client — the operator should see that the primary is gone.
+      warnings.push(...geminiResult.warnings);
       console.log(
-        `[Stage 1: Gemini Success] model=${GEMINI_MODEL} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
+        `[Stage 1: Gemini Success] model=${geminiResult.model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

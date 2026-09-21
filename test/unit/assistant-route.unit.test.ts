@@ -13,6 +13,13 @@ const HF_KEY = "test-hf";
  */
 const GEMINI_TIMEOUT_MS = 9_000;
 
+/** Stage-1 model chain, in order — must mirror the route's GEMINI_MODELS. */
+const GEMINI_FALLBACK_ORDER = [
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash",
+] as const;
+
 const originalKeys = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY,
@@ -65,11 +72,10 @@ function configureKeys({ gemini = true, huggingface = true } = {}) {
 /* ------------------------------------------------------------------ */
 
 const isGeminiUrl = (url: string) =>
-  url.startsWith(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=",
-  );
+  url.startsWith("https://generativelanguage.googleapis.com/v1beta/models/") &&
+  url.includes(":generateContent?key=");
 
-/** `gemini-1.5-flash` extracted from the generateContent URL. */
+/** The Gemini model id extracted from the generateContent URL. */
 const requestedGeminiModel = (url: string) =>
   /\/models\/([^:?]+):generateContent/.exec(url)?.[1];
 
@@ -99,6 +105,23 @@ const geminiHttpError = (status: number, message: string) =>
     { status },
   );
 
+/**
+ * Google's 404 for a retired / mistyped model id — the exact production
+ * failure signature (`models/gemini-1.5-flash is not found for API version
+ * v1beta…`) that must walk the Gemini model chain.
+ */
+const geminiModelNotFound = (model: string) =>
+  Response.json(
+    {
+      error: {
+        code: 404,
+        message: `models/${model} is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.`,
+        status: "NOT_FOUND",
+      },
+    },
+    { status: 404 },
+  );
+
 interface GeminiRequestBody {
   systemInstruction?: { parts?: { text?: string }[] };
   contents?: { role?: string; parts?: { text?: string }[] }[];
@@ -106,7 +129,7 @@ interface GeminiRequestBody {
     temperature?: number;
     topP?: number;
     maxOutputTokens?: number;
-    thinkingConfig?: { thinkingBudget?: number };
+    thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: string };
   };
 }
 
@@ -125,9 +148,9 @@ const geminiUserText = (body: GeminiRequestBody) =>
 
 /** Stage 2 model chain, in order — must mirror the route's HF_LLM_MODELS. */
 const LLM_FALLBACK_ORDER = [
-  "Qwen/Qwen2.5-Coder-7B-Instruct",
-  "HuggingFaceH4/zephyr-7b-beta",
-  "TiagoPires/Xenova-Qwen1.5-0.5B-Chat",
+  "meta-llama/Llama-3.2-3B-Instruct",
+  "Qwen/Qwen2.5-7B-Instruct",
+  "mistralai/Mistral-7B-Instruct-v0.3",
 ] as const;
 
 const chatReply = (content = "اسقِ في الصباح الباكر.") =>
@@ -261,7 +284,7 @@ test("keys are read per request, not when the route module loads", async () => {
 /*  Stage 1 — Google Gemini primary LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async () => {
+test("Stage 1 answers from gemini-3.5-flash with 200 { source: \"llm\" }", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -285,17 +308,21 @@ test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
   );
-  assert.equal(requestedGeminiModel(url), "gemini-1.5-flash");
+  assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
   // Bounded by an AbortController (mandated 8–10 s window).
   assert.ok(init.signal instanceof AbortSignal);
   assert.equal(init.signal?.aborted, false);
   assert.equal(new Headers(init.headers).get("Content-Type"), "application/json");
+  // The Gemini 3.x primary gets a qualitative thinking level — a numeric
+  // thinkingBudget would 400 on this generation.
+  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig?.thinkingLevel, "low");
+  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig?.thinkingBudget, undefined);
 });
 
-test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", async () => {
+test("Stage 1 keeps the gemini-3.5-flash endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -314,7 +341,7 @@ test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", asy
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`,
     ),
   );
 });
@@ -360,6 +387,10 @@ test("Stage 1 sends the concise Arabic system instruction, the query and the pro
     typeof body.generationConfig?.maxOutputTokens === "number" &&
       body.generationConfig.maxOutputTokens <= 2048,
   );
+  // Answer-first thinking, model-aware: the Gemini 3.x primary takes
+  // thinkingLevel (2.5 would reject it with a 400).
+  assert.equal(body.generationConfig?.thinkingConfig?.thinkingLevel, "low");
+  assert.equal(body.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
 });
 
 test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candidates) and answers hybrid", async () => {
@@ -430,7 +461,7 @@ for (const [name, failure] of [
     assert.equal(payload.source, "llm");
     assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
     // Gemini was attempted first, then the HF chain's primary id.
-    assert.equal(requestedGeminiModel(urls[0]), "gemini-1.5-flash");
+    assert.equal(requestedGeminiModel(urls[0]), GEMINI_FALLBACK_ORDER[0]);
     assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
     assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
   });
@@ -527,6 +558,127 @@ test("Stage 1 timeout aborts the Gemini round-trip via AbortController and falls
   assert.match(warningText(payload), /timeout after 9000 ms/);
   // The fallback chain ran after the abort.
   assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Stage 1 — Gemini model chain (retired-id 404 fallback)             */
+/* ------------------------------------------------------------------ */
+
+test("Stage 1 walks the Gemini chain: a 404 'model not found' on the primary falls back to the next model", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isGeminiUrl(String(url))) {
+      const model = requestedGeminiModel(String(url)) ?? "";
+      return model === GEMINI_FALLBACK_ORDER[0]
+        ? geminiModelNotFound(model)
+        : geminiReply("اسقِ في الصباح الباكر.");
+    }
+    // Stage 1 still answers — neither the HF chain nor Stage 3 may run.
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
+  // The retired primary 404s → the next chain id answers.
+  assert.deepEqual(urls.map(requestedGeminiModel), [
+    GEMINI_FALLBACK_ORDER[0],
+    GEMINI_FALLBACK_ORDER[1],
+  ]);
+  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.match(warningText(payload), /is not found for API version v1beta/);
+  assert.doesNotMatch(warningText(payload), /Stage 2 LLM unavailable/);
+});
+
+test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF chain answers", async () => {
+  configureKeys();
+  const geminiUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) {
+      geminiUrls.push(String(url));
+      return geminiModelNotFound(requestedGeminiModel(String(url)) ?? "unknown");
+    }
+    assert.ok(isChatUrl(String(url)));
+    return chatReply("Water in the morning.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "Water in the morning.");
+  // Every retired id is walked before degrading to Stage 2…
+  assert.deepEqual(geminiUrls.map(requestedGeminiModel), [...GEMINI_FALLBACK_ORDER]);
+  // …and the non-fatal warning names the whole tried chain.
+  const warning = warningText(payload);
+  assert.match(warning, /Stage 1 Gemini unavailable/);
+  assert.match(warning, /no Gemini model could answer/);
+  for (const model of GEMINI_FALLBACK_ORDER) {
+    assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
+  }
+});
+
+test("Stage 1: a 429 quota error fails fast without walking the Gemini model chain", async () => {
+  configureKeys();
+  const geminiUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) {
+      geminiUrls.push(String(url));
+      return geminiHttpError(429, "Resource has been exhausted (e.g. check quota).");
+    }
+    assert.ok(isChatUrl(String(url)));
+    return chatReply("اسقِ في الصباح الباكر.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  // The HF chain still answers — the failure is non-fatal…
+  assert.equal(payload.source, "llm");
+  assert.match(warningText(payload), /HTTP 429/);
+  // …but a quota error is an account problem, not a model problem: exactly
+  // one Gemini attempt, no chain walk.
+  assert.equal(geminiUrls.length, 1);
+  assert.equal(requestedGeminiModel(geminiUrls[0]), GEMINI_FALLBACK_ORDER[0]);
+});
+
+test("Stage 1 sends each model generation its own thinking config (thinkingLevel for 3.x, thinkingBudget for 2.5)", async () => {
+  configureKeys();
+  const bodies = new Map<string, GeminiRequestBody>();
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) {
+      const model = requestedGeminiModel(String(url)) ?? "";
+      bodies.set(model, parseGeminiBody(init));
+      // 404 every 3.x id so the walk reaches the 2.5 model; it answers.
+      const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
+      return model === last
+        ? geminiReply("اسقِ في الصباح الباكر.")
+        : geminiModelNotFound(model);
+    }
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).source, "llm");
+
+  // Gemini 3.x: qualitative level, no numeric budget…
+  for (const model of GEMINI_FALLBACK_ORDER.slice(0, -1)) {
+    const gemini3 = bodies.get(model);
+    assert.ok(gemini3, `no request body captured for ${model}`);
+    assert.equal(gemini3.generationConfig?.thinkingConfig?.thinkingLevel, "low");
+    assert.equal(gemini3.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
+  }
+  // …Gemini 2.5: numeric zero budget, no level (each 400s the other's).
+  const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
+  const gemini25 = bodies.get(last);
+  assert.ok(gemini25, `no request body captured for ${last}`);
+  assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingBudget, 0);
+  assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
 });
 
 /* ------------------------------------------------------------------ */
