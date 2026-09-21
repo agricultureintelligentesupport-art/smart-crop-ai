@@ -54,7 +54,8 @@
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
- *     authenticated with the server-only `GEMINI_API_KEY` and guarded by one
+ *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
+ *     (including comma-separated values) plus `GEMINI_API_KEY_2`, and guarded by one
  *     shared 18 s `AbortController` deadline for the whole model chain (an
  *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
  *     so the previous 9 s window aborted healthy generations and pushed
@@ -125,7 +126,9 @@
  *   Final safety net: `POST` wraps the whole handler in a try/catch, so even
  *     an unexpected internal exception becomes a 200 basic-mode reply.
  *
- * Both server secrets (`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY` — with
+ * Gemini credentials (`GEMINI_API_KEY` — including comma-separated values —
+ * and optional `GEMINI_API_KEY_2`) and the Hugging Face secret
+ * (`HUGGINGFACE_API_KEY` — with
  * Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read from
  * `process.env` on the server only — they are never shipped to the browser
  * and never echoed back in a response body.
@@ -512,6 +515,22 @@ const GEMINI_TIMEOUT_MS = 18_000;
  * the 18 s budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
+
+/**
+ * Resolve every configured Gemini credential at request time. The primary
+ * variable may contain a comma-separated pool (`KEY1,KEY2`); the dedicated
+ * secondary variable is appended so deployments can add a key without
+ * changing the existing value. Whitespace-only entries are ignored and
+ * duplicate credentials are removed so one key is never retried twice.
+ */
+function resolveGeminiApiKeys(): string[] {
+  const configured = [
+    ...(process.env.GEMINI_API_KEY?.split(",") ?? []),
+    ...(process.env.GEMINI_API_KEY_2?.split(",") ?? []),
+  ];
+
+  return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
+}
 
 /* ---- Step 1 (vision) + Stage 2 — Hugging Face -------------------- */
 
@@ -1023,11 +1042,12 @@ async function generateWithGeminiModel(
   model: GeminiModel,
   userContent: string,
   signal: AbortSignal,
+  apiKey: string,
 ): Promise<string> {
   let response: Response;
   try {
     response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1120,7 +1140,10 @@ interface GeminiResult {
  * timeout abort — throws {@link GeminiError} immediately so the caller can
  * walk to Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
  */
-async function generateWithGemini(userContent: string): Promise<GeminiResult> {
+async function generateWithGeminiForKey(
+  userContent: string,
+  apiKey: string,
+): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
   // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
@@ -1138,7 +1161,12 @@ async function generateWithGemini(userContent: string): Promise<GeminiResult> {
       if (Date.now() >= deadline) break;
 
       try {
-        const text = await generateWithGeminiModel(model, userContent, controller.signal);
+        const text = await generateWithGeminiModel(
+          model,
+          userContent,
+          controller.signal,
+          apiKey,
+        );
         return { model: model.id, text, warnings };
       } catch (error) {
         if (!(error instanceof GeminiError)) throw error;
@@ -1169,6 +1197,73 @@ async function generateWithGemini(userContent: string): Promise<GeminiResult> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** True when Gemini rejected this credential because its quota is exhausted. */
+function isGeminiQuotaError(error: unknown): error is GeminiError {
+  return error instanceof GeminiError && error.status === 429;
+}
+
+/**
+ * Run the Gemini model chain against each configured credential in order.
+ *
+ * A 429 is credential-specific, so it gets a one-second backoff before the
+ * next key is tried. Other Gemini failures also advance through the remaining
+ * keys without a delay: Stage 1 only gives up to Hugging Face after every
+ * configured Gemini key has had a chance to answer. API keys are represented
+ * only by their ordinal in logs and warnings; their values never leave the
+ * server or appear in a client response.
+ */
+async function generateWithGemini(
+  userContent: string,
+  geminiApiKeys: readonly string[],
+): Promise<GeminiResult> {
+  const failures: string[] = [];
+  const rotationWarnings: string[] = [];
+
+  for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
+    const apiKey = geminiApiKeys[keyIndex];
+    try {
+      const result = await generateWithGeminiForKey(userContent, apiKey);
+      return {
+        ...result,
+        warnings: [...rotationWarnings, ...result.warnings],
+      };
+    } catch (error) {
+      if (!(error instanceof GeminiError)) throw error;
+
+      const keyLabel = `key ${keyIndex + 1}/${geminiApiKeys.length}`;
+      failures.push(`${keyLabel}: ${error.message}`);
+      const nextKeyIndex = keyIndex + 1;
+      const hasNextKey = nextKeyIndex < geminiApiKeys.length;
+
+      if (isGeminiQuotaError(error) && hasNextKey) {
+        const warning =
+          `Stage 1 Gemini HTTP 429 quota/rate limit on ${keyLabel} — ` +
+          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
+        rotationWarnings.push(warning);
+        console.warn(
+          `[Stage 1: Gemini Key Rotation] ${warning} Retrying after 1 second.`,
+        );
+        await new Promise((res) => setTimeout(res, 1000));
+      } else if (hasNextKey) {
+        // A non-quota failure can also be isolated to one credential (for
+        // example an invalid or revoked key). Try the next configured key
+        // before allowing the request to fall through to Hugging Face.
+        const warning =
+          `Stage 1 Gemini failed on ${keyLabel} — ` +
+          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
+        rotationWarnings.push(warning);
+        console.warn(
+          `[Stage 1: Gemini Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
+        );
+      }
+    }
+  }
+
+  throw new GeminiError(
+    `all Gemini API keys failed — ${failures.join(" | ")}`,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1738,20 +1833,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Server-only secrets — never exposed to the client bundle. Read on every
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
-  //   GEMINI_API_KEY        → Stage 1, the primary LLM.
+  //   GEMINI_API_KEY        → Stage 1, the primary LLM (comma-separated keys
+  //                           are supported).
+  //   GEMINI_API_KEY_2     → optional additional Gemini key.
   //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
   //                           (HF_TOKEN, Hugging Face's own conventional
   //                           variable name, is honoured as an alias).
-  const configuredGeminiKey = process.env.GEMINI_API_KEY;
-  const geminiKey = configuredGeminiKey?.trim() || null;
-  // Keep the fetch URL's required process.env.GEMINI_API_KEY interpolation
-  // exact while still tolerating accidental whitespace in deployment secrets.
-  if (geminiKey && configuredGeminiKey !== geminiKey) {
-    process.env.GEMINI_API_KEY = geminiKey;
-  }
+  const geminiApiKeys = resolveGeminiApiKeys();
   const huggingfaceKey = resolveHuggingFaceToken();
 
-  if (!geminiKey && !huggingfaceKey) {
+  if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
     // contract no longer includes any HTTP 500). The UI shows its dedicated
     // "assistant unavailable" notice for code MISSING_KEYS. With either key
@@ -1815,9 +1906,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // by a shared 18 s AbortController. Non-fatal: on any failure (or a missing
   // key) the request walks to Stage 2.
   let reply: string | null = null;
-  if (geminiKey) {
+  if (geminiApiKeys.length > 0) {
     try {
-      const geminiResult = await generateWithGemini(userContent);
+      const geminiResult = await generateWithGemini(userContent, geminiApiKeys);
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
@@ -1832,7 +1923,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
     }
   } else {
-    const detail = "GEMINI_API_KEY is not configured — skipping the primary LLM.";
+    const detail =
+      "GEMINI_API_KEY is not configured (GEMINI_API_KEY_2 is also empty) — skipping the primary LLM.";
     console.warn(`[Stage 1: Gemini Skipped] ${detail} → Stage 2 (Hugging Face LLM chain)`);
     warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
   }
