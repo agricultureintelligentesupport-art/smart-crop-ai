@@ -1,10 +1,13 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the fail-proof
- * 3-stage chain behind `/api/assistant`:
- *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
- *   Stage 1 Google Gemini (`gemini-1.5-flash`, primary LLM),
- *   Stage 2 Hugging Face LLM chain (fallback),
- *   Stage 3 built-in TypeScript direct formatters (never fails).
+ * chain behind `/api/assistant`:
+ *   Step 0  Hugging Face leaf detection & smart cropping (image requests),
+ *   Step 1  Field-trained Vision Transformer (ViT) plant-disease classifier
+ *           on the Hugging Face Serverless Inference API (free tier),
+ *   Step 2  Google Gemini — the SOLE conversational orchestrator and final
+ *           response generator (diagnosis + context + conversation history
+ *           in, Arabic reply out),
+ *   Safety net  built-in TypeScript direct formatters (never fail).
  *
  * Kept dependency-free and importable from both server and client code.
  */
@@ -60,6 +63,13 @@ export interface AssistantRequestBody {
   message?: string;
   image?: AssistantImagePayload;
   context?: AssistantContext;
+  /**
+   * Recent conversation turns (oldest first), EXCLUDING the current
+   * exchange. Lets Step 2 (Gemini) answer with full context instead of
+   * rehashing earlier advice. Server-side capped (recent 10 turns, 1500
+   * chars each) and sanitised before use.
+   */
+  history?: AssistantHistoryEntry[];
 }
 
 /** One raw candidate from the vision classifier. */
@@ -68,7 +78,18 @@ export interface DiagnosisCandidate {
   score: number;
 }
 
-/** Structured result of the PlantVillage vision step. */
+/**
+ * One turn of the recent conversation, sent by the client so Step 2 (Gemini)
+ * can build on the previous turns (smart memory / progressive detailing).
+ * The route sanitises it (valid roles, non-empty text, strict alternation,
+ * recent-10 cap) before it ever reaches the Gemini API.
+ */
+export interface AssistantHistoryEntry {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/** Structured result of the Step 1 field-trained ViT vision diagnosis. */
 export interface AssistantDiagnosis {
   /** Raw model label, e.g. "Tomato___Late_blight". */
   label: string;
@@ -86,19 +107,21 @@ export interface AssistantDiagnosis {
 }
 
 export type AssistantSource =
-  /** Step 1 vision diagnosis + Stage 1/2 LLM reasoning. */
+  /** Step 1 ViT diagnosis + Step 2 Gemini reply (the full pipeline). */
   | "hybrid"
   /**
-   * LLM reasoning only (no vision diagnosis attached) — Gemini
-   * (`gemini-1.5-flash`) when it answers, otherwise the Hugging Face fallback
-   * chain.
+   * Step 2 Gemini reply only (no vision diagnosis attached) — Gemini is the
+   * sole LLM, so any `"llm"` reply is Gemini's.
    */
   | "llm"
   /**
-   * Built-in direct formatter — emitted whenever BOTH LLM stages were
+   * Built-in direct formatter — emitted whenever Step 2 (Gemini) was
    * unavailable (zero-failure strategy: always 200, never a 500). Carries a
-   * diagnosis card when Step 1 succeeded, otherwise a friendly basic-mode
-   * Arabic reply (greeting-aware for text-only queries).
+   * diagnosis card when Step 1 succeeded (the client then does NOT show its
+   * amber fallback warning), otherwise a friendly basic-mode Arabic reply
+   * (greeting-aware for text-only queries) — that is the
+   * "both classification and Gemini failed completely" case that surfaces
+   * the warning.
    */
   | "direct";
 

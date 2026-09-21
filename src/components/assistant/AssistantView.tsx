@@ -204,6 +204,15 @@ export default function AssistantView() {
 
       let errorMessage = t.chat.error;
       try {
+        // Recent conversation (the turns BEFORE this exchange, errors
+        // excluded) so Step 2 (Gemini) can build on the previous turns —
+        // smart memory / progressive detailing. The server re-sanitises and
+        // caps the history (recent 10 turns, 1500 chars each).
+        const history = messages
+          .filter((m) => !m.error && m.text.trim().length > 0)
+          .slice(-10)
+          .map((m) => ({ role: m.author, text: m.text.slice(0, 1500) }));
+
         const res = await fetch("/api/assistant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -211,6 +220,7 @@ export default function AssistantView() {
             message: text,
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
+            ...(history.length > 0 ? { history } : {}),
           }),
         });
         if (!res.ok) {
@@ -244,7 +254,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, messages, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {
@@ -437,8 +447,14 @@ export default function AssistantView() {
                     )
                   )}
 
-                  {msg.source === "direct" && (
-                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.visionOnlyNote}</p>
+                  {/* Amber fallback warning: ONLY when BOTH the vision
+                      classification (Step 1) and Gemini (Step 2) failed
+                      completely — i.e. the direct formatter answered with no
+                      diagnosis. A direct reply that still carries a
+                      diagnosis (classification succeeded, LLM missing) is a
+                      normal outcome and must not scare the farmer. */}
+                  {msg.source === "direct" && !msg.diagnosis && (
+                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.basicModeNote}</p>
                   )}
                   {msg.error && (
                     <button

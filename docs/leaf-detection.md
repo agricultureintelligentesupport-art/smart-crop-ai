@@ -2,12 +2,12 @@
 
 ## Why
 
-The PlantVillage MobileNetV2 classifier (Step 1) is a **38-class crop/disease
-classifier with no notion of "leaf"**. When a farmer's photo contains a hand
-holding the leaf, soil, a pot or half a field, the classifier happily labels
-the *background* and returns a confident-but-wrong disease. Localising the
-leaf first and forwarding **only the cropped pixels** removes the single
-largest source of misdiagnosis in the pipeline.
+The Step 1 disease classifier is a **38-class crop/disease classifier with no
+notion of "leaf"**. When a farmer's photo contains a hand holding the leaf,
+soil, a pot or half a field, the classifier happily labels the *background*
+and returns a confident-but-wrong disease. Localising the leaf first and
+forwarding **only the cropped pixels** removes the single largest source of
+misdiagnosis in the pipeline.
 
 ## What runs, where
 
@@ -15,8 +15,8 @@ largest source of misdiagnosis in the pipeline.
 | --- | --- | --- | --- |
 | Step 0 · detection | Server (route) | `suryanshgoel/detr-finetuned-plantdoc` → `facebook/detr-resnet-50` (chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
-| Step 1 · classification | Server (route) | MobileNetV2 PlantVillage (ViT fallback) — unchanged | Free tier, existing behaviour. |
-| Stages 1–3 · LLM chain | Server (route) | Gemini → HF router LLMs → built-in formatter — unchanged | Existing behaviour. |
+| Step 1 · classification | Server (route) | **Field-trained Vision Transformer chain** (the old MobileNetV2 is gone): `kimcomehome/plantvillage-vit-leaf-disease` (ViT-base, PlantVillage 38 crop-disease classes, ~99.8 % held-out) → `nateraw/vit-base-beans` (field beans dataset) → `wambugu71/crop_leaf_diseases_vit` (ViT-tiny multi-crop last resort) | Free — same Hugging Face serverless `hf-inference` CPU tier + key as Step 0. No new key. |
+| Step 2 · LLM formatter | Server (route) | **Google Gemini — the sole conversational orchestrator and final response generator** (`gemini-3.5-flash` → `3.5-flash-lite` → `2.5-flash`); when BOTH the ViT chain and Gemini are down, a built-in formatter still answers 200 (`source: "direct"`) | Gemini free tier; the built-in formatter is local. |
 
 The detector weights (166 MB DETR checkpoint) live on **Hugging Face's
 infrastructure** — the serverless function only POSTs the photo bytes and
