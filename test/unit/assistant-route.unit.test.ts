@@ -1451,3 +1451,204 @@ test("strict pipeline: HF parses the returned array to extract the primary class
   assert.match(llmRequestBody, /Tomato___Early_blight/);
   assert.match(llmRequestBody, /95%/);
 });
+
+/* ------------------------------------------------------------------ */
+/*  Step 0 — leaf Detection & Cropping before the classifier           */
+/* ------------------------------------------------------------------ */
+
+import sharp from "sharp";
+
+/** A real decodable JPEG (solid "leaf green" 64×48 frame) for Step 0. */
+const LEAF_JPEG = await sharp({
+  create: { width: 64, height: 48, channels: 3, background: { r: 34, g: 120, b: 45 } },
+})
+  .jpeg()
+  .toBuffer();
+const LEAF_JPEG_B64 = LEAF_JPEG.toString("base64");
+
+function imageRequest(data: string, mimeType = "image/jpeg") {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "شخّص هذه الورقة", image: { data, mimeType } }),
+  });
+}
+
+/** Step 0 detector endpoints (DETR family on the hf-inference router). */
+const isDetectUrl = (url: string) =>
+  url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
+/** Step 1 classifier endpoints (MobileNetV2 / ViT on the same router). */
+const isClassifyUrl = (url: string) =>
+  url.includes("router.huggingface.co/hf-inference/models/") && /mobilenet|vit/i.test(url);
+
+/** Raw bytes body of an upstream call, base64-encoded for comparisons. */
+const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toString("base64");
+
+/** The Step 0 mock answer: one high-confidence leaf box at (10,8)-(50,40). */
+const leafDetection = () =>
+  Response.json([{ label: "LABEL_1", score: 0.87, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
+
+interface PreprocessingLike {
+  status: string;
+  detector: string | null;
+  box: [number, number, number, number] | null;
+  durationMs: number;
+}
+
+test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  let classifyBody = "";
+  let classifyContentType: string | null = null;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    urls.push(String(url));
+    if (isGeminiUrl(String(url))) return geminiReply("الاقتصاص حسّن الدقة.");
+    if (isDetectUrl(String(url))) {
+      assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
+      return leafDetection();
+    }
+    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
+    classifyBody = bodyB64(init);
+    classifyContentType = new Headers(init.headers).get("Content-Type");
+    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+
+  // Pipeline order: detect → classify → LLM.
+  assert.equal(urls.length, 3);
+  assert.ok(isDetectUrl(urls[0]));
+  assert.match(urls[0], /detr-finetuned-plantdoc/);
+  assert.ok(isClassifyUrl(urls[1]));
+  assert.ok(isGeminiUrl(urls[2]));
+
+  // The classifier saw the re-encoded CROP, never the original frame.
+  assert.notEqual(classifyBody, LEAF_JPEG_B64);
+  assert.equal(classifyContentType, "image/jpeg");
+
+  // Crop window: 40×32 box + 12% padding (5,4) → (5,4) 50×40 on the 64×48 frame.
+  assert.equal(payload.preprocessing?.status, "cropped");
+  assert.equal(payload.preprocessing?.detector, "suryanshgoel/detr-finetuned-plantdoc");
+  assert.deepEqual(payload.preprocessing?.box, [5, 4, 50, 40]);
+  assert.equal(typeof payload.preprocessing?.durationMs, "number");
+
+  assert.equal(payload.source, "hybrid");
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
+});
+
+test("Step 0 with no usable detection keeps the full frame for Step 1", async () => {
+  configureKeys();
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) return geminiReply("الصورة كاملة.");
+    if (isDetectUrl(String(url))) return Response.json([]);
+    assert.ok(isClassifyUrl(String(url)));
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  // The untouched original reached the classifier.
+  assert.equal(classifyBody, LEAF_JPEG_B64);
+  assert.equal(payload.preprocessing?.status, "no-leaf");
+  assert.equal(payload.preprocessing?.box, null);
+  // A no-leaf outcome is a normal result, not a pipeline warning.
+  assert.doesNotMatch(warningText(payload), /Step 0/);
+  assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 outage (detector loading) degrades to the full frame with a warning", async () => {
+  configureKeys();
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) return geminiReply("المصابيح باردة.");
+    if (isDetectUrl(String(url))) return Response.json({ error: "Model is loading" }, { status: 503 });
+    assert.ok(isClassifyUrl(String(url)));
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.equal(payload.preprocessing?.status, "unavailable");
+  assert.equal(classifyBody, LEAF_JPEG_B64);
+  assert.match(warningText(payload), /Step 0 leaf detection unavailable/);
+  assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 walks the detector chain when the primary id answers a non-detection payload", async () => {
+  configureKeys();
+  const detectUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) return geminiReply("تم.");
+    if (isDetectUrl(String(url))) {
+      detectUrls.push(String(url));
+      // First id 404s (checkpoint gone) — the chain must walk to the COCO
+      // fallback, whose plant-only labels still produce a crop here.
+      if (detectUrls.length === 1) return Response.json({ error: "Model not found" }, { status: 404 });
+      return Response.json([
+        { label: "potted plant", score: 0.8, box: { xmin: 5, ymin: 5, xmax: 45, ymax: 35 } },
+        { label: "person", score: 0.99, box: { xmin: 0, ymin: 0, xmax: 64, ymax: 48 } },
+      ]);
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.deepEqual(detectUrls.map((url) => /models\/(.+)$/.exec(url)?.[1]), [
+    "suryanshgoel/detr-finetuned-plantdoc",
+    "facebook/detr-resnet-50",
+  ]);
+  // The COCO fallback accepted ONLY the plant box — the "person" box (which
+  // would crop to the full frame) was filtered out by label.
+  assert.equal(payload.preprocessing?.status, "cropped");
+  assert.equal(payload.preprocessing?.detector, "facebook/detr-resnet-50");
+});
+
+test("HF_LEAF_DETECT_MODELS overrides the Step 0 detector chain", async () => {
+  configureKeys();
+  process.env.HF_LEAF_DETECT_MODELS = "custom/leaf-detector";
+  const detectUrls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) return geminiReply("تم.");
+    if (/router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) && !isClassifyUrl(String(url))) {
+      detectUrls.push(String(url));
+      return Response.json([{ label: "LABEL_0", score: 0.9, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  try {
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+    assert.match(detectUrls[0], /models\/custom\/leaf-detector$/);
+    assert.equal(payload.preprocessing?.status, "cropped");
+    assert.equal(payload.preprocessing?.detector, "custom/leaf-detector");
+  } finally {
+    delete process.env.HF_LEAF_DETECT_MODELS;
+  }
+});
+
+test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip warning", async () => {
+  process.env.GEMINI_API_KEY = GEMINI_KEY;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    assert.ok(isGeminiUrl(String(url)));
+    return geminiReply("بدون مفتاح.");
+  });
+  const response = await POST(imageRequest("aW1hZ2U="));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.equal(payload.preprocessing?.status, "skipped");
+  assert.match(warningText(payload), /Step 1 vision unavailable/);
+  assert.doesNotMatch(warningText(payload), /Step 0/);
+});

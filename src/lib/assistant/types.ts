@@ -31,6 +31,31 @@ export interface AssistantImagePayload {
   mimeType: string;
 }
 
+/**
+ * Outcome of Step 0 — the leaf Detection & Cropping preprocessing stage that
+ * runs before the PlantVillage classifier. Surfaced in the response body for
+ * full transparency (the UI shows whether the photo was auto-cropped).
+ */
+export interface AssistantPreprocessing {
+  /**
+   * cropped      — a leaf was detected and only the cropped region reached
+   *                the classifier;
+   * no-leaf      — the detector found no usable leaf box (or the crop would
+   *                have kept the whole frame) — the original image was used;
+   * unavailable  — the detection endpoint could not be reached (network,
+   *                loading, unexpected payload) — the original image was used;
+   * skipped      — no Hugging Face token is configured, so detection cannot
+   *                run (mirrors the Step 1 skip).
+   */
+  status: "cropped" | "no-leaf" | "unavailable" | "skipped";
+  /** Detector model id, when a detection call was attempted. */
+  detector: string | null;
+  /** Crop window on the ORIGINAL image, [left, top, width, height]. */
+  box: [number, number, number, number] | null;
+  /** Wall-clock cost of the whole stage (detection + crop), in ms. */
+  durationMs: number;
+}
+
 export interface AssistantRequestBody {
   message?: string;
   image?: AssistantImagePayload;
@@ -82,6 +107,8 @@ export interface AssistantResponseBody {
   reply: string;
   diagnosis?: AssistantDiagnosis | null;
   source: AssistantSource;
+  /** Step 0 detection & cropping outcome (image requests only). */
+  preprocessing?: AssistantPreprocessing | null;
   /** Non-fatal pipeline notes (e.g. "vision step skipped"). */
   warnings?: string[];
 }

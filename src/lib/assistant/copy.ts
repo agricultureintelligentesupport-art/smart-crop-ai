@@ -32,11 +32,18 @@ export interface AssistantCopy {
     you: string;
     assistant: string;
     thinking: string;
+    /** Phase 1 of an image request: leaf detection & smart cropping. */
+    thinkingDetect: string;
+    /** Phase 2 of an image request: disease classification + LLM. */
     thinkingVision: string;
     error: string;
     retry: string;
     unavailable: string;
     visionOnlyNote: string;
+    /** Shown when Step 0 detected the leaf and cropped the background away. */
+    cropApplied: string;
+    /** Shown when Step 0 found no usable leaf and kept the full frame. */
+    cropNotFound: string;
   };
   diagnosis: {
     title: string;
@@ -83,11 +90,15 @@ const AR: AssistantCopy = {
     you: "أنت",
     assistant: "المساعد الذكي",
     thinking: "جارٍ تحضير الإجابة…",
+    thinkingDetect: "جارٍ تحديد الورقة واقتصاص الخلفية…",
     thinkingVision: "جارٍ تحليل الصورة وتشخيص المرض…",
     error: "وقع خطأ أثناء الاتصال بالمساعد. حاول مرة أخرى.",
     retry: "إعادة المحاولة",
     unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
+    cropApplied:
+      "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
+    cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
   },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
@@ -134,11 +145,15 @@ const FR: AssistantCopy = {
     you: "Vous",
     assistant: "Assistant",
     thinking: "Préparation de la réponse…",
+    thinkingDetect: "Détection de la feuille et recadrage…",
     thinkingVision: "Analyse de l'image et diagnostic en cours…",
     error: "Erreur de connexion à l'assistant. Réessayez.",
     retry: "Réessayer",
     unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
     visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
+    cropApplied:
+      "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
+    cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",
