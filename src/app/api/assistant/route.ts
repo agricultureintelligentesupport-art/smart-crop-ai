@@ -55,7 +55,8 @@
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
  *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
- *     (including comma-separated values) plus `GEMINI_API_KEY_2`, and guarded by one
+ *     (including comma-separated values) plus numbered variants such as
+ *     `GEMINI_API_KEY_2` and `GEMINI_API_KEY_3`, and guarded by one
  *     shared 18 s `AbortController` deadline for the whole model chain (an
  *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
  *     so the previous 9 s window aborted healthy generations and pushed
@@ -517,17 +518,30 @@ const GEMINI_TIMEOUT_MS = 18_000;
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
 /**
- * Resolve every configured Gemini credential at request time. The primary
- * variable may contain a comma-separated pool (`KEY1,KEY2`); the dedicated
- * secondary variable is appended so deployments can add a key without
- * changing the existing value. Whitespace-only entries are ignored and
- * duplicate credentials are removed so one key is never retried twice.
+ * Resolve every configured Gemini credential at request time. Every
+ * environment variable whose name starts with `GEMINI_API_KEY` participates,
+ * so deployments can add `GEMINI_API_KEY_3`, `GEMINI_API_KEY_4`, and so on
+ * without another code change. Each value may itself be a comma-separated
+ * pool. Numeric variants are sorted naturally after the base variable so
+ * rotation remains deterministic (`GEMINI_API_KEY` → `_2` → `_3` …).
+ * Whitespace-only entries are ignored and duplicate credentials are removed.
  */
 function resolveGeminiApiKeys(): string[] {
-  const configured = [
-    ...(process.env.GEMINI_API_KEY?.split(",") ?? []),
-    ...(process.env.GEMINI_API_KEY_2?.split(",") ?? []),
-  ];
+  const prefix = "GEMINI_API_KEY";
+  const configured = Object.entries(process.env)
+    .filter(([name, value]) => name.startsWith(prefix) && typeof value === "string")
+    .sort(([first], [second]) => {
+      const order = (name: string): [number, string] => {
+        if (name === prefix) return [0, name];
+        const suffix = name.slice(`${prefix}_`.length);
+        return [/^\d+$/.test(suffix) ? Number(suffix) : Number.POSITIVE_INFINITY, name];
+      };
+
+      const [firstRank, firstName] = order(first);
+      const [secondRank, secondName] = order(second);
+      return firstRank - secondRank || firstName.localeCompare(secondName);
+    })
+    .flatMap(([, value]) => value?.split(",") ?? []);
 
   return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
 }
@@ -1835,7 +1849,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // a restart.
   //   GEMINI_API_KEY        → Stage 1, the primary LLM (comma-separated keys
   //                           are supported).
-  //   GEMINI_API_KEY_2     → optional additional Gemini key.
+  //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_2`, `_3`, …).
   //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
   //                           (HF_TOKEN, Hugging Face's own conventional
   //                           variable name, is honoured as an alias).
