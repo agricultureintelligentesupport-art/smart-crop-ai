@@ -7,6 +7,8 @@ import {
   ImagePlus,
   LayoutDashboard,
   LoaderCircle,
+  ScanSearch,
+  Scissors,
   Send,
   Sparkles,
   X,
@@ -27,6 +29,7 @@ import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
 import type {
+  AssistantPreprocessing,
   AssistantResponseBody,
   AssistantSource,
   AssistantDiagnosis,
@@ -56,6 +59,8 @@ interface ChatMessage {
   imageUrl?: string;
   diagnosis?: AssistantDiagnosis | null;
   source?: AssistantSource;
+  /** Step 0 detection & cropping report (image requests only). */
+  preprocessing?: AssistantPreprocessing | null;
   error?: boolean;
 }
 
@@ -120,6 +125,11 @@ export default function AssistantView() {
   const [busy, setBusy] = useState(false);
   /** Whether the in-flight request carries a photo (drives the thinking label). */
   const [busyWithImage, setBusyWithImage] = useState(false);
+  /**
+   * Two-phase thinking indicator for photo requests: the Detection & Cropping
+   * pre-step (Step 0) runs first on the server, then classification + the LLM.
+   */
+  const [visionPhase, setVisionPhase] = useState<0 | 1>(0);
   const [composerError, setComposerError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,6 +151,17 @@ export default function AssistantView() {
     const el = scrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
+
+  // Photo requests take visibly longer now (detect → crop → classify): walk
+  // the thinking label through the real pipeline phases so the farmer always
+  // sees what the server is doing. Phase 0 (detection) is typically 1–9 s,
+  // so after a short beat the label switches to the classification phase.
+  // (visionPhase itself is reset in `send`, an event handler.)
+  useEffect(() => {
+    if (!busyWithImage) return;
+    const timer = window.setTimeout(() => setVisionPhase(1), 2600);
+    return () => window.clearTimeout(timer);
+  }, [busyWithImage]);
 
   const wilayaCode = profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? null;
   const wilaya = wilayaCode ? getWilaya(wilayaCode) : null;
@@ -177,6 +198,9 @@ export default function AssistantView() {
       setComposerError(null);
       setBusy(true);
       setBusyWithImage(image !== null);
+      // Photo requests start over at the detection phase of the thinking
+      // indicator (Step 0 → classification), every single time.
+      setVisionPhase(0);
 
       let errorMessage = t.chat.error;
       try {
@@ -208,6 +232,7 @@ export default function AssistantView() {
             text: payload.reply,
             diagnosis: payload.diagnosis ?? null,
             source: payload.source,
+            preprocessing: payload.preprocessing ?? null,
           },
         ]);
       } catch {
@@ -382,6 +407,22 @@ export default function AssistantView() {
                     />
                   )}
 
+                  {msg.author === "assistant" && msg.preprocessing?.status === "cropped" && (
+                    <p
+                      className="mb-2 flex items-start gap-1.5 rounded-2xl bg-emerald-50/80 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-800 ring-1 ring-emerald-200/70"
+                      title={msg.preprocessing.detector ?? undefined}
+                    >
+                      <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
+                      {t.chat.cropApplied}
+                    </p>
+                  )}
+                  {msg.author === "assistant" && msg.preprocessing?.status === "no-leaf" && (
+                    <p className="mb-2 flex items-start gap-1.5 rounded-2xl bg-white/70 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-900/70 ring-1 ring-[#E2F1E8]">
+                      <ScanSearch size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
+                      {t.chat.cropNotFound}
+                    </p>
+                  )}
+
                   {msg.diagnosis && (
                     <div className="mb-3">
                       <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
@@ -422,7 +463,11 @@ export default function AssistantView() {
               <div className="glass-card flex items-center gap-2.5 rounded-3xl rounded-ss-lg px-4 py-3">
                 <LoaderCircle size={15} strokeWidth={2.6} className="animate-spin text-emerald-600" aria-hidden />
                 <span className="text-[12px] font-bold text-emerald-900/70">
-                  {busyWithImage ? t.chat.thinkingVision : t.chat.thinking}
+                  {busyWithImage
+                    ? visionPhase === 0
+                      ? t.chat.thinkingDetect
+                      : t.chat.thinkingVision
+                    : t.chat.thinking}
                 </span>
               </div>
             </motion.div>

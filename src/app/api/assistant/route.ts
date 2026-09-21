@@ -5,6 +5,26 @@
  * Pipeline (Google Gemini first, Hugging Face fallback, built-in formatter
  * last — a vision pre-step feeds both LLM stages):
  *
+ *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
+ *     free Hugging Face Inference router now ALSO runs an open-source object
+ *     detector (DETR-ResNet-50 fine-tuned on PlantDoc, every one of its 30
+ *     classes is a plant/leaf; the COCO `facebook/detr-resnet-50` with a
+ *     plant-only label filter is the fallback id — the chain is overridable
+ *     via `HF_LEAF_DETECT_MODELS`). The detected box is grown into a padded,
+ *     clamped crop window and the photo is cropped server-side with sharp,
+ *     so background noise (hands, soil, pots) NEVER reaches the PlantVillage
+ *     classifier: Step 1 sees ONLY the cropped pixels. Strictly an accuracy
+ *     pre-step — every failure mode is non-fatal and falls back to the
+ *     untouched original frame (the exact pre-Step-0 behaviour): missing HF
+ *     key, an undecodable image, an unreachable/loading detector, a payload
+ *     that is not object-detection-shaped, or "no leaf above threshold". The
+ *     outcome is reported in the new `preprocessing` response field and in
+ *     `warnings[]` when the stage could not run at all.
+ *     Vercel-friendly by design: no model weights ever touch the function
+ *     (the detector runs on Hugging Face's free serverless CPU tier) and
+ *     sharp adds only a few tens of ms of decode/crop work; the whole stage
+ *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
+ *
  *   Step 1 (when an image is attached): Hugging Face Inference API
  *     MobileNetV2 PlantVillage disease classifier → parse returned array to
  *     extract primary predicted disease class + confidence percentage +
@@ -12,6 +32,8 @@
  *     Handles 503/530 model-loading responses with a clear status message.
  *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
  *     continues through Stage 1 → 2 → 3 without a diagnosis.
+ *     Receives the Step 0 crop when detection succeeded, the full frame
+ *     otherwise.
  *
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
@@ -109,10 +131,20 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
+import sharp from "sharp";
+import {
+  LEAF_DETECT_DEFAULTS,
+  parseObjectDetections,
+  selectLeafCrop,
+  type CropRect,
+  type LeafDetection,
+} from "@/lib/assistant/leaf-detect";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
   AssistantContext,
   AssistantDiagnosis,
+  AssistantImagePayload,
+  AssistantPreprocessing,
   AssistantRequestBody,
   AssistantResponseBody,
   DiagnosisCandidate,
@@ -139,6 +171,252 @@ const HF_PLANT_MODELS = [
 
 const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
+
+/* ------------------------------------------------------------------ */
+/*  Step 0 — leaf detection & smart cropping (open detector + sharp)   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Step 0 model chain (object-detection), tried in order, through the SAME
+ * hf-inference router endpoint as the Step 1 classifier:
+ *
+ *   • `suryanshgoel/detr-finetuned-plantdoc` — DETR-ResNet-50 fine-tuned on
+ *     the PlantDoc plant-disease dataset (30 classes, every one of them a
+ *     plant leaf or lesion — "apple scab", "tomato late blight", …), so any
+ *     box it returns localises leaf material. Open weights, transformers
+ *     checkpoint, served on Hugging Face's free serverless CPU tier.
+ *   • `facebook/detr-resnet-50` — general COCO fallback for when the
+ *     specialised checkpoint is unavailable: only its plant-flavoured labels
+ *     ("potted plant") are accepted, so a houseplant photo still crops while
+ *     a photo of the farmer's hand never passes the filter.
+ *
+ * Both are open-source and free — the weights live on Hugging Face's
+ * infrastructure, the function only parses the returned boxes, so the
+ * serverless bundle and the cold start stay untouched.
+ */
+interface LeafDetectModel {
+  id: string;
+  /** Which detected labels count as leaf/plant material for this id. */
+  acceptLabel: (label: string) => boolean;
+}
+
+const DEFAULT_LEAF_DETECT_MODELS: LeafDetectModel[] = [
+  { id: "suryanshgoel/detr-finetuned-plantdoc", acceptLabel: () => true },
+  { id: "facebook/detr-resnet-50", acceptLabel: (label) => /plant|leaf/i.test(label) },
+];
+
+/**
+ * `HF_LEAF_DETECT_MODELS="id1,id2"` overrides the chain (e.g. to pin a
+ * self-hosted or newer detector). Custom ids have no known label space, so
+ * their accepted labels are: clearly plant-flavoured words, or the unnamed
+ * `LABEL_n` indices most fine-tuned checkpoints ship with.
+ */
+function resolveLeafDetectModels(): LeafDetectModel[] {
+  const raw = process.env.HF_LEAF_DETECT_MODELS?.trim();
+  if (!raw) return DEFAULT_LEAF_DETECT_MODELS;
+  const ids = raw.split(",").map((id) => id.trim()).filter(Boolean);
+  if (ids.length === 0) return DEFAULT_LEAF_DETECT_MODELS;
+  return ids.map((id) => ({
+    id,
+    acceptLabel: (label: string) =>
+      /plant|leaf|weed|crop/i.test(label) || /^LABEL_\d+$/i.test(label),
+  }));
+}
+
+/**
+ * Detection is a pre-step, not the main act: a tighter deadline than the
+ * classifier so a sleepy detector can never eat the request budget.
+ */
+const LEAF_DETECT_TIMEOUT_MS = 9_000;
+
+/** Re-encoded crop constraints — mirror the client's own downscale. */
+const LEAF_CROP_MAX_EDGE_PX = 1024;
+const LEAF_CROP_JPEG_QUALITY = 88;
+
+/** Smallest image worth cropping (below this, the frame IS the leaf). */
+const LEAF_CROP_MIN_DIMENSION_PX = 8;
+
+interface LeafDetectOutcome {
+  model: string;
+  detections: LeafDetection[];
+}
+
+/**
+ * Strict Step 0 detection round-trip: POST the raw image bytes to the
+ * object-detection endpoint (same auth + `X-Wait-For-Model` pattern as Step
+ * 1), validate the payload shape, walk the model chain on loading/404/shape
+ * errors. Throws (message prefixed "HF Error:") when every id failed — the
+ * caller treats that as "stage unavailable" and keeps the full frame.
+ */
+async function detectLeafStrict(
+  source: Buffer,
+  apiKey: string,
+): Promise<LeafDetectOutcome> {
+  let lastDetail = "no detection model was attempted";
+
+  for (const model of resolveLeafDetectModels()) {
+    try {
+      const res = await fetch(HF_ENDPOINT(model.id), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "image/jpeg",
+          // Ask the HF router to wait for a cold model instead of 503ing.
+          "X-Wait-For-Model": "true",
+        },
+        body: new Uint8Array(source),
+        signal: AbortSignal.timeout(LEAF_DETECT_TIMEOUT_MS),
+      });
+
+      if (res.status === 503 || res.status === 530) {
+        lastDetail = `${model.id}: model loading (HTTP ${res.status})`;
+        console.warn(`[Step 0: Detect Loading] ${lastDetail}`);
+        continue;
+      }
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => res.statusText);
+        let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""}`;
+        try {
+          const j = JSON.parse(bodyText) as { error?: string };
+          if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
+        } catch {
+          // keep the raw detail
+        }
+        lastDetail = `${model.id}: ${detail}`;
+        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+        continue;
+      }
+
+      const json: unknown = await res.json();
+      if (!Array.isArray(json)) {
+        lastDetail = `${model.id}: payload is not a detection array`;
+        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+        continue;
+      }
+      const parsed = parseObjectDetections(json);
+      if (parsed.length === 0 && json.length > 0) {
+        // A 200 whose items are not detection-shaped (e.g. a classification
+        // array) — this id is not serving object detection; walk the chain.
+        lastDetail = `${model.id}: ${json.length} payload items, none a valid detection`;
+        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+        continue;
+      }
+
+      const detections = parsed.filter((det) => model.acceptLabel(det.label));
+      return { model: model.id, detections };
+    } catch (error) {
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      lastDetail = `${model.id}: ${detail}`;
+      console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+    }
+  }
+
+  throw new Error(`HF Error: leaf detection failed — ${lastDetail}`);
+}
+
+/** Crop the detected window out of the source photo and re-encode it. */
+async function cropLeafImage(source: Buffer, rect: CropRect): Promise<Buffer> {
+  return sharp(source)
+    .extract(rect)
+    .resize({
+      width: LEAF_CROP_MAX_EDGE_PX,
+      height: LEAF_CROP_MAX_EDGE_PX,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: LEAF_CROP_JPEG_QUALITY })
+    .toBuffer();
+}
+
+/**
+ * Step 0 orchestration: detect the leaf, crop to it, and return BOTH the
+ * stage report (`AssistantPreprocessing`) and the image the classifier must
+ * receive — the cropped pixels on success, the untouched original in every
+ * other case. Never throws: any internal failure is converted into an
+ * "unavailable" report plus a non-fatal warning.
+ */
+async function runLeafDetectionStage(
+  image: AssistantImagePayload,
+  huggingfaceKey: string | null,
+  warnings: string[],
+): Promise<{ preprocessing: AssistantPreprocessing; image: AssistantImagePayload }> {
+  const original: AssistantImagePayload = { data: image.data, mimeType: image.mimeType };
+
+  if (!huggingfaceKey) {
+    // Same configuration gap Step 1 reports; Step 0 stays silent in
+    // `warnings[]` to avoid a duplicated line — the Step 1 skip already
+    // warns with the exact reason.
+    console.warn("[Step 0: Detect Skipped] no Hugging Face token — leaf detection skipped.");
+    return {
+      preprocessing: { status: "skipped", detector: null, box: null, durationMs: 0 },
+      image: original,
+    };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const source = Buffer.from(image.data, "base64");
+    const metadata = await sharp(source).metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+    if (width < LEAF_CROP_MIN_DIMENSION_PX || height < LEAF_CROP_MIN_DIMENSION_PX) {
+      throw new Error(`image is not decodable or too small to crop (${width}×${height})`);
+    }
+
+    const { model, detections } = await detectLeafStrict(source, huggingfaceKey);
+    const decision = selectLeafCrop(detections, width, height, {
+      minScore: LEAF_DETECT_DEFAULTS.minScore,
+    });
+    if (!decision) {
+      console.log(
+        `[Step 0: Detect NoLeaf] model=${model} above-threshold=${detections.length} — the full frame goes to Step 1`,
+      );
+      return {
+        preprocessing: {
+          status: "no-leaf",
+          detector: model,
+          box: null,
+          durationMs: Date.now() - startedAt,
+        },
+        image: original,
+      };
+    }
+
+    const cropped = await cropLeafImage(source, decision.rect);
+    const durationMs = Date.now() - startedAt;
+    console.log(
+      `[Step 0: Detect Success] model=${model} box=${decision.rect.left},${decision.rect.top}+${decision.rect.width}x${decision.rect.height} coverage=${Math.round(decision.coverage * 100)}% top=${Math.round(decision.topScore * 100)}% ${durationMs}ms — ONLY the crop goes to Step 1`,
+    );
+    return {
+      preprocessing: {
+        status: "cropped",
+        detector: model,
+        box: [
+          decision.rect.left,
+          decision.rect.top,
+          decision.rect.width,
+          decision.rect.height,
+        ],
+        durationMs,
+      },
+      image: { data: cropped.toString("base64"), mimeType: "image/jpeg" },
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`[Step 0: Detect Unavailable] ${detail} — the full frame goes to Step 1`);
+    warnings.push(`Step 0 leaf detection unavailable — ${detail}`.slice(0, 400));
+    return {
+      preprocessing: {
+        status: "unavailable",
+        detector: null,
+        box: null,
+        durationMs: Date.now() - startedAt,
+      },
+      image: original,
+    };
+  }
+}
 
 /* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
@@ -1363,11 +1641,24 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const warnings: string[] = [];
 
   // ---- Fail-proof sequential pipeline ------------------------------
+  // Step 0: leaf Detection & Cropping (when image attached). An open-source
+  // object detector localises the leaf, the photo is cropped with sharp and
+  // ONLY the crop continues down the pipeline — background noise (hands,
+  // soil, pots) can no longer reach the disease classifier. Non-fatal by
+  // construction: every failure degrades to the untouched original frame.
+  let preprocessing: AssistantPreprocessing | null = null;
+  /** What actually reaches Step 1: the Step 0 crop or the original image. */
+  let classifyImage: AssistantImagePayload | null = image ?? null;
+
   // Step 1: Hugging Face MobileNet vision classification (when image attached).
   // Non-fatal: a vision outage (or a missing HF key) degrades to the LLM /
   // direct replies instead of failing the request.
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
+    const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
+    preprocessing = detection.preprocessing;
+    classifyImage = detection.image;
+
     if (!huggingfaceKey) {
       const detail =
         "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
@@ -1375,7 +1666,11 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
     } else {
       try {
-        diagnosis = await classifyPlantImageStrict(image.data, image.mimeType, huggingfaceKey);
+        diagnosis = await classifyPlantImageStrict(
+          classifyImage.data,
+          classifyImage.mimeType,
+          huggingfaceKey,
+        );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
@@ -1449,6 +1744,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       reply,
       diagnosis,
       source: diagnosis ? "hybrid" : "llm",
+      ...(preprocessing ? { preprocessing } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
     return NextResponse.json(payload);
@@ -1477,6 +1773,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     reply: directReply,
     diagnosis,
     source: "direct",
+    ...(preprocessing ? { preprocessing } : {}),
     warnings,
   };
   return NextResponse.json(payload);
