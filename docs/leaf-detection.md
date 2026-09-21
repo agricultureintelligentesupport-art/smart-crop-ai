@@ -1,11 +1,14 @@
-# Step 0 — Leaf Detection & Cropping (preprocessing before classification)
+# Step 0 — Leaf Detection & Cropping (non-blocking preprocessing before the vision stages)
 
 ## Why
 
-The PlantVillage MobileNetV2 classifier (Step 1) is a **38-class crop/disease
-classifier with no notion of "leaf"**. When a farmer's photo contains a hand
-holding the leaf, soil, a pot or half a field, the classifier happily labels
-the *background* and returns a confident-but-wrong disease. Localising the
+The vision stages that consume the photo — the PRIMARY Gemini Vision
+direct diagnostician (Step 1a) and the SECONDARY PlantVillage MobileNetV2
+cascade (Step 1b, a **38-class crop/disease classifier with no notion of
+"leaf"**) — both do better on a clean leaf shot. When a farmer's photo
+contains a hand holding the leaf, soil, a pot or half a field, a classifier
+happily labels the *background* and returns a confident-but-wrong disease,
+and even a multimodal LLM wastes its attention on the clutter. Localising the
 leaf first and forwarding **only the cropped pixels** removes the single
 largest source of misdiagnosis in the pipeline.
 
@@ -15,8 +18,9 @@ largest source of misdiagnosis in the pipeline.
 | --- | --- | --- | --- |
 | Step 0 · detection | Server (route) | `suryanshgoel/detr-finetuned-plantdoc` → `facebook/detr-resnet-50` (chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
-| Step 1 · classification | Server (route) | MobileNetV2 PlantVillage (ViT fallback) — unchanged | Free tier, existing behaviour. |
-| Stages 1–3 · LLM chain | Server (route) | Gemini → HF router LLMs → built-in formatter — unchanged | Existing behaviour. |
+| Step 1a · PRIMARY diagnosis | Server (route) | Gemini Vision (`gemini-3.5-flash` chain) — the crop travels inline and Gemini inspects it directly | Gemini API quota (`GEMINI_API_KEY`); ONE round-trip does vision + reasoning. |
+| Step 1b · SECONDARY classification (fallback) | Server (route) | Field-trained ViTs → MobileNetV2 PlantVillage baseline — unchanged | Free tier, existing behaviour; runs only when Gemini Vision is unconfigured, times out or errors. |
+| Stages 1–3 · LLM chain | Server (route) | Gemini text → HF router LLMs → built-in formatter — unchanged | Existing behaviour (fed by the Step 1b diagnosis on the fallback path). |
 
 The detector weights (166 MB DETR checkpoint) live on **Hugging Face's
 infrastructure** — the serverless function only POSTs the photo bytes and
@@ -46,11 +50,11 @@ Pure, dependency-free, fully unit-tested geometry:
 
 | Case | Behaviour |
 | --- | --- |
-| No `HUGGINGFACE_API_KEY`/`HF_TOKEN` | Step 0 reports `status: "skipped"` (no request, no delay); Step 1 keeps its existing skip warning. |
-| Undecodable/too-small image | `status: "unavailable"`, warning pushed, original classified. |
-| Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, original classified. |
+| No `HUGGINGFACE_API_KEY`/`HF_TOKEN` | Step 0 reports `status: "skipped"` (no request, no delay); the full frame goes straight to the primary vision step (Step 1 keeps its skip warning only if the fallback is actually needed). |
+| Undecodable/too-small image | `status: "unavailable"`, warning pushed, original frame analysed. |
+| Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, the original frame goes straight to the primary vision step (non-blocking). |
 | Payload is not object-detection-shaped | Treated as "this id can't serve detection" → next id in the chain. |
-| No detection above threshold / useless box | `status: "no-leaf"` (a **normal** outcome — no warning), original classified. |
+| No detection above threshold / useless box | `status: "no-leaf"` (a **normal** outcome — no warning), original frame analysed. |
 
 The outcome travels to the client in `AssistantResponseBody.preprocessing`
 (`cropped | no-leaf | unavailable | skipped`, detector id, crop box, wall
@@ -68,9 +72,9 @@ The task allowed either. Server-side was chosen because:
   either COCO-SSD (no leaf class — `potted plant` at best) or ~40–170 MB
   zero-shot checkpoints; the PlantDoc DETR is *trained on leaves*, which is
   the whole point of the step.
-- **Free & key-free equivalent** — the HF serverless CPU tier that Step 1
-  already depends on serves the detection call; no additional provider, key
-  or quota is introduced.
+- **Free & key-free equivalent** — the HF serverless CPU tier that the
+  Step 1b fallback already depends on serves the detection call; no
+  additional provider, key or quota is introduced.
 - **Vercel-safe** — zero bundle weight (weights stay on HF), one extra
   sub-second-parse HTTP call bounded by its own timeout, and `sharp` (the
   crop) is the same native lib Vercel's image pipeline uses.
@@ -84,9 +88,9 @@ self-hosted endpoint, and `leaf-detect.ts` is already reusable client-side
 
 ```bash
 npm run test:unit    # includes test/unit/leaf-detect.unit.test.ts and the
-                     # Step 0 route suites (crop reaches the classifier,
-                     # no-leaf keeps the full frame, outage degrades, chain
-                     # walk, env override, keyless skip)
+                     # Step 0 route suites (crop reaches the primary vision
+                     # step, no-leaf keeps the full frame, outage degrades,
+                     # chain walk, env override, keyless skip)
 npm run lint
 npm run build
 ```

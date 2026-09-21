@@ -1,9 +1,13 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the fail-proof
- * 3-stage chain behind `/api/assistant`:
- *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
- *   Stage 1 Google Gemini (`gemini-1.5-flash`, primary LLM),
- *   Stage 2 Hugging Face LLM chain (fallback),
+ * chain behind `/api/assistant`:
+ *   Step 1a Hugging-Face-free PRIMARY: Google Gemini Vision direct
+ *          diagnostician (the raw photo goes straight to the multimodal
+ *          Gemini model, which returns the structured Arabic diagnostic card),
+ *   Step 1b SECONDARY fallback: Hugging Face MobileNet PlantVillage vision
+ *          cascade (kept intact — runs only when Gemini Vision is
+ *          unconfigured, times out or errors),
+ *   Stage 1 Google Gemini text LLM, Stage 2 Hugging Face LLM chain,
  *   Stage 3 built-in TypeScript direct formatters (never fails).
  *
  * Kept dependency-free and importable from both server and client code.
@@ -39,13 +43,13 @@ export interface AssistantImagePayload {
 export interface AssistantPreprocessing {
   /**
    * cropped      — a leaf was detected and only the cropped region reached
-   *                the classifier;
+   *                the primary vision step;
    * no-leaf      — the detector found no usable leaf box (or the crop would
    *                have kept the whole frame) — the original image was used;
    * unavailable  — the detection endpoint could not be reached (network,
    *                loading, unexpected payload) — the original image was used;
    * skipped      — no Hugging Face token is configured, so detection cannot
-   *                run (mirrors the Step 1 skip).
+   *                run (the full frame goes to the primary vision step).
    */
   status: "cropped" | "no-leaf" | "unavailable" | "skipped";
   /** Detector model id, when a detection call was attempted. */
@@ -68,7 +72,12 @@ export interface DiagnosisCandidate {
   score: number;
 }
 
-/** Structured result of the PlantVillage vision step. */
+/**
+ * Structured result of the vision step — the Step 1b Hugging Face PlantVillage
+ * classifier output (disease label, confidence, candidates). When the PRIMARY
+ * Gemini Vision diagnostician answers, the diagnosis lives inside its Arabic
+ * Markdown card (the reply itself) and this field stays `null`.
+ */
 export interface AssistantDiagnosis {
   /** Raw model label, e.g. "Tomato___Late_blight". */
   label: string;
@@ -86,7 +95,11 @@ export interface AssistantDiagnosis {
 }
 
 export type AssistantSource =
-  /** Step 1 vision diagnosis + Stage 1/2 LLM reasoning. */
+  /**
+   * Image diagnosis shipped together with the reply — either the Step 1a
+   * Gemini Vision direct diagnostic card (one multimodal round-trip) or a
+   * Step 1b HF vision diagnosis + Stage 1/2 LLM reasoning.
+   */
   | "hybrid"
   /**
    * LLM reasoning only (no vision diagnosis attached) — Gemini
@@ -97,7 +110,7 @@ export type AssistantSource =
   /**
    * Built-in direct formatter — emitted whenever BOTH LLM stages were
    * unavailable (zero-failure strategy: always 200, never a 500). Carries a
-   * diagnosis card when Step 1 succeeded, otherwise a friendly basic-mode
+   * diagnosis card when Step 1b succeeded, otherwise a friendly basic-mode
    * Arabic reply (greeting-aware for text-only queries).
    */
   | "direct";

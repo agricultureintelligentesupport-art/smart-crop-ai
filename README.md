@@ -88,29 +88,43 @@ deterministic and offline — no hydration mismatch, no fake "live" data.
 
 Values are labelled as decision-support estimates, not measurements.
 
-## The leaf diagnosis pipeline (Detection & Cropping → classification)
+## The leaf diagnosis pipeline (Gemini Vision primary → HF MobileNet fallback)
 
 `/api/assistant` processes an attached photo through a staged, fail-proof
-vision pipeline before the LLM stages run:
+vision pipeline:
 
 ```
 photo (base64)
   │
-  ├─ Step 0 · Detection & Cropping ── open-source object detector on the FREE
-  │    Hugging Face Inference router (DETR-ResNet-50 fine-tuned on PlantDoc →
-  │    facebook/detr-resnet-50 COCO fallback, plant labels only; chain
-  │    overridable with HF_LEAF_DETECT_MODELS). The dominant detection cluster
-  │    becomes a padded, clamped crop window and sharp crops the photo, so
-  │    hands, soil and pots never reach the classifier.
-  │    Every failure (no key, undecodable image, detector down/loading, no
-  │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
-  │    frame — the outcome lands in `preprocessing` on the API response.
+  ├─ Step 0 · Detection & Cropping (non-blocking) ── open-source object
+  │    detector on the FREE Hugging Face Inference router (DETR-ResNet-50
+  │    fine-tuned on PlantDoc → facebook/detr-resnet-50 COCO fallback, plant
+  │    labels only; chain overridable with HF_LEAF_DETECT_MODELS). The
+  │    dominant detection cluster becomes a padded, clamped crop window and
+  │    sharp crops the photo, so hands, soil and pots never reach the vision
+  │    stage. Every failure (no key, undecodable image, detector down/loading,
+  │    no leaf, near-full-frame box) is non-fatal and passes the ORIGINAL
+  │    frame straight to the primary vision step — the outcome lands in
+  │    `preprocessing` on the API response.
   │
-  ├─ Step 1 · PlantVillage classifier ── MobileNetV2 (ViT fallback) on the
-  │    same free router; receives ONLY the Step 0 crop when detection
-  │    succeeded, the full frame otherwise.
+  ├─ Step 1a · PRIMARY — Gemini Vision direct diagnostician ── the (cropped)
+  │    photo is passed RAW to the multimodal Gemini chain as an inline part
+  │    with a direct-inspection instruction: identify the plant species and
+  │    symptoms, name the most likely disease/gall/deficiency with a
+  │    confidence %, list the alternatives, and answer with the structured
+  │    Arabic diagnostic card. ONE round-trip does vision + reasoning
+  │    end-to-end (source: "hybrid"; no other stage runs).
   │
-  └─ Stages 1–3 · Gemini → HF LLM chain → built-in formatter (unchanged).
+  ├─ Step 1b · SECONDARY fallback (kept intact) ── if Gemini Vision is
+  │    unconfigured, times out or errors, the request falls back seamlessly
+  │    to the Hugging Face PlantVillage cascade on the same free router
+  │    (field-trained ViT models → the MobileNetV2 baseline
+  │    linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification);
+  │    it receives the Step 0 crop when detection succeeded, the full frame
+  │    otherwise.
+  │
+  └─ Stages 1–3 · Gemini text → HF LLM chain → built-in formatter (the
+       structured Step 1b diagnosis feeds these stages exactly as before).
 ```
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
