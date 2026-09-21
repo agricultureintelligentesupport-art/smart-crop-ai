@@ -23,6 +23,8 @@ const GEMINI_FALLBACK_ORDER = [
 
 const originalKeys = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  GEMINI_API_KEY_2: process.env.GEMINI_API_KEY_2,
+  GEMINI_API_KEY_3: process.env.GEMINI_API_KEY_3,
   HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY,
   // Hugging Face's conventional variable name — honoured by the route as an
   // alias, so it must be scrubbed too or a developer's shell token leaks in.
@@ -31,6 +33,8 @@ const originalKeys = {
 
 beforeEach(() => {
   delete process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY_2;
+  delete process.env.GEMINI_API_KEY_3;
   delete process.env.HUGGINGFACE_API_KEY;
   delete process.env.HF_TOKEN;
   // No test may accidentally call a paid provider.
@@ -387,6 +391,55 @@ test("Stage 1 keeps the gemini-3.5-flash endpoint when the API key rotates", asy
   );
 });
 
+test("Stage 1 rotates comma-separated and dynamically numbered Gemini keys after HTTP 429", async () => {
+  process.env.GEMINI_API_KEY = " key-one , , key-two ";
+  process.env.GEMINI_API_KEY_2 = " key-three ";
+  process.env.GEMINI_API_KEY_3 = " key-four ";
+  const calls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    calls.push(String(url));
+    if (requestedGeminiKey(String(url)) === "key-one") {
+      return geminiHttpError(429, "Quota exceeded.");
+    }
+    return geminiReply("اسقِ بعد تدويم المحصول.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "اسقِ بعد تدويم المحصول.");
+  assert.deepEqual(calls.map(requestedGeminiKey), ["key-one", "key-two"]);
+  assert.match(warningText(payload), /HTTP 429/);
+  assert.match(warningText(payload), /key rotation attempt 2\/4/);
+  assert.doesNotMatch(JSON.stringify(payload), /key-one|key-two|key-three|key-four/);
+});
+
+test("Stage 1 waits through every dynamically numbered Gemini key before using the HF fallback", async () => {
+  process.env.GEMINI_API_KEY = "key-one,key-two";
+  process.env.GEMINI_API_KEY_2 = "key-three";
+  process.env.GEMINI_API_KEY_3 = "key-four";
+  process.env.HUGGINGFACE_API_KEY = HF_KEY;
+  const geminiKeys: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isGeminiUrl(String(url))) {
+      geminiKeys.push(requestedGeminiKey(String(url)) ?? "");
+      return geminiHttpError(429, "Rate limit reached.");
+    }
+    assert.ok(isChatUrl(String(url)));
+    return chatReply("إجابة من الاحتياطي.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "إجابة من الاحتياطي.");
+  assert.deepEqual(geminiKeys, ["key-one", "key-two", "key-three", "key-four"]);
+  assert.match(warningText(payload), /all Gemini API keys failed/);
+  assert.match(warningText(payload), /HTTP 429/);
+});
+
 test("Stage 1 sends the concise Arabic system instruction, the query and the profile context", async () => {
   configureKeys();
   let body: GeminiRequestBody | undefined;
@@ -677,6 +730,29 @@ test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF ch
     assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
   }
 });
+
+for (const status of [503, 500] as const) {
+  test(`Stage 1 rotates to the next Gemini key after HTTP ${status}`, async () => {
+    process.env.GEMINI_API_KEY = "first-key,second-key";
+    const calls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      calls.push(String(url));
+      if (requestedGeminiKey(String(url)) === "first-key") {
+        return new Response(null, { status });
+      }
+      return geminiReply("إجابة بعد تدوير المفتاح.");
+    });
+
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "llm");
+    assert.equal(payload.reply, "إجابة بعد تدوير المفتاح.");
+    assert.deepEqual(calls.map(requestedGeminiKey), ["first-key", "second-key"]);
+    assert.match(warningText(payload), new RegExp(`HTTP ${status}`));
+    assert.match(warningText(payload), /key rotation attempt 2\/2/);
+  });
+}
 
 test("Stage 1: a 429 quota error fails fast without walking the Gemini model chain", async () => {
   configureKeys();
