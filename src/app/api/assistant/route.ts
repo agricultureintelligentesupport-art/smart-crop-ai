@@ -17,8 +17,10 @@
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
  *     authenticated with the server-only `GEMINI_API_KEY` and guarded by one
- *     shared 9 s `AbortController` deadline for the whole model chain (the
- *     mandated 8–10 s window). Google retires model generations on a fast
+ *     shared 18 s `AbortController` deadline for the whole model chain (an
+ *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
+ *     so the previous 9 s window aborted healthy generations and pushed
+ *     traffic onto the weaker fallbacks). Google retires model generations on a fast
  *     cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family
  *     Jun 2026, and both now answer 404 "is not found for API version
  *     v1beta" — so the model ids form a chain: a 404 / model-not-found
@@ -39,18 +41,29 @@
  *     generated Arabic reply.
  *
  *   Stage 2 (Gemini failed / timed out / `GEMINI_API_KEY` missing): Hugging
- *     Face Inference API LLM chat completion for concise text response
- *     formatting — active serverless-catalog, open, non-gated models only:
- *     `meta-llama/Llama-3.2-3B-Instruct` primary, then
- *     `Qwen/Qwen2.5-7B-Instruct` and `mistralai/Mistral-7B-Instruct-v0.3`.
- *     The previous generation ids (Qwen2.5-Coder-7B, zephyr-7b-beta,
- *     Xenova-Qwen1.5-0.5B) were dropped from the `hf-inference` provider
- *     catalog and 400 with "Model not supported by provider hf-inference";
- *     the gated large Llama releases (3.1/3.3 70B+) are still avoided
- *     because they 403 with a license-acceptance error on tokens that never
- *     accepted their terms. Availability failures (`404 — Model not found`,
- *     `400 — Model not supported by provider hf-inference`, gated 403s,
- *     empty choices) walk the chain and fail gracefully into Stage 3.
+ *     Face Inference Providers LLM chat completion for concise text response
+ *     formatting through the official OpenAI-compatible router
+ *     `https://router.huggingface.co/v1/chat/completions` (Bearer
+ *     `HUGGINGFACE_API_KEY`, model id in the JSON body). The router picks a
+ *     live serving provider for the requested id and fails over between
+ *     providers by itself; the monthly free Inference Providers credits of
+ *     every Hugging Face account apply to these routed calls. Open,
+ *     non-gated, lightweight ids only: `Qwen/Qwen3-4B-Instruct-2507`
+ *     primary, then `Qwen/Qwen2.5-7B-Instruct` and the tiny
+ *     `Qwen/Qwen2.5-1.5B-Instruct`.
+ *     The per-provider `hf-inference` chat URLs the route used before
+ *     (`/hf-inference/models/<id>/v1/chat/completions`) are gone for LLMs:
+ *     since July 2025 the `hf-inference` provider only serves CPU tasks
+ *     (classification, embeddings…), so every instruct model — including the
+ *     previous `Llama-3.2-3B` / `Qwen2.5-7B` / `Mistral-7B` chain — answered
+ *     `400 — Model not supported by provider hf-inference`; `Llama-3.2-3B`
+ *     is additionally a gated repository (403 on tokens that never accepted
+ *     Meta's license). Availability failures (`404 — Model not found`,
+ *     `400 — model_not_supported` / "not supported by any provider", gated
+ *     403s, empty choices) walk the chain and fail gracefully into Stage 3.
+ *     When no Hugging Face token is configured at all, Stage 2 is skipped
+ *     synchronously — no request, no exception, no waiting — and Stage 3
+ *     answers immediately.
  *     The same system prompt, the same user query and the same Step 1 vision
  *     context are fed into the LLM behind a system prompt that enforces a
  *     direct and practical Arabic answer in the voice of the warm
@@ -74,7 +87,8 @@
  *   Final safety net: `POST` wraps the whole handler in a try/catch, so even
  *     an unexpected internal exception becomes a 200 basic-mode reply.
  *
- * Both server secrets (`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY`) are read from
+ * Both server secrets (`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY` — with
+ * Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read from
  * `process.env` on the server only — they are never shipped to the browser
  * and never echoed back in a response body.
  *
@@ -151,51 +165,73 @@ const GEMINI_MODELS = [
 type GeminiModel = (typeof GEMINI_MODELS)[number];
 
 /**
- * Stage 1 hard timeout for the WHOLE model chain — inside the mandated
- * 8–10 s window. Enforced with an explicit `AbortController` (not
- * `AbortSignal.timeout`) so the abort reason and the timer are both
+ * Stage 1 hard timeout for the WHOLE model chain: 18 s. A full Arabic
+ * ~200-word answer (system prompt + profile context + vision verdict in, up
+ * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
+ * Flash model; the previous 9 s window aborted those healthy generations
+ * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
+ * still leaves the Stage 2 round-trip and the Stage 3 formatter comfortably
+ * inside {@link maxDuration}. Enforced with an explicit `AbortController`
+ * (not `AbortSignal.timeout`) so the abort reason and the timer are both
  * inspectable/clearable per request; a fast 404 on an earlier id hands the
  * remaining budget to the next id.
  */
-const GEMINI_TIMEOUT_MS = 9_000;
+const GEMINI_TIMEOUT_MS = 18_000;
 
 /**
  * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
  * the per-model thinking config (`thinkingLevel: "low"` on Gemini 3.x,
  * `thinkingBudget: 0` on 2.5) keeps the model in fast, answer-first mode so
- * the 9 s budget is spent on the reply.
+ * the 18 s budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
 /* ---- Step 1 (vision) + Stage 2 — Hugging Face -------------------- */
 
 /**
- * Fast open-source LLM ids tried by Stage 2, in order, via the HF Inference
- * API's OpenAI-compatible chat-completions endpoint.
+ * Lightweight open-source LLM ids tried by Stage 2, in order, through the
+ * Hugging Face Inference Providers router ({@link HF_ROUTER_CHAT_URL}).
  *
- * Active serverless-catalog ids only, verified against the free-tier
- * catalog: the previous generation ids (`Qwen/Qwen2.5-Coder-7B-Instruct`,
- * `HuggingFaceH4/zephyr-7b-beta`, `TiagoPires/Xenova-Qwen1.5-0.5B-Chat`)
- * were dropped from the `hf-inference` provider and answer
- * `400 — Model not supported by provider hf-inference`. The ids below serve
- * on the free `hf-inference` provider with no manual acceptance step — the
- * Llama pick is the open-weight 3B release; the gated large Llama models
- * (`meta-llama/*` 3.1/3.3 70B+) still 403 with a license-acceptance error on
- * tokens that never accepted their terms, so they stay excluded. Not-found /
- * not-supported / gated responses still walk the chain as model-availability
- * errors, and the Stage 3 direct formatter
+ * Every id below is an open, NON-gated repository (no license click-through,
+ * so no 403 on a fresh token) with at least one `status: "live"`
+ * conversational provider in its Hub `inferenceProviderMapping` at the time
+ * of writing — the router resolves the provider and fails over between
+ * providers on its own:
+ *   • `Qwen/Qwen3-4B-Instruct-2507` — 4B answer-first (non-thinking) model,
+ *     strong Arabic, two live providers (nscale + featherless-ai);
+ *   • `Qwen/Qwen2.5-7B-Instruct`     — 7B multilingual quality fallback;
+ *   • `Qwen/Qwen2.5-1.5B-Instruct`   — 1.5B last resort: cheapest and
+ *     fastest, still fluent enough for a short practical Arabic reply.
+ *
+ * The previous chain (`meta-llama/Llama-3.2-3B-Instruct`,
+ * `Qwen/Qwen2.5-7B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`) was
+ * addressed per provider at `/hf-inference/models/<id>/v1/chat/completions`.
+ * That provider stopped serving chat LLMs in July 2025 (it is CPU-only:
+ * classification, embeddings, BERT/GPT-2-class models), so every id 400ed
+ * with "Model not supported by provider hf-inference" regardless of the
+ * token; `Llama-3.2-3B` is also a gated repo (403 without accepting Meta's
+ * terms) and `Mistral-7B-v0.3`'s only provider mapping is in `error` state.
+ * Not-found / not-supported / gated responses still walk the chain as
+ * model-availability errors, and the Stage 3 direct formatter
  * ({@link buildDirectDiagnosisCard}) guarantees a useful reply even when the
  * whole chain is down.
  */
 const HF_LLM_MODELS = [
-  "meta-llama/Llama-3.2-3B-Instruct",
+  "Qwen/Qwen3-4B-Instruct-2507",
   "Qwen/Qwen2.5-7B-Instruct",
-  "mistralai/Mistral-7B-Instruct-v0.3",
+  "Qwen/Qwen2.5-1.5B-Instruct",
 ] as const;
 
-const HF_CHAT_ENDPOINT = (model: string) =>
-  `https://router.huggingface.co/hf-inference/models/${model}/v1/chat/completions`;
+/**
+ * Official OpenAI-compatible chat-completions endpoint of the Hugging Face
+ * Inference Providers router. One URL for every model: the id travels in the
+ * JSON body's `model` field and the router picks a live provider for it
+ * (`provider: "auto"` semantics, automatic failover). Authenticated with a
+ * `Bearer` Hugging Face user access token that carries the "Inference
+ * Providers" permission; the account's monthly free credits apply.
+ */
+const HF_ROUTER_CHAT_URL = "https://router.huggingface.co/v1/chat/completions";
 
 /** Hard cap on the reply — the system prompt demands brevity. */
 const MAX_REPLY_TOKENS = 700;
@@ -216,6 +252,29 @@ function timedFetch(url: string, init: RequestInit): Promise<Response> {
 
 function bad(message: string, status = 400): NextResponse {
   return NextResponse.json({ error: message }, { status });
+}
+
+/**
+ * Environment variables consulted, in order, for the Hugging Face user access
+ * token that authenticates Step 1 (vision) and Stage 2 (router LLM).
+ * `HUGGINGFACE_API_KEY` is this project's documented name; `HF_TOKEN` is the
+ * name Hugging Face's own SDKs/CLI read, so a deployment configured the
+ * "Hugging Face way" still gets the fallback LLM instead of a silent skip.
+ */
+const HF_TOKEN_ENV_VARS = ["HUGGINGFACE_API_KEY", "HF_TOKEN"] as const;
+
+/**
+ * The first usable Hugging Face token found in the environment, whitespace
+ * trimmed — or `null` when none is configured (unset or blank). Purely
+ * synchronous: a missing token lets the handler skip Step 1 and Stage 2
+ * instantly, with no request, no exception and no waiting.
+ */
+function resolveHuggingFaceToken(): string | null {
+  for (const name of HF_TOKEN_ENV_VARS) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -641,9 +700,10 @@ interface GeminiResult {
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
  * walking {@link GEMINI_MODELS} in order — starting at `gemini-3.5-flash`.
  *
- * The whole chain is bounded by ONE 9 s `AbortController` deadline (mandated
- * 8–10 s window) instead of per-call timeouts: a fast model-availability
- * failure (404 / model-not-found — the signature of a retired generation)
+ * The whole chain is bounded by ONE 18 s `AbortController` deadline
+ * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
+ * model-availability failure (404 / model-not-found — the signature of a
+ * retired generation)
  * walks to the next id with whatever budget remains (each walk is recorded
  * in the result's `warnings` so the client still sees the degradation),
  * while any other failure — invalid/missing key (400/403), quota (429),
@@ -655,7 +715,7 @@ async function generateWithGemini(userContent: string): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
   // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
-  // by the 9 s window, and the pending round-trip and timer are always
+  // by the 18 s window, and the pending round-trip and timer are always
   // cancelled/cleared.
   const deadline = Date.now() + GEMINI_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
@@ -726,15 +786,18 @@ class HfLlmEmptyResponseError extends Error {
 
 /**
  * Message fragments the HF router returns when the *model id* is the problem
- * rather than the request itself: model not served by any provider
- * (`400 — Model not supported by provider hf-inference`), retired or mistyped
- * ids (`404 — Model not found`), gated models whose license the token owner
- * never accepted (`403 — You cannot access this model… / accepting the terms`),
- * and endpoints that don't support chat completions. Together with an HTTP
- * 404 these are the only failures that trigger the fallback chain — invalid
- * tokens, quota, 5xx, other 400s (bad request body) and network errors are
- * surfaced immediately, because another model id can't fix them and the extra
- * round-trips would just burn the request budget (`maxDuration`).
+ * rather than the request itself: model not served by any provider (the
+ * router's `400 — { code: "model_not_supported" } The requested model '…' is
+ * not supported by any provider you have enabled`, or the legacy per-provider
+ * `Model not supported by provider hf-inference`), retired or mistyped ids
+ * (`404 — Model not found`), gated models whose license the token owner never
+ * accepted (`403 — You cannot access this model… / accepting the terms`), and
+ * endpoints that don't support chat completions. Together with an HTTP 404
+ * these are the only failures that trigger the fallback chain — invalid or
+ * under-scoped tokens (401/403 "insufficient permissions"), exhausted credits
+ * (402), quota (429), 5xx, other 400s (bad request body) and network errors
+ * are surfaced immediately, because another model id can't fix them and the
+ * extra round-trips would just burn the request budget (`maxDuration`).
  */
 const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /\bmodel not found\b/i,
@@ -742,6 +805,7 @@ const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /does not (?:seem to )?exist/i,
   /no such model/i,
   /\bnot supported\b/i,
+  /\bmodel_not_supported\b/i,
   /\bcannot access\b/i,
   /\baccess to this model\b/i,
   /\bgated\b/i,
@@ -758,12 +822,47 @@ function isHfLlmModelAvailabilityError(error: unknown): boolean {
 }
 
 interface HfChatCompletion {
-  choices?: { message?: { content?: string } }[];
-  error?: string;
+  choices?: { message?: { content?: string | null } }[];
 }
 
 /**
- * A single chat-completions round-trip against one HF LLM id.
+ * Error envelopes the router can answer with. The OpenAI-compatible router
+ * uses the OpenAI object shape (`{ error: { message, type, param, code } }`,
+ * e.g. `code: "model_not_supported"`); the legacy per-provider endpoints and
+ * some upstream providers still answer a bare string (`{ error: "…" }`).
+ */
+interface HfErrorEnvelope {
+  error?: string | { message?: string; code?: string; type?: string };
+}
+
+/**
+ * Human-readable detail for a non-2xx router response: the JSON error message
+ * (plus the machine `code` when present, so `model_not_supported` is visible
+ * in logs/warnings) or, failing that, the raw body prefix.
+ */
+function describeHfHttpError(status: number, bodyText: string): string {
+  const fallback = `HTTP ${status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+  try {
+    const parsed = JSON.parse(bodyText) as HfErrorEnvelope;
+    const envelope = parsed?.error;
+    if (typeof envelope === "string" && envelope) return `HTTP ${status} — ${envelope}`;
+    if (envelope && typeof envelope === "object") {
+      const message = typeof envelope.message === "string" ? envelope.message.trim() : "";
+      const code = typeof envelope.code === "string" ? envelope.code.trim() : "";
+      if (message || code) {
+        return `HTTP ${status} — ${[code && `[${code}]`, message].filter(Boolean).join(" ")}`;
+      }
+    }
+  } catch {
+    // keep raw detail
+  }
+  return fallback;
+}
+
+/**
+ * A single chat-completions round-trip for one HF LLM id through the
+ * Inference Providers router ({@link HF_ROUTER_CHAT_URL}) — Bearer token
+ * header, OpenAI-compatible body with the model id inside it.
  * Throws {@link HfLlmRequestError} on transport/HTTP failures (status kept)
  * and {@link HfLlmEmptyResponseError} when the model returns no text.
  */
@@ -774,13 +873,12 @@ async function generateWithHfLlmModel(
 ): Promise<string> {
   let res: Response;
   try {
-    res = await timedFetch(HF_CHAT_ENDPOINT(model), {
+    res = await timedFetch(HF_ROUTER_CHAT_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        // Ask the HF router to wait for the model instead of instantly 503ing.
-        "X-Wait-For-Model": "true",
+        Accept: "application/json",
       },
       body: JSON.stringify({
         model,
@@ -808,15 +906,7 @@ async function generateWithHfLlmModel(
     } catch {
       bodyText = res.statusText;
     }
-    // Surface the JSON error message when present.
-    let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
-    try {
-      const j = JSON.parse(bodyText) as { error?: string };
-      if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
-    } catch {
-      // keep raw detail
-    }
-    throw new HfLlmRequestError(detail, res.status);
+    throw new HfLlmRequestError(describeHfHttpError(res.status, bodyText), res.status);
   }
 
   const json = (await res.json().catch(() => null)) as HfChatCompletion | null;
@@ -830,13 +920,15 @@ async function generateWithHfLlmModel(
 
 /**
  * Strict Stage 2 (fallback): concise Arabic text response formatting via the
- * HF Inference API, starting at
- * {@link HF_LLM_MODELS meta-llama/Llama-3.2-3B-Instruct} and falling back
- * through the remaining non-gated serverless ids when the router reports a
- * model as unavailable (404 not-found / 400 not-supported-by-provider / 403
+ * Hugging Face Inference Providers router, starting at
+ * {@link HF_LLM_MODELS Qwen/Qwen3-4B-Instruct-2507} and falling back
+ * through the remaining open, non-gated ids when the router reports a model
+ * as unavailable (404 not-found / 400 model_not_supported / 403
  * gated-license / empty choices). Any failure throws an "LLM Error:" — the
  * handler catches it and answers from Stage 3, so a Stage 2 outage never
  * breaks the HTTP response.
+ * - Never called without a token: the handler skips the stage synchronously
+ *   when no Hugging Face token is configured.
  * - Runs only after Stage 1 (Gemini) failed, timed out or its key is missing.
  * - Receives the exact same user turn as Gemini — built by
  *   {@link buildUserContent}, so it carries the PlantVillage label +
@@ -1238,7 +1330,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
   //   GEMINI_API_KEY        → Stage 1, the primary LLM.
-  //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM.
+  //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
+  //                           (HF_TOKEN, Hugging Face's own conventional
+  //                           variable name, is honoured as an alias).
   const configuredGeminiKey = process.env.GEMINI_API_KEY;
   const geminiKey = configuredGeminiKey?.trim() || null;
   // Keep the fetch URL's required process.env.GEMINI_API_KEY interpolation
@@ -1246,7 +1340,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (geminiKey && configuredGeminiKey !== geminiKey) {
     process.env.GEMINI_API_KEY = geminiKey;
   }
-  const huggingfaceKey = process.env.HUGGINGFACE_API_KEY?.trim() || null;
+  const huggingfaceKey = resolveHuggingFaceToken();
 
   if (!geminiKey && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
@@ -1268,7 +1362,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
     if (!huggingfaceKey) {
-      const detail = "HUGGINGFACE_API_KEY is not configured — vision step skipped.";
+      const detail =
+        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
       console.warn(`[Step 1: HF Skipped] ${detail}`);
       warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
     } else {
@@ -1291,7 +1386,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
   // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
   // the Generative Language REST API, keyed with GEMINI_API_KEY and bounded
-  // by a shared 9 s AbortController. Non-fatal: on any failure (or a missing
+  // by a shared 18 s AbortController. Non-fatal: on any failure (or a missing
   // key) the request walks to Stage 2.
   let reply: string | null = null;
   if (geminiKey) {
@@ -1317,9 +1412,10 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
 
   // ---- Stage 2: Hugging Face LLM fallback chain ---------------------
-  // Runs only when Stage 1 produced nothing. Same system prompt and the same
-  // user turn (query + profile + Step 1 vision context). Non-fatal: on total
-  // LLM failure Stage 3 answers locally with 200.
+  // Runs only when Stage 1 produced nothing: the open Qwen chain through the
+  // Inference Providers router, same system prompt and the same user turn
+  // (query + profile + Step 1 vision context). Non-fatal: on total LLM
+  // failure Stage 3 answers locally with 200.
   if (reply === null) {
     if (huggingfaceKey) {
       try {
@@ -1331,7 +1427,11 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
       }
     } else {
-      const detail = "HUGGINGFACE_API_KEY is not configured — skipping the fallback LLM.";
+      // No Hugging Face token anywhere in the environment → skip the stage
+      // synchronously (no request, no throw, no timer) and let Stage 3
+      // answer right away.
+      const detail =
+        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — skipping the fallback LLM.";
       console.warn(`[Stage 2: HF LLM Skipped] ${detail} → Stage 3 (built-in formatter)`);
       warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
     }

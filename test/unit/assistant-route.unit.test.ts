@@ -8,10 +8,11 @@ const GEMINI_KEY = "test-gemini";
 const HF_KEY = "test-hf";
 
 /**
- * Stage-1 AbortController window, mirrored from the route: the mandated
- * 8–10 s timeout for the Google Gemini round-trip.
+ * Stage-1 AbortController window, mirrored from the route: 18 s for the
+ * whole Google Gemini model chain (a full Arabic answer needs 10–15 s on a
+ * cold Flash model — the former 9 s window aborted healthy generations).
  */
-const GEMINI_TIMEOUT_MS = 9_000;
+const GEMINI_TIMEOUT_MS = 18_000;
 
 /** Stage-1 model chain, in order — must mirror the route's GEMINI_MODELS. */
 const GEMINI_FALLBACK_ORDER = [
@@ -23,11 +24,15 @@ const GEMINI_FALLBACK_ORDER = [
 const originalKeys = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY,
+  // Hugging Face's conventional variable name — honoured by the route as an
+  // alias, so it must be scrubbed too or a developer's shell token leaks in.
+  HF_TOKEN: process.env.HF_TOKEN,
 };
 
 beforeEach(() => {
   delete process.env.GEMINI_API_KEY;
   delete process.env.HUGGINGFACE_API_KEY;
+  delete process.env.HF_TOKEN;
   // No test may accidentally call a paid provider.
   mock.method(globalThis, "fetch", async () => {
     throw new Error("Unexpected upstream request");
@@ -146,12 +151,24 @@ const geminiUserText = (body: GeminiRequestBody) =>
 /*  Stage 2 (HF LLM chat-completions) mock helpers                      */
 /* ------------------------------------------------------------------ */
 
-/** Stage 2 model chain, in order — must mirror the route's HF_LLM_MODELS. */
+/**
+ * Stage 2 model chain, in order — must mirror the route's HF_LLM_MODELS:
+ * open, non-gated, lightweight Qwen ids served by the Inference Providers
+ * router (the gated Llama-3.2-3B / dead Mistral-7B ids are gone).
+ */
 const LLM_FALLBACK_ORDER = [
-  "meta-llama/Llama-3.2-3B-Instruct",
+  "Qwen/Qwen3-4B-Instruct-2507",
   "Qwen/Qwen2.5-7B-Instruct",
-  "mistralai/Mistral-7B-Instruct-v0.3",
+  "Qwen/Qwen2.5-1.5B-Instruct",
 ] as const;
+
+/**
+ * The official OpenAI-compatible Inference Providers router endpoint — ONE
+ * URL for every model (the id travels in the JSON body). The former
+ * per-provider `/hf-inference/models/<id>/v1/chat/completions` URLs answer
+ * `400 — Model not supported by provider hf-inference` for every LLM.
+ */
+const HF_ROUTER_CHAT_URL = "https://router.huggingface.co/v1/chat/completions";
 
 const chatReply = (content = "اسقِ في الصباح الباكر.") =>
   Response.json({ choices: [{ message: { role: "assistant", content } }] });
@@ -161,13 +178,33 @@ const llmModelNotFound = (model: string) =>
   Response.json({ error: `Model ${model} not found.` }, { status: 404 });
 
 /**
- * Mirrors the live HF serverless router rejection for an id no longer in its
- * catalog: `400 — Model not supported by provider hf-inference`. Must behave
- * like a model-availability error (fall through to the next id).
+ * Mirrors the legacy per-provider rejection for an id the `hf-inference`
+ * provider doesn't serve: `400 — Model not supported by provider
+ * hf-inference` (bare-string error envelope). Must behave like a
+ * model-availability error (fall through to the next id).
  */
 const llmProviderUnsupported = () =>
   Response.json(
     { error: "Model not supported by provider hf-inference" },
+    { status: 400 },
+  );
+
+/**
+ * Mirrors the live Inference Providers router rejection for a model no
+ * provider serves — the OpenAI-style OBJECT error envelope with a machine
+ * code: `400 — { error: { message, type, param, code: "model_not_supported" } }`.
+ * Must walk the chain exactly like the legacy string envelope.
+ */
+const llmRouterModelNotSupported = (model: string) =>
+  Response.json(
+    {
+      error: {
+        message: `The requested model '${model}' is not supported by any provider you have enabled.`,
+        type: "invalid_request_error",
+        param: "model",
+        code: "model_not_supported",
+      },
+    },
     { status: 400 },
   );
 
@@ -187,9 +224,6 @@ const llmGated = () =>
 
 const isChatUrl = (url: string) => url.includes("/v1/chat/completions");
 
-const requestedChatModel = (url: string) =>
-  /\/hf-inference\/models\/(.+?)\/v1\/chat\/completions/.exec(url)?.[1];
-
 interface ChatRequestBody {
   model?: string;
   messages?: { role: string; content: string }[];
@@ -198,6 +232,13 @@ interface ChatRequestBody {
 
 const parseChatBody = (init: RequestInit): ChatRequestBody =>
   JSON.parse(String(init.body ?? "{}")) as ChatRequestBody;
+
+/**
+ * The model id a Stage 2 round-trip asked the router for. The unified router
+ * URL carries no model, so it is read from the JSON body — which is also
+ * where the router itself reads it.
+ */
+const requestedChatModel = (init: RequestInit) => parseChatBody(init).model;
 
 /** Route must call Step 1 (vision) before Stage 1 (Gemini). */
 const isVisionUrl = (url: string) =>
@@ -447,9 +488,9 @@ for (const [name, failure] of [
 ] as const) {
   test(`Stage 1 ${name} falls through to the Hugging Face LLM chain (source: llm)`, async () => {
     configureKeys();
-    const urls: string[] = [];
-    mock.method(globalThis, "fetch", async (url: string) => {
-      urls.push(String(url));
+    const calls: { url: string; init: RequestInit }[] = [];
+    mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
       if (isGeminiUrl(String(url))) return failure();
       assert.ok(isChatUrl(String(url)));
       return chatReply("اسقِ في الصباح الباكر.");
@@ -461,8 +502,9 @@ for (const [name, failure] of [
     assert.equal(payload.source, "llm");
     assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
     // Gemini was attempted first, then the HF chain's primary id.
-    assert.equal(requestedGeminiModel(urls[0]), GEMINI_FALLBACK_ORDER[0]);
-    assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
+    assert.equal(requestedGeminiModel(calls[0].url), GEMINI_FALLBACK_ORDER[0]);
+    assert.equal(calls[1].url, HF_ROUTER_CHAT_URL);
+    assert.equal(requestedChatModel(calls[1].init), LLM_FALLBACK_ORDER[0]);
     assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
   });
 }
@@ -518,46 +560,56 @@ test("Stage 1 network failure falls through to the Hugging Face LLM chain", asyn
   assert.equal(upstream.mock.callCount(), 2);
 });
 
-test("Stage 1 timeout aborts the Gemini round-trip via AbortController and falls through", async () => {
+test("Stage 1 timeout aborts the Gemini round-trip via AbortController after 18 s and falls through", async () => {
   configureKeys();
-  const urls: string[] = [];
+  const calls: { url: string; init: RequestInit }[] = [];
+  let geminiAborted = false;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    urls.push(String(url));
+    calls.push({ url: String(url), init });
     if (isGeminiUrl(String(url))) {
       // Never answers — the route's AbortController must cancel the round-trip.
       const signal = init.signal as AbortSignal;
       assert.ok(signal instanceof AbortSignal);
       return await new Promise<Response>((_resolve, reject) => {
-        signal.addEventListener("abort", () =>
-          reject(signal.reason ?? new Error("aborted")),
-        );
+        signal.addEventListener("abort", () => {
+          geminiAborted = true;
+          reject(signal.reason ?? new Error("aborted"));
+        });
       });
     }
     return chatReply("اسقِ في الصباح الباكر.");
   });
 
-  // Fast-forward the 9 s Stage-1 window instead of waiting for it.
+  // Fast-forward the 18 s Stage-1 window instead of waiting for it.
   mock.timers.enable({ apis: ["setTimeout"] });
   let response: Response;
   try {
     const pending = POST(request());
     // Let the handler reach the hanging Gemini round-trip…
     await new Promise((resolve) => setImmediate(resolve));
-    // …then fire the timeout.
-    mock.timers.tick(GEMINI_TIMEOUT_MS + 1);
+    // …the former 9 s window must NOT fire any more: a healthy 10–15 s Gemini
+    // generation has to be allowed to finish…
+    mock.timers.tick(9_001);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(geminiAborted, false, "Gemini was aborted before the 18 s deadline");
+    assert.equal(calls.length, 1, "the fallback chain started before the 18 s deadline");
+    // …only the 18 s deadline aborts the round-trip.
+    mock.timers.tick(GEMINI_TIMEOUT_MS - 9_001 + 1);
     response = await pending;
   } finally {
     mock.timers.reset();
   }
 
+  assert.equal(geminiAborted, true);
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
   assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
-  assert.match(warningText(payload), /timeout after 9000 ms/);
+  assert.match(warningText(payload), /timeout after 18000 ms/);
   // The fallback chain ran after the abort.
-  assert.equal(requestedChatModel(urls[1]), LLM_FALLBACK_ORDER[0]);
+  assert.equal(calls[1].url, HF_ROUTER_CHAT_URL);
+  assert.equal(requestedChatModel(calls[1].init), LLM_FALLBACK_ORDER[0]);
 });
 
 /* ------------------------------------------------------------------ */
@@ -718,6 +770,50 @@ test("Gemini-only deployment: a Gemini failure degrades to Stage 3 and says the 
   assert.match(warningText(payload), /Reply formatted locally/);
 });
 
+for (const [name, hfValue] of [
+  ["unset", undefined],
+  ["blank", "   "],
+] as const) {
+  test(`no valid HF token (${name}): Stage 2 is skipped synchronously — no router request, no throw, no delay`, async () => {
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    if (hfValue !== undefined) process.env.HUGGINGFACE_API_KEY = hfValue;
+    const upstream = mock.method(globalThis, "fetch", async (url: string) => {
+      if (isGeminiUrl(String(url))) return geminiHttpError(503, "The model is overloaded.");
+      throw new Error(`Stage 2 must not be attempted without a token: ${url}`);
+    });
+    const errorLog = mock.method(console, "error", () => {});
+
+    // Freeze every timer: if the skip involved any wait (a retry back-off, a
+    // timeout race…) the handler could never resolve without a tick.
+    mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    let response: Response;
+    try {
+      response = await POST(request());
+    } finally {
+      mock.timers.reset();
+    }
+
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "direct");
+    assert.match(payload.reply, /الوضع الأساسي/);
+    // Exactly one upstream call — Gemini. Nothing went to Hugging Face.
+    assert.equal(upstream.mock.callCount(), 1);
+    assert.ok(upstream.mock.calls.every((call) => isGeminiUrl(String(call.arguments[0]))));
+    // The skip is a graceful degradation, not an error: no `[Stage 2: HF LLM
+    // Error]` line, and no safety-net exception.
+    assert.ok(
+      errorLog.mock.calls.every(
+        (call) => !/Stage 2|Safety Net/.test(String(call.arguments[0])),
+      ),
+    );
+    const warning = warningText(payload);
+    assert.match(warning, /Stage 2 LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
+    assert.match(warning, /HF_TOKEN unset too/);
+    assert.match(warning, /Reply formatted locally/);
+  });
+}
+
 test("Gemini-only deployment: an image request skips the vision step and still answers from Gemini", async () => {
   process.env.GEMINI_API_KEY = GEMINI_KEY;
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -735,9 +831,9 @@ test("Gemini-only deployment: an image request skips the vision step and still a
 
 test("Hugging-Face-only deployment: Stage 1 is skipped by config and the HF chain answers", async () => {
   process.env.HUGGINGFACE_API_KEY = HF_KEY;
-  const urls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
-    urls.push(String(url));
+  const calls: { url: string; init: RequestInit }[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    calls.push({ url: String(url), init });
     return chatReply("Water in the morning.");
   });
   const response = await POST(request());
@@ -745,10 +841,33 @@ test("Hugging-Face-only deployment: Stage 1 is skipped by config and the HF chai
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "Water in the morning.");
-  assert.ok(urls.every((url) => isChatUrl(url)));
-  assert.equal(requestedChatModel(urls[0]), LLM_FALLBACK_ORDER[0]);
+  assert.ok(calls.every((call) => isChatUrl(call.url)));
+  assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
+  assert.equal(requestedChatModel(calls[0].init), LLM_FALLBACK_ORDER[0]);
   assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
   assert.match(warningText(payload), /GEMINI_API_KEY is not configured/);
+});
+
+test("HF_TOKEN (Hugging Face's own variable name) is honoured as an alias of HUGGINGFACE_API_KEY", async () => {
+  // Only the alias is set — HUGGINGFACE_API_KEY is blank, not merely unset.
+  process.env.HUGGINGFACE_API_KEY = "   ";
+  process.env.HF_TOKEN = " hf_alias_token ";
+  const calls: { url: string; init: RequestInit }[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return chatReply("Water in the morning.");
+  });
+  // The alias counts as a configured provider key: no 503 MISSING_KEYS…
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "Water in the morning.");
+  // …and Stage 2 authenticates the router call with the trimmed alias value.
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
+  assert.equal(new Headers(calls[0].init.headers).get("Authorization"), "Bearer hf_alias_token");
+  assert.doesNotMatch(JSON.stringify(payload), /hf_alias_token/);
 });
 
 test("Hugging-Face-only deployment: an image request keeps the vision diagnosis (source hybrid)", async () => {
@@ -778,12 +897,43 @@ function mockGeminiDownThen(fetchImpl: (url: string, init: RequestInit) => Promi
   });
 }
 
+test("Stage 2 calls the official Inference Providers router with a Bearer token and the model id in the body", async () => {
+  configureKeys();
+  const calls: { url: string; init: RequestInit }[] = [];
+  mockGeminiDownThen(async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return chatReply("Water in the morning.");
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).reply, "Water in the morning.");
+
+  assert.equal(calls.length, 1);
+  const { url, init } = calls[0];
+  // ONE unified URL — never the retired per-provider `hf-inference` chat
+  // URLs, which 400 for every LLM.
+  assert.equal(url, HF_ROUTER_CHAT_URL);
+  assert.doesNotMatch(url, /hf-inference/);
+  assert.equal(init.method, "POST");
+  const headers = new Headers(init.headers);
+  assert.equal(headers.get("Authorization"), `Bearer ${HF_KEY}`);
+  assert.equal(headers.get("Content-Type"), "application/json");
+  // The serverless cold-start hint is an hf-inference-only header.
+  assert.equal(headers.get("X-Wait-For-Model"), null);
+  // OpenAI-compatible body: the model id is selected here, not in the URL.
+  const body = parseChatBody(init);
+  assert.equal(body.model, LLM_FALLBACK_ORDER[0]);
+  assert.equal(body.messages?.[0]?.role, "system");
+  assert.equal(body.messages?.[1]?.role, "user");
+  assert.ok(typeof body.max_tokens === "number" && body.max_tokens <= 1000);
+});
+
 test("Stage 2 walks the HF chain: 404 model-not-found on the primary id falls back to the next", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mockGeminiDownThen(async (url: string) => {
-    urls.push(url);
-    if (urls.length === 1) return llmModelNotFound(LLM_FALLBACK_ORDER[0]);
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    models.push(requestedChatModel(init));
+    if (models.length === 1) return llmModelNotFound(LLM_FALLBACK_ORDER[0]);
     return chatReply("Water in the morning.");
   });
   const response = await POST(request());
@@ -791,34 +941,74 @@ test("Stage 2 walks the HF chain: 404 model-not-found on the primary id falls ba
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "Water in the morning.");
-  assert.deepEqual(urls.map(requestedChatModel), [
-    LLM_FALLBACK_ORDER[0],
-    LLM_FALLBACK_ORDER[1],
-  ]);
+  assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
 });
 
-test("Stage 2 walks the HF chain: 400 model-not-supported falls back to the next id", async () => {
+test("Stage 2 walks the HF chain: legacy 400 model-not-supported (string envelope) falls back to the next id", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mockGeminiDownThen(async (url: string) => {
-    urls.push(url);
-    if (urls.length === 1) return llmProviderUnsupported();
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    models.push(requestedChatModel(init));
+    if (models.length === 1) return llmProviderUnsupported();
     return chatReply("Water in the morning.");
   });
   const response = await POST(request());
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as AssistantPayload).reply, "Water in the morning.");
-  assert.deepEqual(urls.map(requestedChatModel), [
-    LLM_FALLBACK_ORDER[0],
-    LLM_FALLBACK_ORDER[1],
-  ]);
+  assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
 });
 
-test("Stage 2: every model unsupported by the provider degrades to 200 basic-mode listing the whole chain", async () => {
+test("Stage 2 walks the HF chain: the router's 400 { error: { code: model_not_supported } } object envelope falls back to the next id", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mockGeminiDownThen(async (url: string) => {
-    urls.push(url);
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    const model = requestedChatModel(init);
+    models.push(model);
+    if (models.length === 1) return llmRouterModelNotSupported(String(model));
+    return chatReply("Water in the morning.");
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "Water in the morning.");
+  assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
+  // The walk is a non-fatal warning inside the route (console), not a
+  // client-visible one — the client only sees the Stage 1 degradation.
+  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.doesNotMatch(warningText(payload), /Stage 2 LLM unavailable/);
+});
+
+test("Stage 2: every model unsupported by the router degrades to 200 basic-mode listing the whole chain and the error code", async () => {
+  configureKeys();
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    const model = requestedChatModel(init);
+    models.push(model);
+    return llmRouterModelNotSupported(String(model));
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.reply, /الوضع الأساسي/);
+  assert.deepEqual(models, [...LLM_FALLBACK_ORDER]);
+  const warning = warningText(payload);
+  // The object envelope is unwrapped: machine code + human message, not
+  // "[object Object]" or the raw JSON blob.
+  assert.match(warning, /HTTP 400 — \[model_not_supported\] The requested model/);
+  assert.match(warning, /not supported by any provider/);
+  assert.doesNotMatch(warning, /\[object Object\]/);
+  for (const model of LLM_FALLBACK_ORDER) {
+    assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
+  }
+});
+
+test("Stage 2: every model unsupported by the provider (legacy string envelope) degrades to 200 basic-mode listing the whole chain", async () => {
+  configureKeys();
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    models.push(requestedChatModel(init));
     return llmProviderUnsupported();
   });
   const response = await POST(request());
@@ -826,7 +1016,7 @@ test("Stage 2: every model unsupported by the provider degrades to 200 basic-mod
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   assert.match(payload.reply, /الوضع الأساسي/);
-  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  assert.deepEqual(models, [...LLM_FALLBACK_ORDER]);
   const warning = warningText(payload);
   assert.match(warning, /Model not supported by provider hf-inference/);
   for (const model of LLM_FALLBACK_ORDER) {
@@ -854,17 +1044,18 @@ test("Stage 2: an unrelated 400 (bad request) fails fast without walking the mod
 
 test("Stage 2: all models not found degrades to 200 basic-mode listing every id tried", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mockGeminiDownThen(async (url: string) => {
-    urls.push(url);
-    return llmModelNotFound(String(requestedChatModel(url)));
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    const model = requestedChatModel(init);
+    models.push(model);
+    return llmModelNotFound(String(model));
   });
   const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   assert.equal(payload.diagnosis, null);
-  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  assert.deepEqual(models, [...LLM_FALLBACK_ORDER]);
   const warning = warningText(payload);
   for (const model of LLM_FALLBACK_ORDER) {
     assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
@@ -873,10 +1064,10 @@ test("Stage 2: all models not found degrades to 200 basic-mode listing every id 
 
 test("Stage 2: a model that returns no text falls through to the next id", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mockGeminiDownThen(async (url: string) => {
-    urls.push(url);
-    return urls.length < LLM_FALLBACK_ORDER.length
+  const models: (string | undefined)[] = [];
+  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+    models.push(requestedChatModel(init));
+    return models.length < LLM_FALLBACK_ORDER.length
       ? Response.json({ choices: [] })
       : chatReply("Water in the morning.");
   });
@@ -886,8 +1077,56 @@ test("Stage 2: a model that returns no text falls through to the next id", async
   assert.equal(payload.reply, "Water in the morning.");
   assert.equal(payload.diagnosis, null);
   assert.equal(payload.source, "llm");
-  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  assert.deepEqual(models, [...LLM_FALLBACK_ORDER]);
 });
+
+for (const [name, status, body] of [
+  [
+    "401 invalid token",
+    401,
+    { error: "Invalid credentials in Authorization header" },
+  ],
+  [
+    "403 token without the Inference Providers permission",
+    403,
+    {
+      error: {
+        message:
+          "This authentication method does not have sufficient permissions to call Inference Providers on behalf of user farmer",
+        type: "permission_error",
+      },
+    },
+  ],
+  [
+    "402 monthly credits exhausted",
+    402,
+    {
+      error: {
+        message:
+          "You have exceeded your monthly included credits for Inference Providers. Subscribe to PRO to get 20x more monthly included credits.",
+        type: "insufficient_quota",
+      },
+    },
+  ],
+] as const) {
+  test(`Stage 2: a ${name} is an account problem — fails fast to Stage 3 without walking the chain`, async () => {
+    configureKeys();
+    const upstream = mockGeminiDownThen(async () => Response.json(body, { status }));
+    const response = await POST(request());
+    // Fail-proof: still a 200 basic-mode reply, never a 500.
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "direct");
+    assert.match(warningText(payload), new RegExp(`HTTP ${status}`));
+    // Another model id can't fix a credential/billing failure: one attempt.
+    assert.equal(
+      upstream.mock.calls.filter((call) => isChatUrl(String(call.arguments[0]))).length,
+      1,
+    );
+    // The token never travels back to the client.
+    assert.doesNotMatch(JSON.stringify(payload), new RegExp(HF_KEY));
+  });
+}
 
 test("Stage 2: a transient 503 on the primary id does not walk the chain", async () => {
   configureKeys();
@@ -988,11 +1227,11 @@ test("zero-failure: both LLM stages down after a successful Step 1 returns 200 w
 
 test("zero-failure: gated-model 403s walk the whole HF chain, then answer with direct formatting", async () => {
   configureKeys();
-  const urls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
+  const models: (string | undefined)[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) return geminiHttpError(503, "overloaded");
     if (isChatUrl(String(url))) {
-      urls.push(String(url));
+      models.push(requestedChatModel(init));
       return llmGated();
     }
     return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
@@ -1001,7 +1240,7 @@ test("zero-failure: gated-model 403s walk the whole HF chain, then answer with d
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
-  assert.deepEqual(urls.map(requestedChatModel), [...LLM_FALLBACK_ORDER]);
+  assert.deepEqual(models, [...LLM_FALLBACK_ORDER]);
 });
 
 test("zero-failure: healthy diagnosis gets a direct reassurance card with prevention tips", async () => {
@@ -1183,10 +1422,12 @@ test("strict pipeline: HF parses the returned array to extract the primary class
   configureKeys();
   let llmRequestBody = "";
   let llmUrl = "";
+  let llmModel: string | undefined;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) return geminiHttpError(503, "overloaded");
     if (isChatUrl(String(url))) {
       llmUrl = String(url);
+      llmModel = requestedChatModel(init);
       llmRequestBody = String(init.body ?? "");
       return chatReply();
     }
@@ -1203,8 +1444,9 @@ test("strict pipeline: HF parses the returned array to extract the primary class
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.source, "hybrid");
-  // Stage 2 runs on the primary HF LLM via the chat-completions endpoint…
-  assert.equal(requestedChatModel(llmUrl), LLM_FALLBACK_ORDER[0]);
+  // Stage 2 runs on the primary HF LLM via the router's chat-completions endpoint…
+  assert.equal(llmUrl, HF_ROUTER_CHAT_URL);
+  assert.equal(llmModel, LLM_FALLBACK_ORDER[0]);
   // …and the Step 1 verdict (label + confidence) is passed straight into the prompt.
   assert.match(llmRequestBody, /Tomato___Early_blight/);
   assert.match(llmRequestBody, /95%/);
