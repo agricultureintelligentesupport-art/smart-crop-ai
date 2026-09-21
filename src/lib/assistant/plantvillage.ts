@@ -47,10 +47,6 @@ const CROPS_AR: Record<string, string> = {
   rice: "الأرز",
   cotton: "القطن",
   cucumber: "الخيار",
-  // The field "beans" ViT (Step 1 fallback #2) labels its classes with bare
-  // bean vocabulary (`bean_rust`, `angular_leaf_spot`, `healthy`).
-  bean: "الفول",
-  beans: "الفول",
 };
 
 /** Keys are `norm()`-ed disease fragments; order matters (longest first). */

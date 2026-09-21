@@ -1,8 +1,9 @@
 /**
- * `/api/assistant` — fail-proof field-trained AI chain for the agricultural
- * assistant. The route NEVER returns HTTP 500.
+ * `/api/assistant` — fail-proof 3-stage resilient AI chain for the
+ * agricultural assistant. The route NEVER returns HTTP 500.
  *
- * Pipeline:
+ * Pipeline (Google Gemini first, Hugging Face fallback, built-in formatter
+ * last — a vision pre-step feeds both LLM stages):
  *
  *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
  *     free Hugging Face Inference router now ALSO runs an open-source object
@@ -11,100 +12,122 @@
  *     plant-only label filter is the fallback id — the chain is overridable
  *     via `HF_LEAF_DETECT_MODELS`). The detected box is grown into a padded,
  *     clamped crop window and the photo is cropped server-side with sharp,
- *     so background noise (hands, soil, pots) NEVER reaches the Step 1
- *     classifier: it sees ONLY the cropped pixels. Strictly an accuracy
+ *     so background noise (hands, soil, pots) NEVER reaches the PlantVillage
+ *     classifier: Step 1 sees ONLY the cropped pixels. Strictly an accuracy
  *     pre-step — every failure mode is non-fatal and falls back to the
- *     untouched original frame. The outcome is reported in the
- *     `preprocessing` response field and in `warnings[]` when the stage
- *     could not run at all. Vercel-friendly by design: no model weights ever
- *     touch the function (the detector runs on Hugging Face's free
- *     serverless CPU tier) and the whole stage is bounded by its own 9 s
- *     deadline inside the 60 s `maxDuration`.
+ *     untouched original frame (the exact pre-Step-0 behaviour): missing HF
+ *     key, an undecodable image, an unreachable/loading detector, a payload
+ *     that is not object-detection-shaped, or "no leaf above threshold". The
+ *     outcome is reported in the new `preprocessing` response field and in
+ *     `warnings[]` when the stage could not run at all.
+ *     Vercel-friendly by design: no model weights ever touch the function
+ *     (the detector runs on Hugging Face's free serverless CPU tier) and
+ *     sharp adds only a few tens of ms of decode/crop work; the whole stage
+ *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
  *
- *   Step 1 (when an image is attached): FIELD-TRAINED VISION TRANSFORMER
- *     disease classifier on the Hugging Face Serverless Inference API
- *     (auth: `HUGGINGFACE_API_KEY`, with `HF_TOKEN` / `HGF_TOKEN` honoured
- *     as aliases). The old MobileNetV2 is GONE — the model chain is now a
- *     high-accuracy ViT fine-tuned on real plant-disease field data:
- *       1. `kimcomehome/plantvillage-vit-leaf-disease` — ViT-base
- *          patch16-224 (ImageNet-21k pretrained) fine-tuned on PlantVillage
- *          (38 crop-disease classes across 14 crop species, ~99.8 % held-out
- *          accuracy; same `Crop___Disease` label space the app already
- *          localises to Arabic);
- *       2. `nateraw/vit-base-beans` — ViT-base fine-tuned on the field
- *          "beans" leaf-disease dataset (bean rust, angular leaf spot,
- *          healthy);
- *       3. `wambugu71/crop_leaf_diseases_vit` — ViT-tiny multi-crop
- *          (corn / potato / rice / wheat) last resort.
- *     Every id is an open, non-gated repository served on-demand on
- *     Hugging Face's free serverless CPU tier — no new keys, no cost.
- *     The returned `{ label, score }[]` array is sorted and parsed into the
- *     primary disease class + confidence + differential diagnoses (top-3
- *     candidates). Handles 503/530 model-loading responses and walks the
- *     model chain on availability errors. Non-fatal: a vision outage is
- *     recorded in `warnings[]` and the request continues through Step 2 /
- *     the safety net without a diagnosis. Receives the Step 0 crop when
- *     detection succeeded, the full frame otherwise.
+ *   Step 1 (when an image is attached): Hugging Face Inference API
+ *     MobileNetV2 PlantVillage disease classifier → parse returned array to
+ *     extract primary predicted disease class + confidence percentage +
+ *     candidate diseases.
+ *     Handles 503/530 model-loading responses with a clear status message.
+ *     Non-fatal: a vision outage is recorded in `warnings[]` and the request
+ *     continues through Stage 1 → 2 → 3 without a diagnosis.
+ *     Receives the Step 0 crop when detection succeeded, the full frame
+ *     otherwise.
  *
- *   Step 2 (Gemini LLM Formatter): Google Gemini is the SOLE conversational
- *     orchestrator and final response generator. It receives, in one
- *     `generateContent` call:
- *       • the Step 1 vision diagnosis (disease label + Arabic localisation,
- *         confidence score and the differential / candidate diseases)
- *         whenever one was produced;
- *       • the user context (wilaya/region, crop, role, language, name);
- *       • the recent conversation history (the client's `history` field —
- *         the smart-memory / progressive-detailing context);
- *       • the user's current query.
- *     REST call to
+ *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
+ *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
- *     (server-only `GEMINI_API_KEY`), guarded by one shared 18 s
- *     `AbortController` deadline for the whole model chain. Google retires
- *     model generations on a fast cadence, so the model ids form a chain
- *     (`gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-2.5-flash`):
- *     a 404 / model-not-found walks to the next id within the remaining
- *     budget, while key/quota/5xx/safety/network/timeout failures fail the
- *     step immediately (another model id can't fix them). Each generation
- *     receives its own `thinkingConfig` — Gemini 3.x models take
- *     `thinkingLevel: "low"`, Gemini 2.5 takes `thinkingBudget: 0`.
- *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when
- *     the answer ships together with a Step 1 diagnosis) carrying Gemini's
+ *     authenticated with the server-only `GEMINI_API_KEY` and guarded by one
+ *     shared 18 s `AbortController` deadline for the whole model chain (an
+ *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
+ *     so the previous 9 s window aborted healthy generations and pushed
+ *     traffic onto the weaker fallbacks). Google retires model generations on a fast
+ *     cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family
+ *     Jun 2026, and both now answer 404 "is not found for API version
+ *     v1beta" — so the model ids form a chain: a 404 / model-not-found
+ *     walks to the next id within the remaining budget, while key/quota/5xx/
+ *     safety/network/timeout failures fail the stage immediately (another
+ *     model id can't fix them). Each generation receives its own
+ *     `thinkingConfig` — Gemini 3.x models take `thinkingLevel: "low"` and
+ *     reject a numeric `thinkingBudget`, Gemini 2.5 takes
+ *     `thinkingBudget: 0` and rejects `thinkingLevel` (the wrong parameter
+ *     is a 400, so the payload is model-aware).
+ *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
+ *     `systemInstruction`; the user turn carries the user query, the Firestore
+ *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
+ *     — the MobileNet vision diagnosis (disease label, confidence score and
+ *     candidate diseases).
+ *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
+ *     answer ships together with a Step 1 diagnosis) carrying Gemini's
  *     generated Arabic reply.
  *
- *   Safety net (Step 1 AND Step 2 both down — zero-failure formatting):
+ *   Stage 2 (Gemini failed / timed out / `GEMINI_API_KEY` missing): Hugging
+ *     Face Inference Providers LLM chat completion for concise text response
+ *     formatting through the official OpenAI-compatible router
+ *     `https://router.huggingface.co/v1/chat/completions` (Bearer
+ *     `HUGGINGFACE_API_KEY`, model id in the JSON body). The router picks a
+ *     live serving provider for the requested id and fails over between
+ *     providers by itself; the monthly free Inference Providers credits of
+ *     every Hugging Face account apply to these routed calls. Open,
+ *     non-gated, lightweight ids only: `Qwen/Qwen3-4B-Instruct-2507`
+ *     primary, then `Qwen/Qwen2.5-7B-Instruct` and the tiny
+ *     `Qwen/Qwen2.5-1.5B-Instruct`.
+ *     The per-provider `hf-inference` chat URLs the route used before
+ *     (`/hf-inference/models/<id>/v1/chat/completions`) are gone for LLMs:
+ *     since July 2025 the `hf-inference` provider only serves CPU tasks
+ *     (classification, embeddings…), so every instruct model — including the
+ *     previous `Llama-3.2-3B` / `Qwen2.5-7B` / `Mistral-7B` chain — answered
+ *     `400 — Model not supported by provider hf-inference`; `Llama-3.2-3B`
+ *     is additionally a gated repository (403 on tokens that never accepted
+ *     Meta's license). Availability failures (`404 — Model not found`,
+ *     `400 — model_not_supported` / "not supported by any provider", gated
+ *     403s, empty choices) walk the chain and fail gracefully into Stage 3.
+ *     When no Hugging Face token is configured at all, Stage 2 is skipped
+ *     synchronously — no request, no exception, no waiting — and Stage 3
+ *     answers immediately.
+ *     The same system prompt, the same user query and the same Step 1 vision
+ *     context are fed into the LLM behind a system prompt that enforces a
+ *     direct, precise and practical Arabic answer in the voice of the serious
+ *     professional agricultural expert ("أنت مساعد زراعي خبير…"): no repeated
+ *     greetings, no introductory pleasantries once the conversation is
+ *     underway, and no rehashed advice — strictly within the agriculture /
+ *     date-palm / Algerian farming domain.
+ *
+ *   Stage 3 (both LLM stages down — zero-failure formatting):
  *     built-in TypeScript formatters answer 200 with `{ source: "direct" }`:
  *       • diagnosis available   → concise Arabic Markdown diagnosis card
  *                                 built from the Step 1 label + confidence;
  *       • text-only request     → friendly basic-mode Arabic reply: greets
  *                                 back simple salutations ("هلا"، "مرحبا"،
- *                                 "السلام عليكم"…) and asks how to help
- *                                 with the farm, otherwise explains the
- *                                 basic mode and invites crop symptoms or a
- *                                 leaf photo;
+ *                                 "السلام عليكم"…) and asks how to help with
+ *                                 the farm, otherwise explains the basic mode
+ *                                 and invites crop symptoms or a leaf photo;
  *       • image but vision down → basic-mode reply + a "photo analysis
  *                                 unavailable, retry" note.
- *     This is the ONLY case the client surfaces its amber fallback warning
- *     (both classification and Gemini failed completely).
  *
  *   Final safety net: `POST` wraps the whole handler in a try/catch, so even
  *     an unexpected internal exception becomes a 200 basic-mode reply.
  *
- * Both server secrets (`GEMINI_API_KEY`, and the Hugging Face token under
- * `HUGGINGFACE_API_KEY` — with `HF_TOKEN` / `HGF_TOKEN` accepted as
- * aliases) are read from `process.env` on the server only — they are never
- * shipped to the browser and never echoed back in a response body.
+ * Both server secrets (`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY` — with
+ * Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read from
+ * `process.env` on the server only — they are never shipped to the browser
+ * and never echoed back in a response body.
  *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
  * when NO provider key is configured at all (the explicit
  * server-misconfiguration signal). No HTTP 500 ever.
  *
- * Error reporting: each step logs to the server console
- * (`[Step 1: HF Success]` / `[Step 2: Gemini Success]` and corresponding
- * warning logs; `[Step 2: Gemini Fallback]` marks a model switch,
- * `[Step 1: HF Unavailable]` / `[Step 2: Gemini Unavailable → Direct]`
- * mark graceful degradation and `[Safety Net]` an unexpected internal
- * error). Non-fatal degradations are surfaced to the client in `warnings[]`.
+ * Error reporting: each stage logs to the server console
+ * (`[Step 1: HF Success]` / `[Stage 1: Gemini Success]` /
+ * `[Stage 2: HF LLM Success]` and corresponding warning logs;
+ * `[Stage 1: Gemini Fallback]` / `[Stage 2: HF LLM Fallback]` mark a model
+ * switch,
+ * `[Step 1: HF Unavailable]` / `[Stage 1: Gemini Unavailable → Stage 2]` /
+ * `[Stage 2: HF LLM Unavailable → Stage 3]` mark graceful degradation and
+ * `[Safety Net]` an unexpected internal error).
+ * Non-fatal degradations are surfaced to the client in `warnings[]`.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -120,7 +143,6 @@ import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage"
 import type {
   AssistantContext,
   AssistantDiagnosis,
-  AssistantHistoryEntry,
   AssistantImagePayload,
   AssistantPreprocessing,
   AssistantRequestBody,
@@ -138,14 +160,12 @@ export const maxDuration = 60;
 /* ------------------------------------------------------------------ */
 
 /**
- * Step 1 — field-trained Vision Transformer classifiers on the HF
- * Inference API, tried in order. All open, non-gated, free serverless CPU
- * tier; the first two are ViT-BASE (high accuracy), the third ViT-TINY
- * (last resort).
+ * PlantVillage classifiers on the HF Inference API, tried in order. The
+ * first is a MobileNetV2 fine-tuned on the 38-class PlantVillage dataset;
+ * the second is a ViT alternative kept as a warm fallback.
  */
 const HF_PLANT_MODELS = [
-  "kimcomehome/plantvillage-vit-leaf-disease",
-  "nateraw/vit-base-beans",
+  "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification",
   "wambugu71/crop_leaf_diseases_vit",
 ] as const;
 
@@ -398,15 +418,15 @@ async function runLeafDetectionStage(
   }
 }
 
-/* ---- Step 2 — Google Gemini (the SOLE LLM / final formatter) ------ */
+/* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
 /**
- * Step 2 model chain, in order. Google retires whole generations on a fast
+ * Stage 1 model chain, in order. Google retires whole generations on a fast
  * cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family Jun
  * 2026 (both now 404 "is not found for API version v1beta"), and
  * `gemini-2.5-flash` is next in line — so a single hardcoded id is a time
  * bomb: a retired id's fast 404 walks the chain to the next id within the
- * remaining Step-2 budget.
+ * remaining Stage-1 budget.
  *
  * `thinking` carries the per-generation `thinkingConfig`, because each
  * generation rejects the other's parameter with 400 INVALID_ARGUMENT:
@@ -423,20 +443,21 @@ const GEMINI_MODELS = [
 type GeminiModel = (typeof GEMINI_MODELS)[number];
 
 /**
- * Step 2 hard timeout for the WHOLE model chain: 18 s. A full Arabic
- * ~200-word answer (system prompt + profile context + conversation history
- * + vision verdict in, up to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly
- * takes 10–15 s on a cold Flash model; the previous 9 s window aborted those
- * healthy generations mid-flight. 18 s still leaves the safety-net
- * formatting comfortably inside {@link maxDuration}. Enforced with an
- * explicit `AbortController` (not `AbortSignal.timeout`) so the abort reason
- * and the timer are both inspectable/clearable per request; a fast 404 on an
- * earlier id hands the remaining budget to the next id.
+ * Stage 1 hard timeout for the WHOLE model chain: 18 s. A full Arabic
+ * ~200-word answer (system prompt + profile context + vision verdict in, up
+ * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
+ * Flash model; the previous 9 s window aborted those healthy generations
+ * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
+ * still leaves the Stage 2 round-trip and the Stage 3 formatter comfortably
+ * inside {@link maxDuration}. Enforced with an explicit `AbortController`
+ * (not `AbortSignal.timeout`) so the abort reason and the timer are both
+ * inspectable/clearable per request; a fast 404 on an earlier id hands the
+ * remaining budget to the next id.
  */
 const GEMINI_TIMEOUT_MS = 18_000;
 
 /**
- * Output cap for Step 2. Slightly above a typical ~150-word answer because
+ * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
  * the per-model thinking config (`thinkingLevel: "low"` on Gemini 3.x,
  * `thinkingBudget: 0` on 2.5) keeps the model in fast, answer-first mode so
@@ -444,20 +465,60 @@ const GEMINI_TIMEOUT_MS = 18_000;
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
-/**
- * Per-call deadline for the HF Inference round-trips (Step 0 detection +
- * Step 1 ViT classification). Generous for a cold ViT-base on the serverless
- * CPU tier (model download + inference can exceed 10 s on first load), but
- * comfortably inside the route's 60 s `maxDuration` budget — the Step 0
- * detector runs under its own tighter 9 s window regardless.
- */
-const UPSTREAM_TIMEOUT_MS = 25_000;
+/* ---- Step 1 (vision) + Stage 2 — Hugging Face -------------------- */
 
-/** Hard cap on the user's message — the system prompt demands brevity. */
-const MAX_MESSAGE_CHARS = 4000;
+/**
+ * Lightweight open-source LLM ids tried by Stage 2, in order, through the
+ * Hugging Face Inference Providers router ({@link HF_ROUTER_CHAT_URL}).
+ *
+ * Every id below is an open, NON-gated repository (no license click-through,
+ * so no 403 on a fresh token) with at least one `status: "live"`
+ * conversational provider in its Hub `inferenceProviderMapping` at the time
+ * of writing — the router resolves the provider and fails over between
+ * providers on its own:
+ *   • `Qwen/Qwen3-4B-Instruct-2507` — 4B answer-first (non-thinking) model,
+ *     strong Arabic, two live providers (nscale + featherless-ai);
+ *   • `Qwen/Qwen2.5-7B-Instruct`     — 7B multilingual quality fallback;
+ *   • `Qwen/Qwen2.5-1.5B-Instruct`   — 1.5B last resort: cheapest and
+ *     fastest, still fluent enough for a short practical Arabic reply.
+ *
+ * The previous chain (`meta-llama/Llama-3.2-3B-Instruct`,
+ * `Qwen/Qwen2.5-7B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`) was
+ * addressed per provider at `/hf-inference/models/<id>/v1/chat/completions`.
+ * That provider stopped serving chat LLMs in July 2025 (it is CPU-only:
+ * classification, embeddings, BERT/GPT-2-class models), so every id 400ed
+ * with "Model not supported by provider hf-inference" regardless of the
+ * token; `Llama-3.2-3B` is also a gated repo (403 without accepting Meta's
+ * terms) and `Mistral-7B-v0.3`'s only provider mapping is in `error` state.
+ * Not-found / not-supported / gated responses still walk the chain as
+ * model-availability errors, and the Stage 3 direct formatter
+ * ({@link buildDirectDiagnosisCard}) guarantees a useful reply even when the
+ * whole chain is down.
+ */
+const HF_LLM_MODELS = [
+  "Qwen/Qwen3-4B-Instruct-2507",
+  "Qwen/Qwen2.5-7B-Instruct",
+  "Qwen/Qwen2.5-1.5B-Instruct",
+] as const;
+
+/**
+ * Official OpenAI-compatible chat-completions endpoint of the Hugging Face
+ * Inference Providers router. One URL for every model: the id travels in the
+ * JSON body's `model` field and the router picks a live provider for it
+ * (`provider: "auto"` semantics, automatic failover). Authenticated with a
+ * `Bearer` Hugging Face user access token that carries the "Inference
+ * Providers" permission; the account's monthly free credits apply.
+ */
+const HF_ROUTER_CHAT_URL = "https://router.huggingface.co/v1/chat/completions";
+
+/** Hard cap on the reply — the system prompt demands brevity. */
+const MAX_REPLY_TOKENS = 700;
 
 /** ~6 MB of raw base64 ≈ 4.5 MB image — plenty for a leaf photo. */
 const MAX_IMAGE_B64_CHARS = 6 * 1024 * 1024;
+const MAX_MESSAGE_CHARS = 4000;
+
+const UPSTREAM_TIMEOUT_MS = 25_000;
 
 /* ------------------------------------------------------------------ */
 /*  Small helpers                                                      */
@@ -473,19 +534,18 @@ function bad(message: string, status = 400): NextResponse {
 
 /**
  * Environment variables consulted, in order, for the Hugging Face user access
- * token that authenticates Step 0 (detection) and Step 1 (vision).
+ * token that authenticates Step 1 (vision) and Stage 2 (router LLM).
  * `HUGGINGFACE_API_KEY` is this project's documented name; `HF_TOKEN` is the
- * name Hugging Face's own SDKs/CLI read; `HGF_TOKEN` is the short alias
- * accepted by this project. A deployment configured any of the three ways
- * still gets the vision step instead of a silent skip.
+ * name Hugging Face's own SDKs/CLI read, so a deployment configured the
+ * "Hugging Face way" still gets the fallback LLM instead of a silent skip.
  */
-const HF_TOKEN_ENV_VARS = ["HUGGINGFACE_API_KEY", "HF_TOKEN", "HGF_TOKEN"] as const;
+const HF_TOKEN_ENV_VARS = ["HUGGINGFACE_API_KEY", "HF_TOKEN"] as const;
 
 /**
  * The first usable Hugging Face token found in the environment, whitespace
  * trimmed — or `null` when none is configured (unset or blank). Purely
- * synchronous: a missing token lets the handler skip Steps 0/1 instantly,
- * with no request, no exception and no waiting.
+ * synchronous: a missing token lets the handler skip Step 1 and Stage 2
+ * instantly, with no request, no exception and no waiting.
  */
 function resolveHuggingFaceToken(): string | null {
   for (const name of HF_TOKEN_ENV_VARS) {
@@ -496,7 +556,7 @@ function resolveHuggingFaceToken(): string | null {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 1 — Hugging Face field-trained ViT diagnosis (STRICT)         */
+/*  Step 1 — Hugging Face PlantVillage vision diagnosis (STRICT)       */
 /* ------------------------------------------------------------------ */
 
 interface HfClassification {
@@ -524,19 +584,12 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 }
 
 /**
- * Strict Step 1: classify the (Step 0-cropped) leaf image with the
- * field-trained ViT chain on the Hugging Face Serverless Inference API.
- * - Sends the raw image bytes to the classifier (auth: Bearer token +
- *   `X-Wait-For-Model`).
- * - Walks the model chain on 503/530 model-loading, 4xx/5xx and
- *   wrong-payload-shape responses (availability errors), surfacing the
- *   model's estimated loading time when present.
- * - Parses the returned `{ label, score }[]` array: sorted descending →
- *   primary predicted disease class + confidence percentage + differential
- *   diagnoses (top-3 candidates), localised to Arabic via
- *   {@link parsePlantLabel}.
- * - Throws an Error prefixed with "HF Error:" when every model failed, so
- *   the caller degrades gracefully (warning, no HTTP 500).
+ * Strict Step 1: classify leaf image via Hugging Face.
+ * - Sends the raw image bytes to the PlantVillage model.
+ * - Parses the returned array to extract the primary predicted class + confidence.
+ * - Handles 503/530 model-loading responses with a clear message.
+ * - Throws an Error prefixed with "HF Error:" on any failure so the caller
+ *   can return `{ error: "HF Error: ..." }` with 500.
  */
 async function classifyPlantImageStrict(
   imageBase64: string,
@@ -604,8 +657,7 @@ async function classifyPlantImageStrict(
 
       const json: unknown = await res.json();
 
-      // The Inference API should return an array of { label, score }.
-      // Validate and parse.
+      // HF should return an array of { label, score }. Validate and parse.
       if (!isHfClassificationArray(json)) {
         const detail = `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`;
         lastErrorDetail = detail;
@@ -613,8 +665,7 @@ async function classifyPlantImageStrict(
         continue;
       }
 
-      // Properly parse returned array: sort descending and extract the
-      // primary class + confidence, plus the differential candidates.
+      // Properly parse returned array: sort descending and extract primary class + confidence.
       const ranked = [...json].sort((a, b) => b.score - a.score);
       const top = ranked[0];
       const pct = Math.round(top.score * 100);
@@ -653,25 +704,26 @@ async function classifyPlantImageStrict(
   if (loadingEstimate !== null || (lastErrorDetail && /loading/i.test(lastErrorDetail))) {
     const msg = lastErrorDetail ?? `Model is loading, please retry after ~${Math.ceil(loadingEstimate ?? 20)}s`;
     throw new Error(
-      `HF Error: Model is loading — ${msg}. The ViT model is warming up on Hugging Face; please retry after ${loadingEstimate ? Math.ceil(loadingEstimate) : 20}s.`,
+      `HF Error: Model is loading — ${msg}. The PlantVillage model is warming up on Hugging Face; please retry after ${loadingEstimate ? Math.ceil(loadingEstimate) : 20}s.`,
     );
   }
   throw new Error(
-    `HF Error: ${lastErrorDetail ?? "Unable to classify image with the ViT model chain (all HF endpoints failed)"}`,
+    `HF Error: ${lastErrorDetail ?? "Unable to classify image with PlantVillage model (all HF endpoints failed)"}`,
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 2 prompting — system prompt + history + user turn for Gemini  */
+/*  Shared prompting — one system prompt + user turn for BOTH LLMs      */
+/*  (Stage 1 Gemini and Stage 2 Hugging Face receive identical input)   */
 /* ------------------------------------------------------------------ */
 
 /**
- * Shared system prompt for the Gemini LLM formatter (Step 2): the serious
- * professional agricultural expert («خبير زراعي محترف وجدي») — direct,
- * precise and practical Arabic answers with only a very subtle touch of
- * politeness: no affectionate greetings, no long-winded essays, no repeated
- * pleasantries or rehashed advice on ongoing conversations, strictly within
- * the agriculture / date-palm / Algerian farming domain.
+ * Shared system prompt for BOTH LLM stages (Gemini + Hugging Face): the
+ * serious professional agricultural expert («خبير زراعي محترف وجدي») —
+ * direct, precise and practical Arabic answers with only a very subtle
+ * touch of politeness: no affectionate greetings, no long-winded essays,
+ * no repeated pleasantries or rehashed advice on ongoing conversations,
+ * strictly within the agriculture / date-palm / Algerian farming domain.
  */
 const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق "محصولي الذكي" (Smart Crop AI): خبير زراعي محترف وجدي، دقيق وموثوق. تقدم مشورة علمية صحيحة بأسلوب مهني متوازن وطبيعي، مع لمسة لباقة خفيفة فقط — دون ترحيبات عاطفية، دون خطب طويلة، ودون دفء زائد.
 
@@ -694,7 +746,7 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - انتقل بسلاسة من العرض العام إلى التدخل المحدد، مستنداً دائماً إلى تاريخ المحادثة وأجوبة المستخدم السابقة.
 
 التشخيص والعلاج:
-- عند وجود تشخيص من نموذج الرؤية (ViT المدرّب ميدانياً على أمراض المحاصيل): اعتمد عليه مباشرة، اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية.
+- عند وجود تشخيص من نموذج الرؤية (PlantVillage): اعتمد عليه مباشرة، اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية.
 - إن كانت نسبة الثقة ضعيفة (<45%)، اطلب صورة أوضح في سطر واحد مع ذكر التشخيصات البديلة المحتملة.
 - اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
@@ -703,47 +755,6 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - اختصاصك 100٪: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي.
 - إن خرج السؤال عن الفلاحة، أعد المحادثة بجملة مهنية واحدة نحو اختصاصك دون محاضرة.
 - لا تدّعي اليقين المطلق: في الحالات الحرجة انصح بمعاينة مهندس زراعي محلي، في سطر واحد.`;
-
-/** Conversation-history budget for Step 2 (keep the payload lean + cheap). */
-const MAX_HISTORY_TURNS = 10;
-const MAX_HISTORY_TEXT_CHARS = 1500;
-
-/**
- * Defensively normalise the client-sent `history` into clean, strictly
- * alternating Gemini turns:
- *   • drop entries that are not `{ role: "user" | "assistant", text }` or
- *     carry no text;
- *   • keep only the most recent {@link MAX_HISTORY_TURNS} turns, each
- *     truncated to {@link MAX_HISTORY_TEXT_CHARS};
- *   • merge consecutive same-role turns (a client bug must never produce an
- *     API 400) and drop leading assistant turns (Gemini's first content must
- *     be a user turn).
- */
-function sanitizeHistory(raw: unknown): AssistantHistoryEntry[] {
-  if (!Array.isArray(raw)) return [];
-  const clean: AssistantHistoryEntry[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const { role, text } = item as { role?: unknown; text?: unknown };
-    if (role !== "user" && role !== "assistant") continue;
-    if (typeof text !== "string" || text.trim().length === 0) continue;
-    clean.push({ role, text: text.slice(0, MAX_HISTORY_TEXT_CHARS) });
-  }
-  const recent = clean.slice(-MAX_HISTORY_TURNS);
-  const alternating: AssistantHistoryEntry[] = [];
-  for (const entry of recent) {
-    const last = alternating[alternating.length - 1];
-    if (last && last.role === entry.role) {
-      last.text = `${last.text}\n${entry.text}`.slice(0, MAX_HISTORY_TEXT_CHARS);
-    } else {
-      alternating.push({ ...entry });
-    }
-  }
-  while (alternating.length > 0 && alternating[0].role === "assistant") {
-    alternating.shift();
-  }
-  return alternating;
-}
 
 function describeContext(context: AssistantContext | undefined): string {
   if (!context) return "لا يوجد سياق ملف شخصي.";
@@ -779,10 +790,10 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   return [
-    "نتيجة نموذج الرؤية (ViT — مدرّب ميدانياً على أمراض المحاصيل) على صورة المستخدم:",
+    "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
     `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
     `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
-    alternates ? `- الأمراض المرشّحة البديلة (candidate diseases / التشخيص التفريقي): ${alternates}` : "",
+    alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
     diagnosis.healthy
       ? "- النموذج يرى أن النبتة سليمة؛ طمئن المستخدم وقدّم نصائح وقائية."
       : "",
@@ -792,10 +803,12 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 }
 
 /**
- * Builds the single user turn for the Step 2 Gemini call: Firestore profile
- * context (Wilaya, crop, role, language, name) + the Step 1 ViT vision
- * diagnosis (disease label, confidence score and differential candidate
- * diseases) when one is available + the user's own query.
+ * Builds the single user turn shared by Stage 1 (Gemini `contents`) and
+ * Stage 2 (HF `messages[1]`): Firestore profile context (Wilaya, crop, role,
+ * language, name) + the Step 1 MobileNet vision diagnosis (disease label,
+ * confidence score and candidate diseases) when one is available + the user's
+ * own query. Keeping one builder guarantees the fallback LLM answers from
+ * exactly the same context the primary was given.
  */
 function buildUserContent(
   message: string,
@@ -806,18 +819,18 @@ function buildUserContent(
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `تشخيص نموذج الرؤية (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
       : "",
     message
       ? `سؤال المستخدم: ${message}`
       : diagnosis
-        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة نموذج الرؤية أعلاه."
+        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة PlantVillage أعلاه."
         : "قدّم نفسك في جملة واحدة كمساعد زراعي خبير واطلب سؤال المستخدم دون أي حشو.",
   ].filter(Boolean);
   return sections.join("\n\n");
 }
 
-/** Any Step-2 failure; the caller degrades to the built-in safety net either way. */
+/** Any Stage-1 failure; the caller degrades to Stage 2 (and then 3) either way. */
 class GeminiError extends Error {
   /** Upstream status when the failure came back as an HTTP response. */
   status: number | undefined;
@@ -851,7 +864,7 @@ function geminiText(payload: GeminiPayload | null): string {
  * than the request: a retired or mistyped id answers
  * `404 — models/gemini-1.5-flash is not found for API version v1beta, or is
  * not supported for generateContent`. Together with an HTTP 404 these are the
- * only Step-2 failures that walk the Gemini model chain — invalid keys
+ * only Stage-1 failures that walk the Gemini model chain — invalid keys
  * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
  * abort are surfaced immediately, because another model id can't fix them.
  */
@@ -870,27 +883,21 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
   return GEMINI_MODEL_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
 }
 
-interface GeminiContentTurn {
-  role: "user" | "model";
-  parts: { text: string }[];
-}
-
 /**
  * One `models.generateContent` round-trip against a single Gemini id:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
- *   • `contents` — the (sanitised) conversation history followed by the
- *     final user turn carrying the user query + profile context + the Step 1
- *     ViT vision diagnosis (label, confidence, differential candidates);
+ *   • `contents[0].parts[0].text` — the user query + profile context + the
+ *     Step 1 MobileNet vision diagnosis (label, confidence, candidates);
  *   • `generationConfig` — the sampling params plus the model's own
  *     `thinkingConfig` ({@link GeminiModel.thinking}).
  *
  * Throws {@link GeminiError} on every failure mode (status kept for the
  * chain-walk decision); a fetch aborted by the shared signal is reported as
- * the Step-2 timeout.
+ * the Stage-1 timeout.
  */
 async function generateWithGeminiModel(
   model: GeminiModel,
-  contents: GeminiContentTurn[],
+  userContent: string,
   signal: AbortSignal,
 ): Promise<string> {
   let response: Response;
@@ -903,7 +910,7 @@ async function generateWithGeminiModel(
         signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents,
+          contents: [{ role: "user", parts: [{ text: userContent }] }],
           generationConfig: {
             temperature: 0.4,
             topP: 0.9,
@@ -963,7 +970,7 @@ async function generateWithGeminiModel(
   return text;
 }
 
-/** Step-2 outcome: the model id that answered, its text and any non-fatal
+/** Stage-1 outcome: the model id that answered, its text and any non-fatal
  *  degradations (retired-id 404s) the chain walked past to get there. */
 interface GeminiResult {
   model: string;
@@ -972,39 +979,24 @@ interface GeminiResult {
 }
 
 /**
- * Step 2 — Google Gemini, the SOLE conversational orchestrator and final
- * response generator.
+ * Stage 1 — Google Gemini, the PRIMARY LLM.
  *
  * POSTs to
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
  * walking {@link GEMINI_MODELS} in order — starting at `gemini-3.5-flash`.
  *
- * The `contents` payload is the conversation: the sanitised history turns
- * (assistant turns mapped to Gemini's `model` role) followed by the final
- * user turn (query + profile context + Step 1 ViT diagnosis).
- *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
  * model-availability failure (404 / model-not-found — the signature of a
- * retired generation) walks to the next id with whatever budget remains
- * (each walk is recorded in the result's `warnings` so the client still sees
- * the degradation), while any other failure — invalid/missing key (400/403),
- * quota (429), upstream 5xx, safety block, empty candidate list, network
- * error or the timeout abort — throws {@link GeminiError} immediately so the
- * caller answers from the built-in safety net.
+ * retired generation)
+ * walks to the next id with whatever budget remains (each walk is recorded
+ * in the result's `warnings` so the client still sees the degradation),
+ * while any other failure — invalid/missing key (400/403), quota (429),
+ * upstream 5xx, safety block, empty candidate list, network error or the
+ * timeout abort — throws {@link GeminiError} immediately so the caller can
+ * walk to Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
  */
-async function generateWithGemini(
-  userContent: string,
-  history: AssistantHistoryEntry[],
-): Promise<GeminiResult> {
-  const contents: GeminiContentTurn[] = [
-    ...history.map((turn) => ({
-      role: turn.role === "assistant" ? ("model" as const) : ("user" as const),
-      parts: [{ text: turn.text }],
-    })),
-    { role: "user", parts: [{ text: userContent }] },
-  ];
-
+async function generateWithGemini(userContent: string): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
   // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
@@ -1022,7 +1014,7 @@ async function generateWithGemini(
       if (Date.now() >= deadline) break;
 
       try {
-        const text = await generateWithGeminiModel(model, contents, controller.signal);
+        const text = await generateWithGeminiModel(model, userContent, controller.signal);
         return { model: model.id, text, warnings };
       } catch (error) {
         if (!(error instanceof GeminiError)) throw error;
@@ -1030,15 +1022,15 @@ async function generateWithGemini(
 
         if (!isGeminiModelAvailabilityError(error)) {
           // Anything that isn't about model availability (bad key, quota,
-          // Google 5xx, timeout) fails the step immediately — another id
+          // Google 5xx, timeout) fails the stage immediately — another id
           // can't fix it.
           throw error;
         }
 
         const next = GEMINI_MODELS[index + 1];
         if (next) {
-          warnings.push(`Step 2 Gemini unavailable — ${error.message}`.slice(0, 400));
-          console.warn(`[Step 2: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
+          warnings.push(`Stage 1 Gemini unavailable — ${error.message}`.slice(0, 400));
+          console.warn(`[Stage 1: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
           continue;
         }
         // Availability failure on the LAST id — fall through to the summary.
@@ -1056,7 +1048,224 @@ async function generateWithGemini(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Safety net — direct formatting (ZERO-FAILURE)                      */
+/*  Stage 2 — Hugging Face LLM fallback chain (STRICT)                 */
+/* ------------------------------------------------------------------ */
+
+/** HTTP / transport failure with the response status kept for fallback logic. */
+class HfLlmRequestError extends Error {
+  status: number | undefined;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "HfLlmRequestError";
+    this.status = status;
+  }
+}
+
+/** The model answered successfully but produced no usable text. */
+class HfLlmEmptyResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HfLlmEmptyResponseError";
+  }
+}
+
+/**
+ * Message fragments the HF router returns when the *model id* is the problem
+ * rather than the request itself: model not served by any provider (the
+ * router's `400 — { code: "model_not_supported" } The requested model '…' is
+ * not supported by any provider you have enabled`, or the legacy per-provider
+ * `Model not supported by provider hf-inference`), retired or mistyped ids
+ * (`404 — Model not found`), gated models whose license the token owner never
+ * accepted (`403 — You cannot access this model… / accepting the terms`), and
+ * endpoints that don't support chat completions. Together with an HTTP 404
+ * these are the only failures that trigger the fallback chain — invalid or
+ * under-scoped tokens (401/403 "insufficient permissions"), exhausted credits
+ * (402), quota (429), 5xx, other 400s (bad request body) and network errors
+ * are surfaced immediately, because another model id can't fix them and the
+ * extra round-trips would just burn the request budget (`maxDuration`).
+ */
+const HF_LLM_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
+  /\bmodel not found\b/i,
+  /\bnot found\b/i,
+  /does not (?:seem to )?exist/i,
+  /no such model/i,
+  /\bnot supported\b/i,
+  /\bmodel_not_supported\b/i,
+  /\bcannot access\b/i,
+  /\baccess to this model\b/i,
+  /\bgated\b/i,
+  /\blicense\b/i,
+  /\baccept(ing)? the terms\b/i,
+];
+
+/** True when the failure looks like "this model id isn't usable for this key". */
+function isHfLlmModelAvailabilityError(error: unknown): boolean {
+  if (error instanceof HfLlmEmptyResponseError) return true;
+  if (!(error instanceof HfLlmRequestError)) return false;
+  if (error.status === 404) return true;
+  return HF_LLM_MODEL_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
+}
+
+interface HfChatCompletion {
+  choices?: { message?: { content?: string | null } }[];
+}
+
+/**
+ * Error envelopes the router can answer with. The OpenAI-compatible router
+ * uses the OpenAI object shape (`{ error: { message, type, param, code } }`,
+ * e.g. `code: "model_not_supported"`); the legacy per-provider endpoints and
+ * some upstream providers still answer a bare string (`{ error: "…" }`).
+ */
+interface HfErrorEnvelope {
+  error?: string | { message?: string; code?: string; type?: string };
+}
+
+/**
+ * Human-readable detail for a non-2xx router response: the JSON error message
+ * (plus the machine `code` when present, so `model_not_supported` is visible
+ * in logs/warnings) or, failing that, the raw body prefix.
+ */
+function describeHfHttpError(status: number, bodyText: string): string {
+  const fallback = `HTTP ${status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+  try {
+    const parsed = JSON.parse(bodyText) as HfErrorEnvelope;
+    const envelope = parsed?.error;
+    if (typeof envelope === "string" && envelope) return `HTTP ${status} — ${envelope}`;
+    if (envelope && typeof envelope === "object") {
+      const message = typeof envelope.message === "string" ? envelope.message.trim() : "";
+      const code = typeof envelope.code === "string" ? envelope.code.trim() : "";
+      if (message || code) {
+        return `HTTP ${status} — ${[code && `[${code}]`, message].filter(Boolean).join(" ")}`;
+      }
+    }
+  } catch {
+    // keep raw detail
+  }
+  return fallback;
+}
+
+/**
+ * A single chat-completions round-trip for one HF LLM id through the
+ * Inference Providers router ({@link HF_ROUTER_CHAT_URL}) — Bearer token
+ * header, OpenAI-compatible body with the model id inside it.
+ * Throws {@link HfLlmRequestError} on transport/HTTP failures (status kept)
+ * and {@link HfLlmEmptyResponseError} when the model returns no text.
+ */
+async function generateWithHfLlmModel(
+  model: string,
+  userContent: string,
+  apiKey: string,
+): Promise<string> {
+  let res: Response;
+  try {
+    res = await timedFetch(HF_ROUTER_CHAT_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent },
+        ],
+        temperature: 0.4,
+        top_p: 0.9,
+        max_tokens: MAX_REPLY_TOKENS,
+        stream: false,
+      }),
+    });
+  } catch (error) {
+    // Network / timeout / abort errors — no HTTP status involved.
+    const detail =
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    throw new HfLlmRequestError(detail);
+  }
+
+  if (!res.ok) {
+    let bodyText = "";
+    try {
+      bodyText = await res.text();
+    } catch {
+      bodyText = res.statusText;
+    }
+    throw new HfLlmRequestError(describeHfHttpError(res.status, bodyText), res.status);
+  }
+
+  const json = (await res.json().catch(() => null)) as HfChatCompletion | null;
+  const text = json?.choices?.[0]?.message?.content?.trim() ?? "";
+
+  if (!text) {
+    throw new HfLlmEmptyResponseError(`Empty response from ${model} (no usable choice text).`);
+  }
+  return text;
+}
+
+/**
+ * Strict Stage 2 (fallback): concise Arabic text response formatting via the
+ * Hugging Face Inference Providers router, starting at
+ * {@link HF_LLM_MODELS Qwen/Qwen3-4B-Instruct-2507} and falling back
+ * through the remaining open, non-gated ids when the router reports a model
+ * as unavailable (404 not-found / 400 model_not_supported / 403
+ * gated-license / empty choices). Any failure throws an "LLM Error:" — the
+ * handler catches it and answers from Stage 3, so a Stage 2 outage never
+ * breaks the HTTP response.
+ * - Never called without a token: the handler skips the stage synchronously
+ *   when no Hugging Face token is configured.
+ * - Runs only after Stage 1 (Gemini) failed, timed out or its key is missing.
+ * - Receives the exact same user turn as Gemini — built by
+ *   {@link buildUserContent}, so it carries the PlantVillage label +
+ *   confidence from Step 1 (when available), the user's text message and the
+ *   Firestore profile context (Wilaya, crop).
+ * - Uses the concise professional Arabic advisor system prompt.
+ * - Throws an Error prefixed with "LLM Error:" once no model can answer.
+ */
+async function askHfLlmStrict(apiKey: string, userContent: string): Promise<string> {
+  const failures: string[] = [];
+
+  for (const [index, model] of HF_LLM_MODELS.entries()) {
+    try {
+      const text = await generateWithHfLlmModel(model, userContent, apiKey);
+
+      console.log(
+        `[Stage 2: HF LLM Success] model=${model} replyLength=${text.length}`,
+      );
+      return text;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const modelLevel = isHfLlmModelAvailabilityError(error);
+      failures.push(`${model}: ${detail}`);
+
+      const nextModel = index < HF_LLM_MODELS.length - 1 ? HF_LLM_MODELS[index + 1] : null;
+      if (modelLevel && nextModel) {
+        console.warn(`[Stage 2: HF LLM Fallback] ${detail} — retrying with ${nextModel}`);
+        continue;
+      }
+
+      // Anything that isn't about model availability (bad key, quota, HF 5xx,
+      // timeout) fails the stage immediately.
+      if (!modelLevel) {
+        const wrapped = new Error(`LLM Error: ${detail}`);
+        console.error(`[Stage 2: HF LLM Error] ${wrapped.message}`);
+        throw wrapped;
+      }
+      break;
+    }
+  }
+
+  // Every id in the chain hit a model-level failure — report all of them so the
+  // operator can tell "HF dropped this model" from "this key lacks access".
+  const wrapped = new Error(
+    `LLM Error: no HF LLM model could answer (tried ${HF_LLM_MODELS.join(", ")}) — ${failures.join(" | ")}`,
+  );
+  console.error(`[Stage 2: HF LLM Error] ${wrapped.message}`);
+  throw wrapped;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stage 3 — direct formatting safety net (ZERO-FAILURE)              */
 /* ------------------------------------------------------------------ */
 
 /** Practical treatment + prevention lines for the built-in formatter. */
@@ -1206,13 +1415,11 @@ function adviceForLabel(label: string): DirectAdvice {
 }
 
 /**
- * Zero-failure safety net: builds a clean, concise Arabic Markdown diagnosis
- * card directly from the Step 1 label + confidence, with practical general
- * advice. Used ONLY when Step 1 succeeded but Step 2 (Gemini) failed or is
- * unavailable — the request then answers 200 with `{ source: "direct" }`
- * instead of a 500. When Step 1 failed TOO (image sent, no diagnosis), the
- * basic-mode replies below answer instead — that is the one case the client
- * shows its amber fallback warning.
+ * Zero-failure safety net (Stage 3): builds a clean, concise Arabic Markdown
+ * diagnosis card directly from the Step 1 label + confidence, with practical
+ * general advice. Used ONLY when Step 1 succeeded but the entire 3-stage LLM
+ * chain failed or is unavailable — the request then answers 200 with
+ * `{ source: "direct" }` instead of a 500.
  */
 function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
   const pct = Math.round(diagnosis.confidence * 100);
@@ -1223,7 +1430,7 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   const footer =
-    "> ⚠️ بطاقة تشخيص تلقائية مبنية مباشرة على نموذج الرؤية (ViT) — نموذج اللغة غير متاح حالياً.";
+    "> ⚠️ بطاقة تشخيص تلقائية مبنية مباشرة على نموذج الرؤية — خدمة النصوص الذكية غير متاحة حالياً.";
 
   if (diagnosis.healthy) {
     const lines = [
@@ -1259,7 +1466,7 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Safety net (text-only) — basic-mode replies (ZERO-FAILURE)         */
+/*  Stage 3 (text-only) — basic-mode replies (ZERO-FAILURE)            */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -1324,12 +1531,12 @@ function isGreetingMessage(message: string): boolean {
 }
 
 /**
- * Friendly basic-mode text reply used when Step 2 (Gemini) is unavailable on
- * a request without a usable diagnosis. Greets back simple salutations
- * ("هلا"، "مرحبا"، "السلام عليكم"…) and asks how to help with the farm;
- * otherwise explains the basic mode and invites crop symptoms or a leaf
- * photo (which Step 1 + the direct formatter can still handle without the
- * LLM).
+ * Friendly basic-mode text reply used when the whole LLM chain (Stage 1
+ * Gemini + Stage 2 Hugging Face) is unavailable on a request without a usable
+ * diagnosis. Greets back simple salutations ("هلا"، "مرحبا"، "السلام عليكم"…)
+ * and asks how to help with the farm; otherwise explains the basic mode and
+ * invites crop symptoms or a leaf photo (which Step 1 + the direct formatter
+ * can still handle without the LLM).
  */
 function buildTextFallbackReply(message: string): string {
   if (isGreetingMessage(message)) {
@@ -1345,7 +1552,7 @@ function buildTextFallbackReply(message: string): string {
     "المستشار الذكي يعمل حالياً في **الوضع الأساسي** — خدمة النصوص الذكية غير متاحة مؤقتاً.",
     "مع ذلك نقدر نعاونك:",
     "- صف لي أعراض محصولك: نوع النبتة، شكل البقع أو الاصفرار، الولاية، وآخر معالجة.",
-    "- أو أرفق صورة واضحة لورقة مصابة — نموذج الرؤية (ViT) يشخّصها ويقدم خطة علاج مباشرة حتى في الوضع الأساسي.",
+    "- أو أرفق صورة واضحة لورقة مصابة — نموذج الرؤية يشخّصها ويقدم خطة علاج مباشرة حتى في الوضع الأساسي.",
   ].join("\n");
 }
 
@@ -1357,16 +1564,18 @@ const VISION_UNAVAILABLE_NOTE = [
 ].join("\n");
 
 /* ------------------------------------------------------------------ */
-/*  Handler — fail-proof chain + direct-formatting fallbacks           */
+/*  Handler — fail-proof 3-stage chain + direct-formatting fallbacks   */
 /* ------------------------------------------------------------------ */
 
 /**
- * Fail-proof pipeline body. Every upstream step is non-fatal:
- * - Step 1 (vision) failure → warning, continue through Step 2 (Gemini can
- *   still answer the text part) or straight to the safety net.
- * - Step 2 (Gemini) failure, timeout, or missing `GEMINI_API_KEY` → warning,
- *   answer 200 from the built-in safety net: diagnosis card when Step 1
- *   succeeded, friendly basic-mode text otherwise.
+ * Fail-proof pipeline body. Every upstream stage is non-fatal:
+ * - Step 1 (vision) failure → warning, continue through Stage 1/2 (an LLM can
+ *   still answer the text part) or straight to the Stage 3 direct replies.
+ * - Stage 1 (Gemini) failure, timeout, or missing `GEMINI_API_KEY` → warning,
+ *   fall through to Stage 2 (the Hugging Face LLM chain).
+ * - Stage 2 (Hugging Face) failure or missing `HUGGINGFACE_API_KEY` → warning,
+ *   answer 200 from the Stage 3 built-in formatters: diagnosis card when
+ *   Step 1 succeeded, friendly basic-mode text otherwise.
  * - The only non-200 responses left are client input errors (400/413) and
  *   the explicit server misconfiguration signal (503 + MISSING_KEYS, emitted
  *   only when NEITHER provider key is configured) — never an HTTP 500.
@@ -1405,10 +1614,10 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Server-only secrets — never exposed to the client bundle. Read on every
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
-  //   GEMINI_API_KEY        → Step 2, the SOLE LLM (final response generator).
-  //   HUGGINGFACE_API_KEY   → Step 0 leaf detection + Step 1 ViT vision
-  //                           (HF_TOKEN / HGF_TOKEN, the conventional Hugging
-  //                           Face names, are honoured as aliases).
+  //   GEMINI_API_KEY        → Stage 1, the primary LLM.
+  //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
+  //                           (HF_TOKEN, Hugging Face's own conventional
+  //                           variable name, is honoured as an alias).
   const configuredGeminiKey = process.env.GEMINI_API_KEY;
   const geminiKey = configuredGeminiKey?.trim() || null;
   // Keep the fetch URL's required process.env.GEMINI_API_KEY interpolation
@@ -1422,7 +1631,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
     // contract no longer includes any HTTP 500). The UI shows its dedicated
     // "assistant unavailable" notice for code MISSING_KEYS. With either key
-    // present the route still answers: the steps below degrade gracefully.
+    // present the route still answers: the stages below degrade gracefully.
     return NextResponse.json(
       { error: "API keys missing on server", code: "MISSING_KEYS" },
       { status: 503 },
@@ -1441,9 +1650,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   /** What actually reaches Step 1: the Step 0 crop or the original image. */
   let classifyImage: AssistantImagePayload | null = image ?? null;
 
-  // Step 1: field-trained ViT vision classification (when image attached).
-  // Non-fatal: a vision outage (or a missing HF key) degrades to Gemini /
-  // the safety net instead of failing the request.
+  // Step 1: Hugging Face MobileNet vision classification (when image attached).
+  // Non-fatal: a vision outage (or a missing HF key) degrades to the LLM /
+  // direct replies instead of failing the request.
   let diagnosis: AssistantDiagnosis | null = null;
   if (image) {
     const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
@@ -1452,7 +1661,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 
     if (!huggingfaceKey) {
       const detail =
-        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN / HGF_TOKEN unset too) — vision step skipped.";
+        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
       console.warn(`[Step 1: HF Skipped] ${detail}`);
       warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
     } else {
@@ -1471,40 +1680,63 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // One user turn for Step 2: user query + Firestore profile context
-  // (Wilaya, crop type, role) + the Step 1 ViT vision diagnosis (disease
-  // label, confidence score, differential candidates) whenever it exists.
+  // One user turn for both LLM stages: user query + Firestore profile context
+  // (Wilaya, crop type, role) + the Step 1 MobileNet vision diagnosis (disease
+  // label, confidence score, candidate diseases) whenever it exists.
   const userContent = buildUserContent(message, context, diagnosis);
-  // Recent conversation turns (client-sent) → the smart-memory context that
-  // lets Gemini build on the previous turns instead of rehashing them.
-  const history = sanitizeHistory(body.history);
 
-  // ---- Step 2: Google Gemini — SOLE LLM, final response generator ---
+  // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
   // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
   // the Generative Language REST API, keyed with GEMINI_API_KEY and bounded
-  // by a shared 18 s AbortController. Non-fatal: on any failure (or a
-  // missing key) the built-in safety net answers below.
+  // by a shared 18 s AbortController. Non-fatal: on any failure (or a missing
+  // key) the request walks to Stage 2.
   let reply: string | null = null;
   if (geminiKey) {
     try {
-      const geminiResult = await generateWithGemini(userContent, history);
+      const geminiResult = await generateWithGemini(userContent);
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
       // client — the operator should see that the primary is gone.
       warnings.push(...geminiResult.warnings);
       console.log(
-        `[Step 2: Gemini Success] model=${geminiResult.model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} historyTurns=${history.length} replyLength=${reply.length}`,
+        `[Stage 1: Gemini Success] model=${geminiResult.model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      console.warn(`[Step 2: Gemini Unavailable → Direct] ${detail}`);
-      warnings.push(`Step 2 Gemini unavailable — ${detail}`.slice(0, 400));
+      console.warn(`[Stage 1: Gemini Unavailable → Stage 2] ${detail}`);
+      warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
     }
   } else {
-    const detail = "GEMINI_API_KEY is not configured — skipping the LLM step.";
-    console.warn(`[Step 2: Gemini Skipped] ${detail} → built-in formatter`);
-    warnings.push(`Step 2 Gemini unavailable — ${detail}`.slice(0, 400));
+    const detail = "GEMINI_API_KEY is not configured — skipping the primary LLM.";
+    console.warn(`[Stage 1: Gemini Skipped] ${detail} → Stage 2 (Hugging Face LLM chain)`);
+    warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
+  }
+
+  // ---- Stage 2: Hugging Face LLM fallback chain ---------------------
+  // Runs only when Stage 1 produced nothing: the open Qwen chain through the
+  // Inference Providers router, same system prompt and the same user turn
+  // (query + profile + Step 1 vision context). Non-fatal: on total LLM
+  // failure Stage 3 answers locally with 200.
+  if (reply === null) {
+    if (huggingfaceKey) {
+      try {
+        reply = await askHfLlmStrict(huggingfaceKey, userContent);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
+        console.warn(`[Stage 2: HF LLM Unavailable → Stage 3] ${detail}`);
+        warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
+      }
+    } else {
+      // No Hugging Face token anywhere in the environment → skip the stage
+      // synchronously (no request, no throw, no timer) and let Stage 3
+      // answer right away.
+      const detail =
+        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — skipping the fallback LLM.";
+      console.warn(`[Stage 2: HF LLM Skipped] ${detail} → Stage 3 (built-in formatter)`);
+      warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
+    }
   }
 
   if (reply !== null) {
@@ -1518,19 +1750,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json(payload);
   }
 
-  // ---- Safety net: direct formatting, zero-failure -------------------
-  // Step 2 is down: answer 200 from the built-in TypeScript formatters.
+  // ---- Stage 3: direct formatting, zero-failure ----------------------
+  // Both LLM stages are down: answer 200 from the built-in TypeScript
+  // formatters.
   let directReply: string;
   if (diagnosis) {
     // Image + successful vision → concise Arabic Markdown diagnosis card.
-    // (The client does NOT show its amber fallback warning here: the
-    // classification succeeded, only the LLM was missing.)
     directReply = buildDirectDiagnosisCard(diagnosis);
   } else if (image) {
     // Image but vision failed too → basic-mode text (when a message exists)
-    // plus a clear note about the photo analysis being unavailable. THIS is
-    // the "both classification and Gemini failed completely" case that
-    // surfaces the client's amber fallback warning.
+    // plus a clear note about the photo analysis being unavailable.
     directReply = message
       ? `${buildTextFallbackReply(message)}\n\n${VISION_UNAVAILABLE_NOTE}`
       : VISION_UNAVAILABLE_NOTE;
@@ -1538,7 +1767,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     // Text-only → friendly basic-mode reply (greeting-aware).
     directReply = buildTextFallbackReply(message);
   }
-  warnings.push("Reply formatted locally — the AI stages were unavailable.");
+  warnings.push("Reply formatted locally — no upstream AI stage was available.");
 
   const payload: AssistantResponseBody = {
     reply: directReply,
