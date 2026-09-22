@@ -28,19 +28,20 @@
  *   Step 1 — Vision Model Cascade (when an image is attached):
  *     Hugging Face Serverless Inference API cascade, non-blocking after
  *     Step 0 cropping:
- *       Step 1a — PRIMARY Field-Trained Vision Model (e.g.
- *         `dima806/plant_disease_image_detection` or `fxmeng/plantdoc-vit`):
- *         high-accuracy field-trained HF model, bounded by a strict 4 s
- *         timeout (>4s → immediate fallback). ViT trained on real field
- *         imagery (PlantDoc / field datasets) — the most accurate leaf
- *         classifier in the cascade.
+ *       Step 1a — PRIMARY Vision Model:
+ *         `nateraw/vit-base-patch16-224-in21k-plant-disease` — a Vision
+ *         Transformer (ViT base, patch16, 224 px, ImageNet-21k pre-trained)
+ *         fine-tuned for plant-disease classification. It is queried FIRST
+ *         for every image, bounded by a strict 4 s timeout
+ *         (>4s → immediate fallback to the MobileNetV2 baseline).
  *       Step 1b — SECONDARY Fallback Model (KEPT INTACT):
  *         `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
  *         — the CURRENT baseline MobileNetV2 PlantVillage classifier is NOT
  *         removed or overwritten; plus `wambugu71/crop_leaf_diseases_vit`
- *         tertiary. If the Primary fails, times out (>4s), or returns an
- *         error (503/530 loading, 4xx/5xx, network), the request seamlessly
- *         routes to this baseline. Both models parse the returned array to
+ *         tertiary. If the Primary ViT fails, times out (>4s), or returns an
+ *         error (HTTP 400/503, 503/530 model loading, other 4xx/5xx,
+ *         network), the request seamlessly routes to this MobileNetV2
+ *         baseline. Both models parse the returned array to
  *         extract the primary predicted disease class + confidence percentage
  *         + candidate diseases. Handles 503/530 loading with a clear message.
  *         Non-fatal: a vision outage is recorded in `warnings[]` and the
@@ -75,8 +76,8 @@
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
- *     — the MobileNet vision diagnosis (disease label, confidence score and
- *     candidate diseases).
+ *     — the Step 1 vision diagnosis (disease label, confidence score and
+ *     candidate diseases) from the ViT primary or the MobileNetV2 baseline.
  *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
  *     answer ships together with a Step 1 diagnosis) carrying Gemini's
  *     generated Arabic reply.
@@ -184,17 +185,19 @@ export const maxDuration = 60;
  * Vision Model Cascade — PlantVillage classifiers on the HF Inference API,
  * tried in order. Implements the EXACT cascade required by spec:
  *
- *   Step 1a — PRIMARY Field-Trained Vision Model: high-accuracy field-trained
- *     HF model via HF Serverless Inference API. Examples:
- *     `dima806/plant_disease_image_detection` (ViT trained on real field data)
- *     or `fxmeng/plantdoc-vit` (ViT trained on PlantDoc). Bounded by a tight
- *     4 s timeout — if it fails, times out, or returns error, we seamlessly
- *     route to the secondary.
+ *   Step 1a — PRIMARY Vision Model (queried FIRST):
+ *     `nateraw/vit-base-patch16-224-in21k-plant-disease` — a Vision
+ *     Transformer (ViT base, patch16, 224 px, ImageNet-21k pre-trained)
+ *     fine-tuned on the PlantVillage plant-disease dataset, served via the
+ *     HF Serverless Inference API. Bounded by a tight 4 s timeout — if it
+ *     fails, times out (>4s), or returns HTTP 400/503 (or any other error),
+ *     the request seamlessly routes to the secondary baseline.
  *
  *   Step 1b — SECONDARY Fallback Model (KEPT INTACT): the CURRENT baseline
  *     classifier `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
  *     is NOT removed or overwritten. It is the reliable fallback when the
- *     primary is cold, loading, or unavailable.
+ *     primary ViT is cold, loading, timed out, erroring (400/503/…), or
+ *     otherwise unavailable.
  *
  *   Tertiary — `wambugu71/crop_leaf_diseases_vit` kept as warm fallback for
  *     extra resilience.
@@ -202,11 +205,11 @@ export const maxDuration = 60;
  * Environment override: `HF_VISION_PRIMARY_MODELS` (comma-separated) or
  * `HF_VISION_MODEL` / `HF_PRIMARY_VISION_MODEL` single id. When set, the
  * custom primary id(s) replace the default primary while the fallback chain
- * (baseline + tertiary) is ALWAYS preserved — the baseline is never dropped.
+ * (baseline + tertiary) is ALWAYS preserved — the MobileNetV2 baseline is
+ * never dropped.
  */
 export const HF_VISION_PRIMARY_MODELS = [
-  "dima806/plant_disease_image_detection",
-  "fxmeng/plantdoc-vit",
+  "nateraw/vit-base-patch16-224-in21k-plant-disease",
 ] as const;
 
 export const HF_VISION_FALLBACK_MODELS = [
@@ -607,8 +610,8 @@ const UPSTREAM_TIMEOUT_MS = 25_000;
  * `HF_VISION_PRIMARY_MODELS` (comma-separated), `HF_VISION_MODEL`, or
  * `HF_PRIMARY_VISION_MODEL` env overrides for the primary — the fallback
  * baseline is always appended intact so the cascade never loses it.
- * Primary models are the field-trained ones; fallback is the mobilenet
- * baseline + ViT kept intact.
+ * Primary is the nateraw ViT plant-disease id (queried first); fallback is
+ * the MobileNetV2 baseline + ViT tertiary kept intact.
  */
 function resolveVisionModels(): readonly string[] {
   const raw =
@@ -699,12 +702,15 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 /**
  * Strict Step 1 — Vision Model Cascade: classify leaf image via Hugging Face.
  * Implements the EXACT cascade required by spec:
- *   Step 1a — PRIMARY field-trained HF model (e.g. dima806/plant_disease_image_detection
- *     or fxmeng/plantdoc-vit) via HF Serverless Inference API, bounded by
- *     VISION_PRIMARY_TIMEOUT_MS (4 s). High-accuracy ViT trained on real field data.
+ *   Step 1a — PRIMARY vision model, queried FIRST:
+ *     nateraw/vit-base-patch16-224-in21k-plant-disease (Vision Transformer,
+ *     base patch16 224, ImageNet-21k pre-train, fine-tuned for plant disease)
+ *     via HF Serverless Inference API, bounded by VISION_PRIMARY_TIMEOUT_MS (4 s).
  *   Step 1b — SECONDARY fallback (KEPT INTACT): linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification
  *     (the CURRENT baseline MobileNetV2) + wambugu71/crop_leaf_diseases_vit tertiary.
- *     If Primary fails, times out (>4s), or returns error, seamlessly routes to Secondary.
+ *     If the Primary ViT fails, times out (>4s), or returns an error
+ *     (HTTP 400/503, 503/530 loading, other 4xx/5xx, network), the request
+ *     seamlessly routes to this MobileNetV2 baseline.
  * - Sends the raw image bytes (cropped by Step 0 when available) to the plant-disease model.
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message and walks the cascade.
@@ -723,8 +729,9 @@ async function classifyPlantImageStrict(
   let loadingEstimate: number | null = null;
 
   const models = resolveVisionModels();
-  // Primary count is the number of field-trained ids before the fallback.
-  // Default: HF_VISION_PRIMARY_MODELS.length (2). When env overrides, it's the custom id count.
+  // Primary count is the number of primary ids before the fallback.
+  // Default: HF_VISION_PRIMARY_MODELS.length (1 — the nateraw ViT). When env
+  // overrides, it's the custom id count.
   const envRaw =
     process.env.HF_VISION_PRIMARY_MODELS?.trim() ||
     process.env.HF_VISION_MODEL?.trim() ||
@@ -948,7 +955,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   return [
-    "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
+    `نتيجة نموذج الرؤية (PlantVillage — ${diagnosis.model}) على صورة المستخدم:`,
     `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
     `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
     alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
@@ -963,7 +970,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 /**
  * Builds the single user turn shared by Stage 1 (Gemini `contents`) and
  * Stage 2 (HF `messages[1]`): Firestore profile context (Wilaya, crop, role,
- * language, name) + the Step 1 MobileNet vision diagnosis (disease label,
+ * language, name) + the Step 1 vision diagnosis (disease label,
  * confidence score and candidate diseases) when one is available + the user's
  * own query. Keeping one builder guarantees the fallback LLM answers from
  * exactly the same context the primary was given.
@@ -1045,7 +1052,7 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
  * One `models.generateContent` round-trip against a single Gemini id:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
  *   • `contents[0].parts[0].text` — the user query + profile context + the
- *     Step 1 MobileNet vision diagnosis (label, confidence, candidates);
+ *     Step 1 vision diagnosis (label, confidence, candidates);
  *   • `generationConfig` — the sampling params plus the model's own
  *     `thinkingConfig` ({@link GeminiModel.thinking}).
  *
@@ -1887,7 +1894,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   /** What actually reaches Step 1: the Step 0 crop or the original image. */
   let classifyImage: AssistantImagePayload | null = image ?? null;
 
-  // Step 1: Hugging Face MobileNet vision classification (when image attached).
+  // Step 1: Hugging Face vision cascade — nateraw ViT primary → MobileNetV2 baseline (when image attached).
   // Non-fatal: a vision outage (or a missing HF key) degrades to the LLM /
   // direct replies instead of failing the request.
   let diagnosis: AssistantDiagnosis | null = null;
@@ -1918,7 +1925,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
 
   // One user turn for both LLM stages: user query + Firestore profile context
-  // (Wilaya, crop type, role) + the Step 1 MobileNet vision diagnosis (disease
+  // (Wilaya, crop type, role) + the Step 1 vision diagnosis (disease
   // label, confidence score, candidate diseases) whenever it exists.
   const userContent = buildUserContent(message, context, diagnosis);
 

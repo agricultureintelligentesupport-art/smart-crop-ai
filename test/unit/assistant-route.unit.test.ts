@@ -497,9 +497,9 @@ test("Stage 1 receives the Step 1 MobileNet diagnosis (label, confidence, candid
       geminiUser = geminiUserText(parseGeminiBody(init));
       return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
     }
-    // Step 1 — Vision Model Cascade: PRIMARY field-trained (dima806/plant_disease_image_detection
-    // or fxmeng/plantdoc-vit) or SECONDARY baseline (mobilenet) on Hugging Face.
-    // The cascade tries the primary first (4 s timeout) then the baseline — Step 1b is KEPT INTACT.
+    // Step 1 — Vision Model Cascade: PRIMARY nateraw ViT plant-disease model
+    // (queried first, 4 s timeout) or SECONDARY baseline (MobileNetV2) on
+    // Hugging Face — Step 1b is KEPT INTACT.
     assert.ok(isVisionUrl(String(url)));
     assert.ok(isClassifyUrl(String(url)), `vision url should be a classifier endpoint: ${url}`);
     assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
@@ -1533,6 +1533,141 @@ test("strict pipeline: HF parses the returned array to extract the primary class
 });
 
 /* ------------------------------------------------------------------ */
+/*  Step 1 — Vision cascade: nateraw ViT primary, MobileNetV2 fallback  */
+/* ------------------------------------------------------------------ */
+
+/** The mandated Step 1 cascade ids, mirrored from the route's constants. */
+const VISION_PRIMARY_MODEL = "nateraw/vit-base-patch16-224-in21k-plant-disease";
+const VISION_FALLBACK_MODEL =
+  "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification";
+
+/** The classifier id a Step 1 hf-inference round-trip targeted. */
+const visionModelId = (url: string) => /hf-inference\/models\/(.+)$/.exec(url)?.[1];
+
+test("Step 1 queries the nateraw ViT plant-disease model FIRST as the primary classifier", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isGeminiUrl(String(url))) return geminiReply("تشخيص النموذج الأساسي.");
+    return Response.json([
+      { label: "Tomato___Early_blight", score: 0.95 },
+      { label: "Tomato___Late_blight", score: 0.03 },
+    ]);
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  // The PRIMARY ViT answered — the MobileNetV2 baseline was never needed.
+  assert.deepEqual(urls.filter(isVisionUrl).map(visionModelId), [VISION_PRIMARY_MODEL]);
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
+});
+
+for (const [name, primaryFailure] of [
+  [
+    "HTTP 503 model loading",
+    () =>
+      Response.json(
+        { error: `Model ${VISION_PRIMARY_MODEL} is currently loading`, estimated_time: 11.2 },
+        { status: 503 },
+      ),
+  ],
+  [
+    "HTTP 400 bad request",
+    () => Response.json({ error: "Input could not be processed" }, { status: 400 }),
+  ],
+  [
+    "a network error",
+    () => {
+      throw new TypeError("fetch failed");
+    },
+  ],
+] as const) {
+  test(`Step 1 fallback: primary ViT ${name} seamlessly routes to the MobileNetV2 baseline`, async () => {
+    configureKeys();
+    const models: (string | undefined)[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isGeminiUrl(String(url))) return geminiReply("تشخيص الاحتياطي.");
+      const model = visionModelId(String(url));
+      models.push(model);
+      if (model === VISION_PRIMARY_MODEL) return primaryFailure();
+      // The MobileNetV2 baseline answers — KEPT INTACT as the Step 1b fallback.
+      assert.equal(model, VISION_FALLBACK_MODEL);
+      return Response.json([{ label: "Tomato___Late_blight", score: 0.91 }]);
+    });
+
+    const response = await POST(request(true));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "hybrid");
+    // ViT primary tried FIRST, then the intact MobileNetV2 fallback — in order.
+    assert.deepEqual(models, [VISION_PRIMARY_MODEL, VISION_FALLBACK_MODEL]);
+    assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
+    assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 91);
+    // The cascade absorbed the primary failure: no Step 1 outage warning.
+    assert.doesNotMatch(warningText(payload), /Step 1 vision unavailable/);
+  });
+}
+
+test("Step 1 fallback: a primary ViT timeout (>4 s) routes to the MobileNetV2 baseline", async () => {
+  configureKeys();
+  const models: (string | undefined)[] = [];
+  // The route bounds the PRIMARY with a tight 4 s `AbortSignal.timeout`
+  // signal. node:test's mock timers cannot drive AbortSignal.timeout, so
+  // swap it for controllable signals and fire the primary's one ourselves —
+  // exactly what the route's 4 s deadline does when the ViT hangs.
+  const timeoutSignals: AbortController[] = [];
+  mock.method(AbortSignal, "timeout", () => {
+    const controller = new AbortController();
+    timeoutSignals.push(controller);
+    return controller.signal;
+  });
+  let primaryAborted = false;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) return geminiReply("بعد انتهاء المهلة.");
+    const model = visionModelId(String(url));
+    models.push(model);
+    if (model === VISION_PRIMARY_MODEL) {
+      // Hangs forever — only the route's timeout signal can cut it short.
+      const signal = init.signal as AbortSignal;
+      assert.ok(signal instanceof AbortSignal);
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          primaryAborted = true;
+          reject(signal.reason ?? new Error("aborted"));
+        });
+      });
+    }
+    // The MobileNetV2 baseline answers — KEPT INTACT as Step 1b.
+    return Response.json([{ label: "Tomato___Early_blight", score: 0.93 }]);
+  });
+
+  const pending = POST(request(true));
+  // Wait until the handler reaches the hanging PRIMARY round-trip.
+  for (let attempt = 0; attempt < 200 && models.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(models, [VISION_PRIMARY_MODEL], "the MobileNetV2 fallback ran before the primary timed out");
+  assert.equal(primaryAborted, false);
+  // The route's 4 s timeout signal fires (AbortSignal.timeout reason)…
+  assert.equal(timeoutSignals.length, 1);
+  timeoutSignals[0].abort(new DOMException("The operation timed out.", "TimeoutError"));
+  const response = await pending;
+
+  assert.equal(primaryAborted, true);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  // …and the cascade seamlessly routes to the MobileNetV2 baseline.
+  assert.deepEqual(models, [VISION_PRIMARY_MODEL, VISION_FALLBACK_MODEL]);
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.doesNotMatch(warningText(payload), /Step 1 vision unavailable/);
+});
+
+/* ------------------------------------------------------------------ */
 /*  Step 0 — leaf Detection & Cropping before the classifier           */
 /* ------------------------------------------------------------------ */
 
@@ -1557,10 +1692,10 @@ function imageRequest(data: string, mimeType = "image/jpeg") {
 /** Step 0 detector endpoints (DETR family on the hf-inference router). */
 const isDetectUrl = (url: string) =>
   url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
-/** Step 1 classifier endpoints (Vision Model Cascade: primary field-trained ViT + fallback MobileNetV2 / ViT). */
+/** Step 1 classifier endpoints (Vision Model Cascade: primary nateraw ViT plant-disease + fallback MobileNetV2 / ViT). */
 const isClassifyUrl = (url: string) =>
   url.includes("router.huggingface.co/hf-inference/models/") &&
-  /mobilenet|vit|dima806|plantdoc|plant_disease/i.test(url);
+  /mobilenet|vit|nateraw|plant_disease|plant-disease|plantdoc|dima806/i.test(url);
 
 /** Raw bytes body of an upstream call, base64-encoded for comparisons. */
 const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toString("base64");
