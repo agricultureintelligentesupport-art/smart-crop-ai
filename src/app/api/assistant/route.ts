@@ -45,8 +45,9 @@
  *         detection succeeded, the full frame otherwise.
  *         Env override: `HF_VISION_MODEL` (single id) replaces the default.
  *
- *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
- *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
+ *   Stage 1 — Google Gemini (`gemini-1.5-flash` — overridable with
+ *     `GEMINI_MODEL` — then `gemini-2.0-flash` → `gemini-2.5-flash` when an
+ *     id is retired) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
  *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
  *     (including comma-separated values) plus numbered variants such as
@@ -54,18 +55,20 @@
  *     shared 18 s `AbortController` deadline for the whole model chain (an
  *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
  *     so the previous 9 s window aborted healthy generations and pushed
- *     traffic onto the weaker fallbacks). Google retires model generations on a fast
- *     cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family
- *     Jun 2026, and both now answer 404 "is not found for API version
- *     v1beta" — so the model ids form a chain: a 404 / model-not-found
- *     walks to the next id within the remaining budget, while key/safety/
- *     network/timeout failures fail the current key immediately. Quota and
- *     transient server errors (HTTP 429/500/503) rotate to the next Gemini
- *     credential before the stage is declared unavailable. Each generation receives its own
- *     `thinkingConfig` — Gemini 3.x models take `thinkingLevel: "low"` and
- *     reject a numeric `thinkingBudget`, Gemini 2.5 takes
- *     `thinkingBudget: 0` and rejects `thinkingLevel` (the wrong parameter
- *     is a 400, so the payload is model-aware).
+ *     traffic onto the weaker fallbacks). The primary defaults to the stable
+ *     `gemini-1.5-flash` id — its free tier carries the generous
+ *     ~1,500 RPD / 15 RPM allowance, while the preview generations
+ *     (`gemini-3.5-flash`…) are throttled to ~20 RPD — and `GEMINI_MODEL`
+ *     pins a different primary (e.g. `gemini-2.0-flash`) without a code
+ *     change. Google still retires model generations on a fast cadence, so
+ *     the model ids form a chain: a 404 / model-not-found walks to the next
+ *     id within the remaining budget, while key/safety/network/timeout
+ *     failures fail the current key immediately. Quota and transient server
+ *     errors (HTTP 429/500/503) rotate to the next Gemini credential before
+ *     the stage is declared unavailable. The payload is generation-aware:
+ *     Gemini 2.5 takes `thinkingBudget: 0`, while the 1.5/2.0 generations
+ *     predate thinking and receive NO `thinkingConfig` (the wrong parameter
+ *     is a 400).
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
@@ -464,26 +467,53 @@ async function runLeafDetectionStage(
 /* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
 
 /**
- * Stage 1 model chain, in order. Google retires whole generations on a fast
- * cadence — the 1.5 family shut down Sep 2025 and the 2.0 flash family Jun
- * 2026 (both now 404 "is not found for API version v1beta"), and
- * `gemini-2.5-flash` is next in line — so a single hardcoded id is a time
- * bomb: a retired id's fast 404 walks the chain to the next id within the
- * remaining Stage-1 budget.
- *
- * `thinking` carries the per-generation `thinkingConfig`, because each
- * generation rejects the other's parameter with 400 INVALID_ARGUMENT:
- * Gemini 3.x models take a qualitative `thinkingLevel` (2.5 rejects it —
- * "Thinking level is not supported for this model"), while Gemini 2.5 takes
- * a numeric `thinkingBudget` (`0` = skip the reasoning pass, answer-first).
+ * The stable Gemini id Stage 1 defaults to. The preview generations
+ * (`gemini-3.5-flash` and friends) are throttled to a strict ~20 RPD
+ * free-tier quota, which normal usage exhausts almost immediately; the
+ * stable `gemini-1.5-flash` id carries the generous free-tier allowance
+ * (~1,500 RPD / 15 RPM). `GEMINI_MODEL` overrides the primary at request
+ * time (e.g. to pin `gemini-2.0-flash`, which shares the same free-tier
+ * quota bucket); the fallback ids below still catch a retired or mistyped
+ * override.
  */
-const GEMINI_MODELS = [
-  { id: "gemini-3.5-flash", thinking: { thinkingLevel: "low" } },
-  { id: "gemini-3.5-flash-lite", thinking: { thinkingLevel: "low" } },
-  { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
-] as const;
+const GEMINI_MODEL_DEFAULT = "gemini-1.5-flash";
 
-type GeminiModel = (typeof GEMINI_MODELS)[number];
+/**
+ * Stage 1 model chain entry. `thinking` carries the per-generation
+ * `thinkingConfig` — OPTIONAL, because each generation 400s on the wrong
+ * shape: Gemini 2.5 takes a numeric `thinkingBudget` (`0` = skip the
+ * reasoning pass, answer-first), while the stable 1.5/2.0 Flash ids (and
+ * unknown `GEMINI_MODEL` overrides) predate thinking entirely and reject
+ * the parameter — `undefined` means "send no `thinkingConfig` at all".
+ */
+interface GeminiModel {
+  id: string;
+  thinking?: { thinkingLevel: "low" } | { thinkingBudget: number };
+}
+
+/**
+ * Built-in fallback ids walked (within the remaining Stage-1 budget) when
+ * the primary answers 404 / model-not-found — a retired or mistyped id
+ * never kills the stage while a successor can still answer.
+ */
+const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
+  { id: "gemini-2.0-flash" },
+  { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
+];
+
+/**
+ * Resolve the ordered Stage-1 model chain at request time: the
+ * `GEMINI_MODEL` override (whitespace-trimmed) or
+ * {@link GEMINI_MODEL_DEFAULT} first, then the built-in fallback ids —
+ * deduplicated, so pinning an id that is also a fallback never doubles it.
+ * Reading the environment per request (like the Gemini key pool) lets a
+ * deployment switch models without a restart; tests can override it too.
+ */
+function resolveGeminiModels(): GeminiModel[] {
+  const override = process.env.GEMINI_MODEL?.trim();
+  const primary: GeminiModel = { id: override || GEMINI_MODEL_DEFAULT };
+  return [primary, ...GEMINI_FALLBACK_MODELS.filter((model) => model.id !== primary.id)];
+}
 
 /**
  * Stage 1 hard timeout for the WHOLE model chain: 18 s. A full Arabic
@@ -502,7 +532,7 @@ const GEMINI_TIMEOUT_MS = 18_000;
 /**
  * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
- * the per-model thinking config (`thinkingLevel: "low"` on Gemini 3.x,
+ * the per-generation thinking payload (no `thinkingConfig` on 1.5/2.0,
  * `thinkingBudget: 0` on 2.5) keeps the model in fast, answer-first mode so
  * the 18 s budget is spent on the reply.
  */
@@ -1000,7 +1030,8 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
  *     HYBRID PRIMARY PATH (with a MobileNetV2 verdict) or FALLBACK A (raw
  *     image inspected independently);
  *   • `generationConfig` — the sampling params plus the model's own
- *     `thinkingConfig` ({@link GeminiModel.thinking}).
+ *     `thinkingConfig` when its generation supports one
+ *     ({@link GeminiModel.thinking}).
  *
  * Throws {@link GeminiError} on every failure mode (status kept for the
  * chain-walk decision); a fetch aborted by the shared signal is reported as
@@ -1041,11 +1072,11 @@ async function generateWithGeminiModel(
             temperature: 0.4,
             topP: 0.9,
             maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-            // Answer-first latency, per generation: Gemini 3.x →
-            // thinkingLevel "low", Gemini 2.5 → thinkingBudget 0. Each
-            // generation 400s the other's parameter, so spread the model's
-            // own config instead of hardcoding one shape.
-            thinkingConfig: { ...model.thinking },
+            // Answer-first latency, per generation: Gemini 2.5 →
+            // thinkingBudget 0; the stable 1.5/2.0 ids (and unknown
+            // GEMINI_MODEL overrides) predate thinking and 400 on the
+            // parameter, so they get NO thinkingConfig at all.
+            ...(model.thinking ? { thinkingConfig: { ...model.thinking } } : {}),
           },
         }),
       },
@@ -1109,7 +1140,8 @@ interface GeminiResult {
  *
  * POSTs to
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
- * walking {@link GEMINI_MODELS} in order — starting at `gemini-3.5-flash`.
+ * walking the per-request chain from {@link resolveGeminiModels} in order —
+ * starting at `gemini-1.5-flash` (or the `GEMINI_MODEL` override).
  *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
@@ -1137,10 +1169,14 @@ async function generateWithGeminiForKey(
   const deadline = Date.now() + GEMINI_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
+  // Resolve the chain once per request so a `GEMINI_MODEL` change is picked
+  // up without a restart (same convention as the Gemini key pool).
+  const models = resolveGeminiModels();
+
   try {
     const failures: string[] = [];
     const warnings: string[] = [];
-    for (const [index, model] of GEMINI_MODELS.entries()) {
+    for (const [index, model] of models.entries()) {
       // Only reachable after fast 404 walks that consumed the window — no
       // budget left for another round-trip.
       if (Date.now() >= deadline) break;
@@ -1165,7 +1201,7 @@ async function generateWithGeminiForKey(
           throw error;
         }
 
-        const next = GEMINI_MODELS[index + 1];
+        const next = models[index + 1];
         if (next) {
           warnings.push(`Stage 1 Gemini unavailable — ${error.message}`.slice(0, 400));
           console.warn(`[Stage 1: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
@@ -1178,7 +1214,7 @@ async function generateWithGeminiForKey(
     // report all of them so the operator can tell "Google retired these
     // models" from "this key lacks access".
     throw new GeminiError(
-      `no Gemini model could answer (tried ${GEMINI_MODELS.map((m) => m.id).join(", ")}) — ${failures.join(" | ")}`,
+      `no Gemini model could answer (tried ${models.map((m) => m.id).join(", ")}) — ${failures.join(" | ")}`,
     );
   } finally {
     clearTimeout(timer);
@@ -1914,7 +1950,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage));
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
-  // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
+  // gemini-1.5-flash or the GEMINI_MODEL override (→ 2.0-flash → 2.5-flash
+  // on a retired-id 404) via
   // the Generative Language REST API, keyed with the full Gemini key pool
   // (GEMINI_API_KEY + GEMINI_API_KEYS + numbered GEMINI_API_KEY_N — rotated
   // on 429 / RESOURCE_EXHAUSTED / quota) and bounded by a shared 18 s

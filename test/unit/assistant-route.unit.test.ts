@@ -14,10 +14,10 @@ const HF_KEY = "test-hf";
  */
 const GEMINI_TIMEOUT_MS = 18_000;
 
-/** Stage-1 model chain, in order — must mirror the route's GEMINI_MODELS. */
+/** Stage-1 model chain, in order — must mirror the route's resolveGeminiModels(). */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-2.0-flash",
   "gemini-2.5-flash",
 ] as const;
 
@@ -31,7 +31,7 @@ const GEMINI_FALLBACK_ORDER = [
  * model-chain overrides.
  */
 const SCRUBBED_ENV_PATTERN =
-  /^(GEMINI_API_KEY|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL)/;
+  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL)/;
 
 const originalKeys: Record<string, string | undefined> = {};
 for (const [name, value] of Object.entries(process.env)) {
@@ -351,7 +351,7 @@ test("keys are read per request, not when the route module loads", async () => {
 /*  Stage 1 — Google Gemini primary LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-3.5-flash with 200 { source: \"llm\" }", async () => {
+test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -375,7 +375,7 @@ test("Stage 1 answers from gemini-3.5-flash with 200 { source: \"llm\" }", async
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -383,13 +383,12 @@ test("Stage 1 answers from gemini-3.5-flash with 200 { source: \"llm\" }", async
   assert.ok(init.signal instanceof AbortSignal);
   assert.equal(init.signal?.aborted, false);
   assert.equal(new Headers(init.headers).get("Content-Type"), "application/json");
-  // The Gemini 3.x primary gets a qualitative thinking level — a numeric
-  // thinkingBudget would 400 on this generation.
-  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig?.thinkingLevel, "low");
-  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig?.thinkingBudget, undefined);
+  // The stable 1.5 primary predates thinking — NO thinkingConfig at all
+  // (either parameter shape would 400 on this generation).
+  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig, undefined);
 });
 
-test("Stage 1 keeps the gemini-3.5-flash endpoint when the API key rotates", async () => {
+test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -408,7 +407,7 @@ test("Stage 1 keeps the gemini-3.5-flash endpoint when the API key rotates", asy
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
     ),
   );
 });
@@ -610,10 +609,9 @@ test("Stage 1 sends the concise Arabic system instruction, the query and the pro
     typeof body.generationConfig?.maxOutputTokens === "number" &&
       body.generationConfig.maxOutputTokens <= 2048,
   );
-  // Answer-first thinking, model-aware: the Gemini 3.x primary takes
-  // thinkingLevel (2.5 would reject it with a 400).
-  assert.equal(body.generationConfig?.thinkingConfig?.thinkingLevel, "low");
-  assert.equal(body.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
+  // Answer-first payload, generation-aware: the stable 1.5 primary gets NO
+  // thinkingConfig (the generation predates thinking; the parameter 400s).
+  assert.equal(body.generationConfig?.thinkingConfig, undefined);
 });
 
 test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference (label, confidence, candidates) and answers hybrid", async () => {
@@ -924,14 +922,14 @@ test("Stage 1: a 429 quota error fails fast without walking the Gemini model cha
   assert.equal(requestedGeminiModel(geminiUrls[0]), GEMINI_FALLBACK_ORDER[0]);
 });
 
-test("Stage 1 sends each model generation its own thinking config (thinkingLevel for 3.x, thinkingBudget for 2.5)", async () => {
+test("Stage 1 sends each model generation its own thinking payload (none for 1.5/2.0, thinkingBudget for 2.5)", async () => {
   configureKeys();
   const bodies = new Map<string, GeminiRequestBody>();
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
       bodies.set(model, parseGeminiBody(init));
-      // 404 every 3.x id so the walk reaches the 2.5 model; it answers.
+      // 404 the 1.5/2.0 ids so the walk reaches the 2.5 model; it answers.
       const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
       return model === last
         ? geminiReply("اسقِ في الصباح الباكر.")
@@ -944,19 +942,88 @@ test("Stage 1 sends each model generation its own thinking config (thinkingLevel
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as AssistantPayload).source, "llm");
 
-  // Gemini 3.x: qualitative level, no numeric budget…
+  // Stable 1.5/2.0: NO thinkingConfig at all — those generations predate
+  // thinking and 400 on either parameter shape…
   for (const model of GEMINI_FALLBACK_ORDER.slice(0, -1)) {
-    const gemini3 = bodies.get(model);
-    assert.ok(gemini3, `no request body captured for ${model}`);
-    assert.equal(gemini3.generationConfig?.thinkingConfig?.thinkingLevel, "low");
-    assert.equal(gemini3.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
+    const stable = bodies.get(model);
+    assert.ok(stable, `no request body captured for ${model}`);
+    assert.equal(stable.generationConfig?.thinkingConfig, undefined);
   }
-  // …Gemini 2.5: numeric zero budget, no level (each 400s the other's).
+  // …Gemini 2.5: numeric zero budget (reasoning skipped, answer-first).
   const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
   const gemini25 = bodies.get(last);
   assert.ok(gemini25, `no request body captured for ${last}`);
   assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingBudget, 0);
   assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Stage 1 — GEMINI_MODEL primary override                             */
+/* ------------------------------------------------------------------ */
+
+test("GEMINI_MODEL overrides the Stage-1 primary model id (trimmed, single round-trip)", async () => {
+  configureKeys();
+  // Pin the alternate stable id with its generous free-tier quota; the
+  // padding proves the value is trimmed before use.
+  process.env.GEMINI_MODEL = " gemini-2.0-flash ";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+    return geminiReply("اسقِ في الصباح الباكر.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  // Exactly one round-trip against the override — the default primary is
+  // skipped and the override is not duplicated as its own fallback.
+  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash"]);
+});
+
+test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", async () => {
+  configureKeys();
+  process.env.GEMINI_MODEL = "gemini-2.0-flash";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isGeminiUrl(String(url))) {
+      const model = requestedGeminiModel(String(url)) ?? "";
+      return model === "gemini-2.0-flash"
+        ? geminiModelNotFound(model)
+        : geminiReply("اسقِ في الصباح الباكر.");
+    }
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  // The retired override 404s → the next fallback id answers (the override
+  // is deduplicated out of the fallback list, so no doubled attempt).
+  assert.deepEqual(urls.map(requestedGeminiModel), [
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+  ]);
+  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+});
+
+test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash default", async () => {
+  configureKeys();
+  process.env.GEMINI_MODEL = "   ";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+    return geminiReply("اسقِ في الصباح الباكر.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).source, "llm");
+  assert.deepEqual(urls.map(requestedGeminiModel), [GEMINI_FALLBACK_ORDER[0]]);
 });
 
 /* ------------------------------------------------------------------ */
