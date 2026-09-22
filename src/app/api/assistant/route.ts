@@ -7,13 +7,14 @@
  *
  *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
  *     free Hugging Face Inference router now ALSO runs an open-source object
- *     detector (DETR-ResNet-50 fine-tuned on PlantDoc, every one of its 30
- *     classes is a plant/leaf; the COCO `facebook/detr-resnet-50` with a
- *     plant-only label filter is the fallback id — the chain is overridable
- *     via `HF_LEAF_DETECT_MODELS`). The detected box is grown into a padded,
- *     clamped crop window and the photo is cropped server-side with sharp,
- *     so background noise (hands, soil, pots) NEVER reaches the PlantVillage
- *     classifier: Step 1 sees ONLY the cropped pixels. Strictly an accuracy
+ *     detector: the COCO `facebook/detr-resnet-50` (DETR-ResNet-50) with a
+ *     plant-only label filter is the primary id (the obsolete fine-tuned
+ *     PlantDoc checkpoint is gone — it no longer serves on the free router;
+ *     the chain stays overridable via `HF_LEAF_DETECT_MODELS`). The detected
+ *     box is grown into a padded, clamped crop window and the photo is
+ *     cropped server-side with sharp, so background noise (hands, soil, pots)
+ *     NEVER reaches the PlantVillage classifier: Step 1 sees ONLY the
+ *     cropped pixels. Strictly an accuracy
  *     pre-step — every failure mode is non-fatal and falls back to the
  *     untouched original frame (the exact pre-Step-0 behaviour): missing HF
  *     key, an undecodable image, an unreachable/loading detector, a payload
@@ -25,31 +26,24 @@
  *     sharp adds only a few tens of ms of decode/crop work; the whole stage
  *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
  *
- *   Step 1 — Vision Model Cascade (when an image is attached):
- *     Hugging Face Serverless Inference API cascade, non-blocking after
- *     Step 0 cropping:
- *       Step 1a — PRIMARY Field-Trained Vision Model (e.g.
- *         `dima806/plant_disease_image_detection` or `fxmeng/plantdoc-vit`):
- *         high-accuracy field-trained HF model, bounded by a strict 4 s
- *         timeout (>4s → immediate fallback). ViT trained on real field
- *         imagery (PlantDoc / field datasets) — the most accurate leaf
- *         classifier in the cascade.
- *       Step 1b — SECONDARY Fallback Model (KEPT INTACT):
+ *   Step 1 — MobileNetV2 PlantVillage classification (when an image is
+ *     attached), via the Hugging Face Serverless Inference API after Step 0
+ *     cropping:
+ *       PRIMARY (and only default) classifier —
  *         `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
- *         — the CURRENT baseline MobileNetV2 PlantVillage classifier is NOT
- *         removed or overwritten; plus `wambugu71/crop_leaf_diseases_vit`
- *         tertiary. If the Primary fails, times out (>4s), or returns an
- *         error (503/530 loading, 4xx/5xx, network), the request seamlessly
- *         routes to this baseline. Both models parse the returned array to
- *         extract the primary predicted disease class + confidence percentage
- *         + candidate diseases. Handles 503/530 loading with a clear message.
- *         Non-fatal: a vision outage is recorded in `warnings[]` and the
- *         request continues through Stage 1 → 2 → 3 without a diagnosis.
- *         Receives the Step 0 crop when detection succeeded, the full frame
- *         otherwise.
- *         Env override: `HF_VISION_PRIMARY_MODELS` (comma list) or
- *         `HF_VISION_MODEL`/`HF_PRIMARY_VISION_MODEL` — the baseline
- *         fallback is ALWAYS preserved after any custom primary.
+ *         (MobileNetV2 PlantVillage, 38 crop/disease classes). The obsolete
+ *         field-trained cascade ids (`dima806/plant_disease_image_detection`,
+ *         `fxmeng/plantdoc-vit`) and the 400-prone extra ids
+ *         (`wambugu71/crop_leaf_diseases_vit`, the legacy `Abuzaid01/…` and
+ *         `nateraw/…` experiments) are REMOVED — one known-good model, one
+ *         round-trip, zero 400s. Parses the returned array to extract the
+ *         primary predicted disease class + confidence percentage + candidate
+ *         diseases; handles 503/530 loading with a clear message. Non-fatal:
+ *         a vision outage is recorded in `warnings[]` and the request
+ *         continues — Stage 1 (Gemini) then inspects the raw image
+ *         INDEPENDENTLY (Fallback A below). Receives the Step 0 crop when
+ *         detection succeeded, the full frame otherwise.
+ *         Env override: `HF_VISION_MODEL` (single id) replaces the default.
  *
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
@@ -75,11 +69,31 @@
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
- *     — the MobileNet vision diagnosis (disease label, confidence score and
- *     candidate diseases).
+ *     — the MobileNetV2 reference diagnosis (disease label, confidence score
+ *     and candidate diseases). Whenever a photo is attached, the image
+ *     itself travels with the turn as an `inlineData` part (the Step 0 crop
+ *     when detection succeeded, the raw frame otherwise), so:
+ *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini inspects the image,
+ *         evaluates MobileNetV2's reference and generates the final
+ *         structured diagnosis report;
+ *       • FALLBACK A — MobileNetV2 failed: Gemini inspects the raw image
+ *         independently and generates the report on its own.
+ *     Key pool: EVERY environment variable starting with `GEMINI_API_KEY`
+ *     participates — `GEMINI_API_KEY` and `GEMINI_API_KEYS` (comma-separated
+ *     pool) plus numbered variants (`GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`,
+ *     …). All values are trimmed, deduplicated and rotation-ordered; rate-
+ *     limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit)
+ *     rotate to the next key and retry until one answers or every key is
+ *     exhausted.
  *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
  *     answer ships together with a Step 1 diagnosis) carrying Gemini's
  *     generated Arabic reply.
+ *
+ *   FALLBACK B (MobileNetV2 succeeded but every Gemini key failed): the
+ *     route constructs a valid structured response DIRECTLY from
+ *     MobileNetV2's findings (the built-in Arabic diagnosis card,
+ *     `source: "direct"`) — the farmer still gets the full diagnosis +
+ *     treatment plan without any LLM.
  *
  *   Stage 2 (Gemini failed / timed out / `GEMINI_API_KEY` missing): Hugging
  *     Face Inference Providers LLM chat completion for concise text response
@@ -128,12 +142,13 @@
  *   Final safety net: `POST` wraps the whole handler in a try/catch, so even
  *     an unexpected internal exception becomes a 200 basic-mode reply.
  *
- * Gemini credentials (`GEMINI_API_KEY` — including comma-separated values —
- * and optional `GEMINI_API_KEY_2`) and the Hugging Face secret
- * (`HUGGINGFACE_API_KEY` — with
- * Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read from
- * `process.env` on the server only — they are never shipped to the browser
- * and never echoed back in a response body.
+ * Gemini credentials — every environment variable starting with
+ * `GEMINI_API_KEY` (`GEMINI_API_KEY`, `GEMINI_API_KEYS` comma-separated pool,
+ * and numbered `GEMINI_API_KEY_N` variants; combined, trimmed, deduplicated,
+ * rotation-ordered) — and the Hugging Face secret (`HUGGINGFACE_API_KEY` —
+ * with Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read
+ * from `process.env` on the server only — they are never shipped to the
+ * browser and never echoed back in a response body.
  *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
@@ -181,46 +196,23 @@ export const maxDuration = 60;
 /* ------------------------------------------------------------------ */
 
 /**
- * Vision Model Cascade — PlantVillage classifiers on the HF Inference API,
- * tried in order. Implements the EXACT cascade required by spec:
+ * Step 1 — the PlantVillage classifier on the HF Inference API.
  *
- *   Step 1a — PRIMARY Field-Trained Vision Model: high-accuracy field-trained
- *     HF model via HF Serverless Inference API. Examples:
- *     `dima806/plant_disease_image_detection` (ViT trained on real field data)
- *     or `fxmeng/plantdoc-vit` (ViT trained on PlantDoc). Bounded by a tight
- *     4 s timeout — if it fails, times out, or returns error, we seamlessly
- *     route to the secondary.
+ * Clean, single-model pipeline (400-error elimination): the PRIMARY
+ * classifier is the known-good MobileNetV2 PlantVillage model
+ * `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`, served on
+ * Hugging Face's free serverless tier. The obsolete field-trained cascade
+ * ids (`dima806/plant_disease_image_detection`, `fxmeng/plantdoc-vit`), the
+ * 400-prone tertiary (`wambugu71/crop_leaf_diseases_vit`) and the legacy
+ * `Abuzaid01/…` / `nateraw/…` experiments are REMOVED — one id that
+ * actually answers, one round-trip.
  *
- *   Step 1b — SECONDARY Fallback Model (KEPT INTACT): the CURRENT baseline
- *     classifier `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
- *     is NOT removed or overwritten. It is the reliable fallback when the
- *     primary is cold, loading, or unavailable.
- *
- *   Tertiary — `wambugu71/crop_leaf_diseases_vit` kept as warm fallback for
- *     extra resilience.
- *
- * Environment override: `HF_VISION_PRIMARY_MODELS` (comma-separated) or
- * `HF_VISION_MODEL` / `HF_PRIMARY_VISION_MODEL` single id. When set, the
- * custom primary id(s) replace the default primary while the fallback chain
- * (baseline + tertiary) is ALWAYS preserved — the baseline is never dropped.
+ * Environment override: `HF_VISION_MODEL` (single Hub id) replaces the
+ * default when set (e.g. to pin a self-hosted or retrained checkpoint).
  */
-export const HF_VISION_PRIMARY_MODELS = [
-  "dima806/plant_disease_image_detection",
-  "fxmeng/plantdoc-vit",
-] as const;
-
-export const HF_VISION_FALLBACK_MODELS = [
+export const HF_VISION_MODELS = [
   "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification",
-  "wambugu71/crop_leaf_diseases_vit",
 ] as const;
-
-export const HF_PLANT_MODELS = [
-  ...HF_VISION_PRIMARY_MODELS,
-  ...HF_VISION_FALLBACK_MODELS,
-] as const;
-
-/** Primary field-trained model(s) get a tight 4 s deadline per spec (>4s → fallback). */
-export const VISION_PRIMARY_TIMEOUT_MS = 4_000;
 
 const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
@@ -233,19 +225,18 @@ const HF_ENDPOINT = (model: string) =>
  * Step 0 model chain (object-detection), tried in order, through the SAME
  * hf-inference router endpoint as the Step 1 classifier:
  *
- *   • `suryanshgoel/detr-finetuned-plantdoc` — DETR-ResNet-50 fine-tuned on
- *     the PlantDoc plant-disease dataset (30 classes, every one of them a
- *     plant leaf or lesion — "apple scab", "tomato late blight", …), so any
- *     box it returns localises leaf material. Open weights, transformers
- *     checkpoint, served on Hugging Face's free serverless CPU tier.
- *   • `facebook/detr-resnet-50` — general COCO fallback for when the
- *     specialised checkpoint is unavailable: only its plant-flavoured labels
- *     ("potted plant") are accepted, so a houseplant photo still crops while
- *     a photo of the farmer's hand never passes the filter.
+ *   • `facebook/detr-resnet-50` — PRIMARY detector: the open-source
+ *     DETR-ResNet-50 trained on COCO. Only its plant-flavoured labels
+ *     ("potted plant", …) are accepted, so a plant photo still crops while
+ *     a photo of the farmer's hand never passes the label filter. The
+ *     obsolete fine-tuned PlantDoc checkpoint
+ *     (`suryanshgoel/detr-finetuned-plantdoc`) is REMOVED — it is not
+ *     reliably served on the free router anymore and its failures only
+ *     cost a round-trip before the COCO id answered anyway.
  *
- * Both are open-source and free — the weights live on Hugging Face's
- * infrastructure, the function only parses the returned boxes, so the
- * serverless bundle and the cold start stay untouched.
+ * Open-source and free — the weights live on Hugging Face's infrastructure,
+ * the function only parses the returned boxes, so the serverless bundle and
+ * the cold start stay untouched.
  */
 interface LeafDetectModel {
   id: string;
@@ -254,7 +245,6 @@ interface LeafDetectModel {
 }
 
 const DEFAULT_LEAF_DETECT_MODELS: LeafDetectModel[] = [
-  { id: "suryanshgoel/detr-finetuned-plantdoc", acceptLabel: () => true },
   { id: "facebook/detr-resnet-50", acceptLabel: (label) => /plant|leaf/i.test(label) },
 ];
 
@@ -603,34 +593,14 @@ const MAX_MESSAGE_CHARS = 4000;
 const UPSTREAM_TIMEOUT_MS = 25_000;
 
 /**
- * Resolve the ordered vision model list for this request. Honors
- * `HF_VISION_PRIMARY_MODELS` (comma-separated), `HF_VISION_MODEL`, or
- * `HF_PRIMARY_VISION_MODEL` env overrides for the primary — the fallback
- * baseline is always appended intact so the cascade never loses it.
- * Primary models are the field-trained ones; fallback is the mobilenet
- * baseline + ViT kept intact.
+ * Resolve the ordered vision model list for this request. The default is the
+ * single known-good MobileNetV2 PlantVillage id; `HF_VISION_MODEL` (one Hub
+ * id, whitespace-trimmed) replaces it when set.
  */
-function resolveVisionModels(): readonly string[] {
-  const raw =
-    process.env.HF_VISION_PRIMARY_MODELS?.trim() ||
-    process.env.HF_VISION_MODEL?.trim() ||
-    process.env.HF_PRIMARY_VISION_MODEL?.trim();
-  if (raw) {
-    const ids = raw
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean);
-    if (ids.length > 0) {
-      const fallback = [...HF_VISION_FALLBACK_MODELS] as string[];
-      const dedupedFallback = fallback.filter((id) => !ids.includes(id));
-      return [...ids, ...dedupedFallback];
-    }
-  }
-  return HF_PLANT_MODELS;
-}
-
-function visionTimeoutForIndex(index: number, primaryCount: number): number {
-  return index < primaryCount ? VISION_PRIMARY_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS;
+function resolveVisionModels(): string[] {
+  const raw = process.env.HF_VISION_MODEL?.trim();
+  if (raw) return [raw];
+  return [...HF_VISION_MODELS];
 }
 
 /* ------------------------------------------------------------------ */
@@ -697,19 +667,19 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 }
 
 /**
- * Strict Step 1 — Vision Model Cascade: classify leaf image via Hugging Face.
- * Implements the EXACT cascade required by spec:
- *   Step 1a — PRIMARY field-trained HF model (e.g. dima806/plant_disease_image_detection
- *     or fxmeng/plantdoc-vit) via HF Serverless Inference API, bounded by
- *     VISION_PRIMARY_TIMEOUT_MS (4 s). High-accuracy ViT trained on real field data.
- *   Step 1b — SECONDARY fallback (KEPT INTACT): linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification
- *     (the CURRENT baseline MobileNetV2) + wambugu71/crop_leaf_diseases_vit tertiary.
- *     If Primary fails, times out (>4s), or returns error, seamlessly routes to Secondary.
- * - Sends the raw image bytes (cropped by Step 0 when available) to the plant-disease model.
+ * Strict Step 1 — MobileNetV2 PlantVillage classification via Hugging Face:
+ * the PRIMARY (and only default) classifier is
+ * `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` — a clean
+ * single-model pipeline, the obsolete field-trained ids and the 400-prone
+ * cascade fallbacks are gone. `HF_VISION_MODEL` may pin a replacement id.
+ * - Sends the raw image bytes (cropped by Step 0 when available) to the model.
  * - Parses the returned array to extract the primary predicted class + confidence.
- * - Handles 503/530 model-loading responses with a clear message and walks the cascade.
- * - Per-model timeout: Primary 4 s, Secondary/Tertiary 25 s (UPSTREAM_TIMEOUT_MS).
- * - Throws an Error prefixed with "HF Error:" on any failure so the caller can degrade gracefully.
+ * - Handles 503/530 model-loading responses with a clear message.
+ * - Per-model timeout: UPSTREAM_TIMEOUT_MS (25 s) — long enough for a cold
+ *   serverless start under `X-Wait-For-Model: true`.
+ * - Throws an Error prefixed with "HF Error:" on any failure so the caller can
+ *   degrade gracefully (Fallback A: Gemini inspects the raw image; Fallback B:
+ *   the built-in formatter answers from the diagnosis when one exists).
  * - DETR smart cropping remains non-blocking (Step 0 already ran before this).
  */
 async function classifyPlantImageStrict(
@@ -723,21 +693,9 @@ async function classifyPlantImageStrict(
   let loadingEstimate: number | null = null;
 
   const models = resolveVisionModels();
-  // Primary count is the number of field-trained ids before the fallback.
-  // Default: HF_VISION_PRIMARY_MODELS.length (2). When env overrides, it's the custom id count.
-  const envRaw =
-    process.env.HF_VISION_PRIMARY_MODELS?.trim() ||
-    process.env.HF_VISION_MODEL?.trim() ||
-    process.env.HF_PRIMARY_VISION_MODEL?.trim();
-  const primaryCount = envRaw
-    ? envRaw.split(",").map((id) => id.trim()).filter(Boolean).length
-    : HF_VISION_PRIMARY_MODELS.length;
 
-  for (let idx = 0; idx < models.length; idx++) {
-    const model = models[idx];
-    const isPrimary = idx < primaryCount;
-    const stepLabel = isPrimary ? "1a" : "1b";
-    const timeoutMs = visionTimeoutForIndex(idx, primaryCount);
+  for (const model of models) {
+    const timeoutMs = UPSTREAM_TIMEOUT_MS;
     try {
       const res = await fetch(HF_ENDPOINT(model), {
         method: "POST",
@@ -767,12 +725,8 @@ async function classifyPlantImageStrict(
           ? `${errText}${estimated !== null ? ` — estimated_time: ${estimated}s` : ""}`
           : `Model ${model} is loading (HTTP ${res.status})${estimated !== null ? ` — retry after ~${Math.ceil(estimated)}s` : ""}`;
         lastErrorDetail = detail;
-        if (isPrimary) {
-          console.warn(`[Step 1a: HF Loading] ${model} → ${detail} — falling back to secondary baseline`);
-        } else {
-          console.warn(`[Step 1b: HF Loading] ${model} → ${detail}`);
-        }
-        // Try next model before giving up — the fallback may be warm.
+        console.warn(`[Step 1: HF Loading] ${model} → ${detail}`);
+        // Try next model (env override chain) before giving up — it may be warm.
         continue;
       }
 
@@ -792,11 +746,7 @@ async function classifyPlantImageStrict(
           // keep raw detail
         }
         lastErrorDetail = `${model}: ${detail}`;
-        if (isPrimary) {
-          console.warn(`[Step 1a: HF Warning] ${model} → ${detail} — falling back to secondary`);
-        } else {
-          console.warn(`[Step 1b: HF Warning] ${model} → ${detail}`);
-        }
+        console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
         continue;
       }
 
@@ -806,11 +756,7 @@ async function classifyPlantImageStrict(
       if (!isHfClassificationArray(json)) {
         const detail = `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`;
         lastErrorDetail = detail;
-        if (isPrimary) {
-          console.warn(`[Step 1a: HF Warning] ${detail} — falling back to secondary`);
-        } else {
-          console.warn(`[Step 1b: HF Warning] ${detail}`);
-        }
+        console.warn(`[Step 1: HF Warning] ${detail}`);
         continue;
       }
 
@@ -835,7 +781,7 @@ async function classifyPlantImageStrict(
       };
 
       console.log(
-        `[Step 1${stepLabel}: HF Success] label=${top.label} confidence=${pct}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
+        `[Step 1: HF Success] label=${top.label} confidence=${pct}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
       );
       return diagnosis;
     } catch (error) {
@@ -843,16 +789,10 @@ async function classifyPlantImageStrict(
         error instanceof Error
           ? `${error.name}: ${error.message}`
           : String(error);
-      const isTimeout =
-        /timeout|abort|TimeoutError|AbortError/i.test(detail) || detail.includes("timed out");
-      if (isTimeout && isPrimary) {
-        console.warn(
-          `[Step 1a: Primary Vision Timeout] ${model} timed out after ${timeoutMs}ms — falling back to secondary baseline`,
-        );
-      } else if (isPrimary) {
-        console.warn(`[Step 1a: HF Warning] ${model} → ${detail} — falling back to secondary`);
+      if (/timeout|abort|TimeoutError|AbortError/i.test(detail) || detail.includes("timed out")) {
+        console.warn(`[Step 1: HF Timeout] ${model} timed out after ${timeoutMs}ms`);
       } else {
-        console.warn(`[Step 1b: HF Warning] ${model} → ${detail}`);
+        console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
       }
       lastErrorDetail = `${model}: ${detail}`;
     }
@@ -963,21 +903,31 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 /**
  * Builds the single user turn shared by Stage 1 (Gemini `contents`) and
  * Stage 2 (HF `messages[1]`): Firestore profile context (Wilaya, crop, role,
- * language, name) + the Step 1 MobileNet vision diagnosis (disease label,
- * confidence score and candidate diseases) when one is available + the user's
- * own query. Keeping one builder guarantees the fallback LLM answers from
- * exactly the same context the primary was given.
+ * language, name) + the Step 1 MobileNetV2 reference diagnosis (disease
+ * label, confidence score and candidate diseases) when one is available +
+ * the user's own query. When a photo is attached, an image instruction is
+ * added: with a MobileNetV2 verdict in hand (HYBRID PRIMARY PATH) Gemini
+ * must inspect the attached image, evaluate the reference and issue the
+ * final structured report; without one (FALLBACK A) it must diagnose the
+ * raw image independently. Keeping one builder guarantees the fallback LLM
+ * answers from exactly the same context the primary was given.
  */
 function buildUserContent(
   message: string,
   context: AssistantContext | undefined,
   diagnosis: AssistantDiagnosis | null,
+  hasImage: boolean,
 ): string {
   const sections = [
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
     diagnosis
       ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      : hasImage
+        ? "لا يتوفر تشخيص مرجعي من MobileNetV2 — افحص الصورة المرفقة مباشرةً وابدأ التشخيص من الصورة."
+        : "",
+    hasImage && diagnosis
+      ? "افحص الصورة المرفقة بنفسك وقيّم مدى تطابق تشخيص MobileNetV2 المرجعي أعلاه مع ما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك (اعتمد التشخيص المرجعي أو صحّحه)، مع خطة العلاج والوقاية."
       : "",
     message
       ? `سؤال المستخدم: ${message}`
@@ -1044,8 +994,11 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
 /**
  * One `models.generateContent` round-trip against a single Gemini id:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
- *   • `contents[0].parts[0].text` — the user query + profile context + the
- *     Step 1 MobileNet vision diagnosis (label, confidence, candidates);
+ *   • `contents[0].parts` — the user query + profile context + the Step 1
+ *     MobileNetV2 reference diagnosis (label, confidence, candidates); when
+ *     `image` is set the photo travels too as an `inlineData` part — the
+ *     HYBRID PRIMARY PATH (with a MobileNetV2 verdict) or FALLBACK A (raw
+ *     image inspected independently);
  *   • `generationConfig` — the sampling params plus the model's own
  *     `thinkingConfig` ({@link GeminiModel.thinking}).
  *
@@ -1058,6 +1011,7 @@ async function generateWithGeminiModel(
   userContent: string,
   signal: AbortSignal,
   apiKey: string,
+  image?: AssistantImagePayload | null,
 ): Promise<string> {
   let response: Response;
   try {
@@ -1069,7 +1023,20 @@ async function generateWithGeminiModel(
         signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{ role: "user", parts: [{ text: userContent }] }],
+          contents: [
+            {
+              role: "user",
+              parts: image
+                ? [
+                    // The photo itself (Step 0 crop or the raw frame) —
+                    // Gemini inspects it and cross-checks the MobileNetV2
+                    // reference carried in the text part.
+                    { inlineData: { mimeType: image.mimeType, data: image.data } },
+                    { text: userContent },
+                  ]
+                : [{ text: userContent }],
+            },
+          ],
           generationConfig: {
             temperature: 0.4,
             topP: 0.9,
@@ -1160,6 +1127,7 @@ interface GeminiResult {
 async function generateWithGeminiForKey(
   userContent: string,
   apiKey: string,
+  image?: AssistantImagePayload | null,
 ): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
@@ -1183,6 +1151,7 @@ async function generateWithGeminiForKey(
           userContent,
           controller.signal,
           apiKey,
+          image,
         );
         return { model: model.id, text, warnings };
       } catch (error) {
@@ -1216,28 +1185,44 @@ async function generateWithGeminiForKey(
   }
 }
 
-/** True when Gemini returned a quota or transient server failure. */
+/**
+ * Google's rate-limit / quota signatures that must trigger a KEY rotation
+ * (retry with the next credential) rather than an immediate stage failure —
+ * the HTTP status covers the usual case, the message patterns catch quota
+ * rejections surfaced in the body (e.g. `RESOURCE_EXHAUSTED`, "quota limit").
+ */
+const GEMINI_QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
+  /RESOURCE_EXHAUSTED/i,
+  /\bquota(?:\s+limit| exceeded)?\b/i,
+  /rate[ _-]?limit/i,
+];
+
+/** True when Gemini returned a rate-limit/quota or transient server failure. */
 function isGeminiRetryableError(error: unknown): error is GeminiError {
-  return (
-    error instanceof GeminiError &&
-    (error.status === 429 || error.status === 500 || error.status === 503)
-  );
+  if (!(error instanceof GeminiError)) return false;
+  if (error.status === 429 || error.status === 500 || error.status === 503) return true;
+  return GEMINI_QUOTA_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
 }
 
 /**
- * Run the Gemini model chain against each configured credential in order.
+ * Run the Gemini model chain against each configured credential in order —
+ * the multi-key rotation loop.
  *
- * Credential-specific quota and transient server failures (HTTP 429, 500,
- * and 503) get a one-second backoff before the next key is tried. Other
- * Gemini failures also advance through the remaining keys without a delay:
- * Stage 1 only gives up to Hugging Face after every configured Gemini key has
- * had a chance to answer. API keys are represented
- * only by their ordinal in logs and warnings; their values never leave the
- * server or appear in a client response.
+ * Rate-limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit —
+ * see {@link isGeminiRetryableError}) and transient server failures (500,
+ * 503) get a one-second backoff before the next key is tried; other Gemini
+ * failures (e.g. an invalid or revoked key) also advance through the
+ * remaining keys without a delay. The request retries the next key in the
+ * pool until one answers successfully or ALL keys are exhausted. `image`
+ * (the Step 0 crop or the raw frame) is attached to every attempt so both
+ * the hybrid primary path and Fallback A reach Gemini with the photo. API
+ * keys are represented only by their ordinal in logs and warnings; their
+ * values never leave the server or appear in a client response.
  */
 async function generateWithGemini(
   userContent: string,
   geminiApiKeys: readonly string[],
+  image?: AssistantImagePayload | null,
 ): Promise<GeminiResult> {
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
@@ -1245,7 +1230,7 @@ async function generateWithGemini(
   for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
     const apiKey = geminiApiKeys[keyIndex];
     try {
-      const result = await generateWithGeminiForKey(userContent, apiKey);
+      const result = await generateWithGeminiForKey(userContent, apiKey, image);
       return {
         ...result,
         warnings: [...rotationWarnings, ...result.warnings],
@@ -1857,7 +1842,11 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // a restart.
   //   GEMINI_API_KEY        → Stage 1, the primary LLM (comma-separated keys
   //                           are supported).
-  //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_2`, `_3`, …).
+  //   GEMINI_API_KEYS      → optional comma-separated Gemini key pool.
+  //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_1`, `_2`, …).
+  //                           All sources above are combined into ONE pool
+  //                           (trimmed, deduplicated, rotation-ordered) and
+  //                           rotated on 429 / RESOURCE_EXHAUSTED / quota.
   //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
   //                           (HF_TOKEN, Hugging Face's own conventional
   //                           variable name, is honoured as an alias).
@@ -1918,19 +1907,28 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
 
   // One user turn for both LLM stages: user query + Firestore profile context
-  // (Wilaya, crop type, role) + the Step 1 MobileNet vision diagnosis (disease
-  // label, confidence score, candidate diseases) whenever it exists.
-  const userContent = buildUserContent(message, context, diagnosis);
+  // (Wilaya, crop type, role) + the Step 1 MobileNetV2 reference diagnosis
+  // (disease label, confidence score, candidate diseases) whenever it exists
+  // + the image instruction whenever a photo is attached (hybrid primary
+  // path with the reference, Fallback A without it).
+  const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage));
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
   // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
-  // the Generative Language REST API, keyed with GEMINI_API_KEY and bounded
-  // by a shared 18 s AbortController. Non-fatal: on any failure (or a missing
-  // key) the request walks to Stage 2.
+  // the Generative Language REST API, keyed with the full Gemini key pool
+  // (GEMINI_API_KEY + GEMINI_API_KEYS + numbered GEMINI_API_KEY_N — rotated
+  // on 429 / RESOURCE_EXHAUSTED / quota) and bounded by a shared 18 s
+  // AbortController. When a photo is attached it travels with the turn
+  // (inlineData): HYBRID PRIMARY PATH with the MobileNetV2 reference
+  // diagnosis, FALLBACK A (raw image, independent inspection) when Step 1
+  // failed. If every key is exhausted and MobileNetV2 DID produce a
+  // diagnosis, FALLBACK B answers the structured diagnosis card directly
+  // from its findings. Non-fatal: on any failure (or a missing key) the
+  // request walks to Stage 2.
   let reply: string | null = null;
   if (geminiApiKeys.length > 0) {
     try {
-      const geminiResult = await generateWithGemini(userContent, geminiApiKeys);
+      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage);
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
