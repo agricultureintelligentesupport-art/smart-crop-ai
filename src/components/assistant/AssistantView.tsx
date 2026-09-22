@@ -441,12 +441,25 @@ export default function AssistantView() {
 
                   {msg.diagnosis && (
                     <div className="mb-3">
-                      <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
+                      <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} source={msg.source} />
                     </div>
                   )}
 
                   {msg.author === "assistant" ? (
-                    <Markdown text={msg.text} />
+                    <>
+                      {/* Attribute the detailed report to its real author: when an
+                          LLM answered from a photo (hybrid verdict, or its own
+                          independent inspection), the text below is Gemini
+                          Flash's visual-analysis report — never bare
+                          MobileNetV2 output. */}
+                      {(msg.source === "hybrid" || msg.source === "llm") &&
+                        Boolean(msg.diagnosis ?? msg.preprocessing) && (
+                          <p className="mb-2 flex items-center gap-1.5 rounded-2xl bg-white/70 px-2.5 py-1.5 text-[10px] font-black leading-4 text-emerald-800 ring-1 ring-emerald-200/70">
+                            {t.chat.geminiReport}
+                          </p>
+                        )}
+                      <Markdown text={msg.text} />
+                    </>
                   ) : (
                     msg.text && (
                       <p className="whitespace-pre-wrap text-[13.5px] font-bold leading-6">{msg.text}</p>

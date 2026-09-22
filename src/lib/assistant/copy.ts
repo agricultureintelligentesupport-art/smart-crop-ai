@@ -44,11 +44,24 @@ export interface AssistantCopy {
     cropApplied: string;
     /** Shown when Step 0 found no usable leaf and kept the full frame. */
     cropNotFound: string;
+    /**
+     * Header badge inserted above the detailed report Gemini Flash generated
+     * from its own visual analysis — attributes the report text to its real
+     * author instead of leaving the whole diagnosis credited to MobileNetV2.
+     */
+    geminiReport: string;
   };
   diagnosis: {
     title: string;
     confidence: string;
+    /** Raw classifier attribution line — kept for `direct` (no-LLM) replies. */
     model: string;
+    /**
+     * Hybrid attribution badge shown instead of the raw model line when the
+     * verdict was cross-checked by Gemini Flash's own image inspection
+     * (response `source: "hybrid"`).
+     */
+    hybridBadge: string;
     healthy: string;
     alternatives: string;
     confidenceHigh: string;
@@ -99,11 +112,13 @@ const AR: AssistantCopy = {
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
     cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
+    geminiReport: "📋 تقرير التحليل البصري (Gemini Flash)",
   },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
     confidence: "نسبة الثقة",
     model: "نموذج التصنيف",
+    hybridBadge: "التشخيص الهجين (MobileNetV2 + Gemini Flash)",
     healthy: "النبتة سليمة",
     alternatives: "احتمالات أخرى",
     confidenceHigh: "ثقة مرتفعة",
@@ -154,11 +169,13 @@ const FR: AssistantCopy = {
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
     cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",
+    geminiReport: "📋 Rapport d'analyse visuelle (Gemini Flash)",
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",
     confidence: "Confiance",
     model: "Modèle de classification",
+    hybridBadge: "Diagnostic hybride (MobileNetV2 + Gemini Flash)",
     healthy: "Plante saine",
     alternatives: "Autres possibilités",
     confidenceHigh: "Confiance élevée",

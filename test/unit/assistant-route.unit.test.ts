@@ -523,9 +523,12 @@ test("Fallback A: MobileNetV2 failure → Gemini inspects the raw image independ
   assert.ok(geminiImage, "Fallback A must still send the raw image to Gemini");
   assert.equal(geminiImage?.mimeType, "image/jpeg");
   assert.equal(geminiImage?.data, "aW1hZ2U=");
-  // …with the instruction to diagnose the image independently (no reference).
+  // …with the instruction to diagnose the image independently (no reference)
+  // as the inspecting expert itself (visible symptoms → treatment/prevention).
   assert.match(geminiUser, /لا يتوفر تشخيص مرجعي من MobileNetV2/);
   assert.match(geminiUser, /افحص الصورة المرفقة مباشرة/);
+  assert.match(geminiUser, /كخبير زراعي/);
+  assert.match(geminiUser, /الأعراض المرئية/);
   // The vision outage is a non-fatal warning, never a 500.
   assert.match(warningText(payload), /Step 1 vision unavailable/);
 });
@@ -616,6 +619,36 @@ test("Stage 1 sends the concise Arabic system instruction, the query and the pro
   assert.equal(body.generationConfig?.thinkingConfig?.thinkingBudget, undefined);
 });
 
+test("Stage 1 system prompt bans passive system attribution and mandates first-person expert visual analysis", async () => {
+  configureKeys();
+  let body: GeminiRequestBody | undefined;
+  mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    body = parseGeminiBody(init);
+    return geminiReply();
+  });
+  assert.equal((await POST(request())).status, 200);
+
+  assert.ok(body);
+  const system = geminiSystemText(body);
+  // The banned passive phrases are named verbatim inside the ban clause —
+  // the diagnosis must never read like a printout of the classifier.
+  assert.match(system, /ممنوع منعاً باتاً/);
+  assert.match(system, /يشير النظام الآلي إلى/);
+  assert.match(system, /بناءً على نتائج نظام التشخيص/);
+  // Direct expert-agronomist voice: visible leaf symptoms, own verdict over
+  // the MobileNetV2 reference, chemical + organic treatment, prevention.
+  assert.match(system, /الأعراض المرئية/);
+  assert.match(system, /أرى على الورقة/);
+  assert.match(system, /معالجة كيميائية/);
+  assert.match(system, /عضوي/);
+  assert.match(system, /وقائية/);
+  // The mandated Arabic anchors survive the refactor.
+  assert.match(system, /أنت مساعد زراعي خبير/);
+  assert.match(system, /دون مقدمات أو إطالة/);
+  assert.match(system, /باللغة العربية/);
+  assert.match(system, /عملي/);
+});
+
 test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference (label, confidence, candidates) and answers hybrid", async () => {
   configureKeys();
   const urls: string[] = [];
@@ -678,6 +711,12 @@ test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference
   // …and Gemini is instructed to inspect the image against the reference.
   assert.match(geminiUser, /افحص الصورة المرفقة/);
   assert.match(geminiUser, /شخّص هذه الورقة/);
+  // The turn repeats the hybrid voice contract: describe the visible leaf
+  // symptoms and answer AS the inspecting expert — the passive
+  // system-attribution phrases are banned verbatim inside the instruction.
+  assert.match(geminiUser, /كخبير زراعي/);
+  assert.match(geminiUser, /الأعراض المرئية/);
+  assert.match(geminiUser, /يشير النظام الآلي إلى/);
   // Secrets never travel back to the client.
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });

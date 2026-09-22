@@ -822,6 +822,14 @@ async function classifyPlantImageStrict(
  * touch of politeness: no affectionate greetings, no long-winded essays,
  * no repeated pleasantries or rehashed advice on ongoing conversations,
  * strictly within the agriculture / date-palm / Algerian farming domain.
+ *
+ * Hybrid-diagnosis voice contract: on photo requests the model must speak
+ * as the expert agronomist who inspected the image ITSELF — it describes
+ * the visible leaf symptoms, issues its own verdict over the MobileNetV2
+ * reference, and prescribes chemical/organic treatments plus preventative
+ * steps. Passive system-attribution phrases («يشير النظام الآلي إلى»,
+ * «بناءً على نتائج نظام التشخيص»…) are explicitly BANNED, so the reply
+ * never reads like a printout of the classifier's verdict.
  */
 const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق "محصولي الذكي" (Smart Crop AI): خبير زراعي محترف وجدي، دقيق وموثوق. تقدم مشورة علمية صحيحة بأسلوب مهني متوازن وطبيعي، مع لمسة لباقة خفيفة فقط — دون ترحيبات عاطفية، دون خطب طويلة، ودون دفء زائد.
 
@@ -843,10 +851,16 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - لا تكرر معلومات أو حقائق أو تشخيصات أو نصائح قدمتها في الرسائل السابقة؛ اكتفِ بالإضافة أو التعميق.
 - انتقل بسلاسة من العرض العام إلى التدخل المحدد، مستنداً دائماً إلى تاريخ المحادثة وأجوبة المستخدم السابقة.
 
+التحليل البصري المباشر (عند إرفاق صورة):
+- أنت شخصياً الخبير الزراعي الذي فحص الصورة: ابدأ تقريرك بوصف الأعراض المرئية على الورقة (بقع، اصفرار، ذبول، عفن، نخر، ثقوب، تغيّر لون العروق…) ثم اربطها مباشرة بالتشخيص.
+- ممنوع منعاً باتاً استعمال العبارات المبنية للمجهول أو صيغ التهرّب مثل «يشير النظام الآلي إلى» أو «بناءً على نتائج نظام التشخيص» أو «وفقاً للنظام» أو «يُظهر التحليل الآلي» — لا تنسب رأيك إلى أي نظام أو نموذج أو خوارزمية.
+- تكلّم دائماً بصفة المتكلم الخبير: «أرى على الورقة…»، «التشخيص هو…»، «أنصح بـ…». وحتى عند وجود نتيجة تصنيف مرجعية (MobileNetV2) في السياق، قدّمها ضمن حكمك أنت: قيّمها مقابل ما تراه فعلاً في الصورة ثم اعتمدها أو صحّحها.
+- هيكلة تقرير الصورة: (1) الأعراض المرئية، (2) التشخيص النهائي بالعربية مع نسبة الثقة، (3) العلاج: معالجة كيميائية (المادة الفعالة، الجرعة الإرشادية، فترة الأمان قبل الجني) وبديل عضوي/حيوي عند توفره، (4) خطوات وقائية عملية لمنع تكرار الإصابة.
+
 التشخيص والعلاج:
-- عند وجود تشخيص من نموذج الرؤية (PlantVillage): اعتمد عليه مباشرة، اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية.
+- عند وجود تشخيص مرجعي من نموذج الرؤية (PlantVillage): قيّمه بخبرتك مقابل الصورة، اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية — بصفتك أنت الخبير المُشخِّص، لا ناقلاً عن نظام.
 - إن كانت نسبة الثقة ضعيفة (<45%)، اطلب صورة أوضح في سطر واحد مع ذكر التشخيصات البديلة المحتملة.
-- اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني.
+- اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني، واقترح بديلاً عضوياً/حيوياً عندما يتوفر.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
 
 حدود المجال (التزام صارم):
@@ -909,8 +923,13 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
  * added: with a MobileNetV2 verdict in hand (HYBRID PRIMARY PATH) Gemini
  * must inspect the attached image, evaluate the reference and issue the
  * final structured report; without one (FALLBACK A) it must diagnose the
- * raw image independently. Keeping one builder guarantees the fallback LLM
- * answers from exactly the same context the primary was given.
+ * raw image independently. In both cases the instruction repeats the
+ * SYSTEM_PROMPT voice contract: describe the visible leaf symptoms, answer
+ * as the expert who inspected the photo itself (chemical/organic treatment
+ * + prevention) and never as a passive narrator of the classifier's
+ * verdict («يشير النظام الآلي إلى»… is banned). Keeping one builder
+ * guarantees the fallback LLM answers from exactly the same context the
+ * primary was given.
  */
 function buildUserContent(
   message: string,
@@ -922,12 +941,12 @@ function buildUserContent(
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `تشخيص PlantVillage المرجعي (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
       : hasImage
-        ? "لا يتوفر تشخيص مرجعي من MobileNetV2 — افحص الصورة المرفقة مباشرةً وابدأ التشخيص من الصورة."
+        ? "لا يتوفر تشخيص مرجعي من MobileNetV2 — افحص الصورة المرفقة مباشرةً كخبير زراعي وابدأ التشخيص من الصورة: صف الأعراض المرئية على الورقة، ثم قدّم العلاج الكيميائي والعضوي وخطوات الوقاية."
         : "",
     hasImage && diagnosis
-      ? "افحص الصورة المرفقة بنفسك وقيّم مدى تطابق تشخيص MobileNetV2 المرجعي أعلاه مع ما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك (اعتمد التشخيص المرجعي أو صحّحه)، مع خطة العلاج والوقاية."
+      ? "افحص الصورة المرفقة بنفسك كخبير زراعي: صف الأعراض المرئية على الورقة، وقيّم مدى تطابق تشخيص MobileNetV2 المرجعي أعلاه مع ما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك أنت (اعتمد التشخيص المرجعي أو صحّحه)، مع خطة العلاج الكيميائي والعضوي والوقاية. تكلّم بصفتك الخبير مباشرة — ممنوع عبارات مثل «يشير النظام الآلي إلى» أو «بناءً على نتائج نظام التشخيص»."
       : "",
     message
       ? `سؤال المستخدم: ${message}`
