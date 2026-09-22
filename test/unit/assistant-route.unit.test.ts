@@ -75,6 +75,27 @@ function textRequest(message: string) {
   });
 }
 
+/**
+ * Second pass of the interactive wizard: the original photo plus the farmer's
+ * answer (and, optionally, the raw MobileNetV2 vector echoed from the first
+ * pass so the same image is not classified twice).
+ */
+function clarificationRequest(
+  crop: string,
+  predictions?: { label: string; score: number }[],
+) {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: "شخّص هذه الورقة",
+      image: { data: "aW1hZ2U=", mimeType: "image/jpeg" },
+      userAnswers: { crop },
+      ...(predictions ? { predictions } : {}),
+    }),
+  });
+}
+
 /** Configure the provider keys (padded, to prove the route trims them). */
 function configureKeys({ gemini = true, huggingface = true } = {}) {
   if (gemini) process.env.GEMINI_API_KEY = ` ${GEMINI_KEY} `;
@@ -282,11 +303,37 @@ interface DiagnosisLike {
   candidates: { label: string; score: number }[];
 }
 
+interface ClarificationQuestionLike {
+  id: string;
+  question: string;
+  options: string[];
+}
+
+interface FilterReportLike {
+  applied: boolean;
+  answer: string | null;
+  cropKey: string | null;
+  crop: string | null;
+  matchedClasses: number;
+  droppedClasses: number;
+  totalClasses: number;
+  topLabelBefore: string | null;
+  topScoreBefore: number;
+  topLabelAfter: string | null;
+  topScoreAfter: number;
+  changedTop: boolean;
+}
+
 interface AssistantPayload {
   reply: string;
   diagnosis: DiagnosisLike | null;
   source: string;
   warnings?: string[];
+  /** Interactive diagnosis — first pass (shaky Top-1) only. */
+  requiresClarification?: boolean;
+  questions?: ClarificationQuestionLike[];
+  /** Interactive diagnosis — taxonomy masking report of the second pass. */
+  filtered?: FilterReportLike | null;
 }
 
 /** `warnings[]` flattened for the `assert.match(…)` assertions below. */
@@ -1499,17 +1546,53 @@ test("zero-failure: healthy diagnosis gets a direct reassurance card with preven
   assert.doesNotMatch(payload.reply, /## 💊 خطة العلاج/);
 });
 
-test("zero-failure: low-confidence diagnosis asks for a clearer photo in the direct card", async () => {
+test("interactive diagnosis: a low-confidence Top-1 stops before both LLMs and asks for the crop", async () => {
   configureKeys();
-  mockGeminiDownThen(async (url: string) =>
-    isChatUrl(url)
-      ? new Response(null, { status: 503 })
-      : Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]),
-  );
+  const urls: string[] = [];
+  mockGeminiDownThen(async (url: string) => {
+    urls.push(url);
+    if (isChatUrl(url)) return new Response(null, { status: 503 });
+    // Step 1 — MobileNetV2 sees a 30% tomato guess: far below the 60%
+    // clarification threshold, so the route must ASK instead of diagnosing.
+    return Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]);
+  });
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
+
+  assert.equal(payload.source, "clarification");
+  assert.equal(payload.requiresClarification, true);
+  assert.deepEqual(payload.questions, [
+    {
+      id: "crop",
+      question: "ما هو نوع هذا النبات؟",
+      options: ["طماطم", "بطاطس", "عنب", "تفاح", "خوخ", "غير ذلك"],
+    },
+  ]);
+  // No shaky verdict is shown, and neither LLM stage was asked to guess.
+  assert.equal(payload.diagnosis, null);
+  assert.match(payload.reply, /غير واثق/);
+  assert.equal(urls.filter((url) => isGeminiUrl(url) || isChatUrl(url)).length, 0);
+});
+
+test("interactive diagnosis: the second pass re-classifies, masks, and keeps the low-confidence note", async () => {
+  configureKeys();
+  mockGeminiDownThen(async (url: string) => {
+    if (isChatUrl(url)) return new Response(null, { status: 503 });
+    // Only tomato classes remain after masking, and they split the logit mass
+    // so evenly that the recalculated Top-1 stays below 45%.
+    return Response.json([
+      { label: "Tomato___Early_blight", score: 0.04 },
+      { label: "Tomato___Late_blight", score: 0.03 },
+      { label: "Tomato___healthy", score: 0.03 },
+    ]);
+  });
+  const response = await POST(clarificationRequest("طماطم"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 40);
   assert.match(payload.reply, /صورة أوضح/);
 });
 

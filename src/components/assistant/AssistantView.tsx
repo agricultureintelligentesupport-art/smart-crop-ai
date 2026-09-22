@@ -11,6 +11,7 @@ import {
   Scissors,
   Send,
   Sparkles,
+  Target,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -33,11 +34,16 @@ import type {
   AssistantResponseBody,
   AssistantSource,
   AssistantDiagnosis,
+  ClarificationQuestion,
+  DiagnosisFilterReport,
+  DiagnosisUserAnswers,
+  RawPrediction,
 } from "@/lib/assistant/types";
 import { useProfile } from "@/lib/auth/profile";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
+import ClarificationWizard from "./ClarificationWizard";
 import DiagnosisCard from "./DiagnosisCard";
 import Markdown from "./Markdown";
 
@@ -53,6 +59,19 @@ interface PendingImage {
   mimeType: string;
 }
 
+/**
+ * Interactive diagnosis wizard state carried by the assistant message that
+ * asked the question. The original request (photo + the raw MobileNetV2
+ * vector) travels with it so the second pass replays the exact same pixels
+ * and the exact same logits.
+ */
+interface PendingClarification {
+  questions: ClarificationQuestion[];
+  request: { message: string; image: PendingImage | null; predictions: RawPrediction[] };
+  /** The crop the farmer picked, once the answer was sent. */
+  answered?: string;
+}
+
 interface ChatMessage {
   id: string;
   author: "user" | "assistant";
@@ -62,7 +81,19 @@ interface ChatMessage {
   source?: AssistantSource;
   /** Step 0 detection & cropping report (image requests only). */
   preprocessing?: AssistantPreprocessing | null;
+  /** Taxonomy masking + recalculation report of the second pass. */
+  filtered?: DiagnosisFilterReport | null;
+  /** Set on the message that asked for the crop (interactive diagnosis). */
+  clarification?: PendingClarification;
   error?: boolean;
+}
+
+/** One assistant round-trip: the message, the photo and (2nd pass) the answers. */
+interface AssistantRequest {
+  message: string;
+  image: PendingImage | null;
+  userAnswers?: DiagnosisUserAnswers;
+  predictions?: RawPrediction[];
 }
 
 let idCounter = 0;
@@ -137,8 +168,8 @@ export default function AssistantView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  /** Snapshot of the last request so the retry chip can resend it. */
-  const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
+  /** Snapshot of the last request so the retry chip can replay it exactly. */
+  const lastRequestRef = useRef<AssistantRequest | null>(null);
 
   // Same session gate as the dashboard: assistant answers are personalised,
   // so an authenticated profile — or the local guest bypass — is required.
@@ -199,16 +230,29 @@ export default function AssistantView() {
     ],
   );
 
-  const send = useCallback(
-    async (messageText: string, image: PendingImage | null) => {
-      const text = messageText.trim();
+  /**
+   * One round-trip to `/api/assistant`, handling BOTH passes of the
+   * interactive diagnosis flow:
+   *  • first pass — photo only: a Top-1 below 60% comes back as
+   *    `requiresClarification`, and the bubble keeps the questionnaire (plus
+   *    the raw MobileNetV2 vector) for the second pass;
+   *  • second pass — `answers` set: the original photo + the farmer's crop +
+   *    the echoed logits go back, and the reply carries the recalculated
+   *    (masked) verdict.
+   */
+  const requestAssistant = useCallback(
+    async (request: AssistantRequest, echoUserTurn = false) => {
+      const text = request.message.trim();
+      const image = request.image;
       if ((!text && !image) || busy) return;
 
-      lastRequestRef.current = { message: text, image };
-      setMessages((prev) => [
-        ...prev,
-        { id: nextId(), author: "user", text, imageUrl: image?.previewUrl },
-      ]);
+      lastRequestRef.current = request;
+      if (echoUserTurn) {
+        setMessages((prev) => [
+          ...prev,
+          { id: nextId(), author: "user", text, imageUrl: image?.previewUrl },
+        ]);
+      }
       setDraft("");
       setPendingImage(null);
       setComposerError(null);
@@ -227,6 +271,12 @@ export default function AssistantView() {
             message: text,
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
+            ...(request.userAnswers ? { userAnswers: request.userAnswers } : {}),
+            // Echoed logits: the server masks the SAME vector the farmer saw
+            // instead of classifying the photo a second time.
+            ...(request.predictions && request.predictions.length > 0
+              ? { predictions: request.predictions }
+              : {}),
           }),
         });
         if (!res.ok) {
@@ -240,6 +290,7 @@ export default function AssistantView() {
           throw new Error(`HTTP ${res.status}`);
         }
         const payload = (await res.json()) as AssistantResponseBody;
+        const questions = payload.requiresClarification ? payload.questions ?? [] : [];
         setMessages((prev) => [
           ...prev,
           {
@@ -249,6 +300,19 @@ export default function AssistantView() {
             diagnosis: payload.diagnosis ?? null,
             source: payload.source,
             preprocessing: payload.preprocessing ?? null,
+            filtered: payload.filtered ?? null,
+            ...(questions.length > 0
+              ? {
+                  clarification: {
+                    questions,
+                    request: {
+                      message: text,
+                      image,
+                      predictions: payload.predictions ?? [],
+                    },
+                  },
+                }
+              : {}),
           },
         ]);
       } catch {
@@ -263,13 +327,60 @@ export default function AssistantView() {
     [busy, buildContext, t.chat.error, t.chat.unavailable],
   );
 
+  /** Composer send: always a first pass (the user bubble is added here). */
+  const send = useCallback(
+    (messageText: string, image: PendingImage | null) =>
+      requestAssistant({ message: messageText, image }, true),
+    [requestAssistant],
+  );
+
+  /**
+   * Second pass: the farmer answered the wizard. The question bubble freezes
+   * on its answer (audit trail), and the ORIGINAL photo + the raw MobileNetV2
+   * vector are replayed with `userAnswers`, so the server masks the logits by
+   * crop, recalculates the surviving probabilities and locks the diagnosis
+   * into the formatting LLM.
+   */
+  const answerClarification = useCallback(
+    (messageId: string, userAnswers: DiagnosisUserAnswers) => {
+      const target = messages.find((m) => m.id === messageId);
+      const pending = target?.clarification;
+      if (!pending || pending.answered || busy) return;
+
+      const answerLabel =
+        Object.values(userAnswers)
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter(Boolean)
+          .join(" · ") || t.clarification.answered;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId && m.clarification
+            ? { ...m, clarification: { ...m.clarification, answered: answerLabel } }
+            : m,
+        ),
+      );
+      setMessages((prev) => [
+        ...prev,
+        { id: nextId(), author: "user", text: `${t.clarification.answerPrefix}: ${answerLabel}` },
+      ]);
+      void requestAssistant({
+        message: pending.request.message,
+        image: pending.request.image,
+        userAnswers,
+        predictions: pending.request.predictions,
+      });
+    },
+    [busy, messages, requestAssistant, t.clarification.answerPrefix, t.clarification.answered],
+  );
+
   const retryLast = useCallback(() => {
     const last = lastRequestRef.current;
     if (!last || busy) return;
     // Drop the failed bubble + its user message duplicate stays (history is honest).
     setMessages((prev) => prev.filter((m) => !m.error));
-    void send(last.message, last.image);
-  }, [busy, send]);
+    void requestAssistant(last);
+  }, [busy, requestAssistant]);
 
   const onPickFile = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -314,6 +425,9 @@ export default function AssistantView() {
   );
 
   const canSend = (draft.trim().length > 0 || pendingImage !== null) && !busy;
+  /** Profile crop in the active language, used to pre-select a wizard option. */
+  const profileCropLabel =
+    preferredCropKey && preferredCropKey in CROPS ? CROPS[preferredCropKey as CropKey][lang] : null;
   const emptyChat = messages.length === 0;
 
   return (
@@ -439,6 +553,18 @@ export default function AssistantView() {
                     </p>
                   )}
 
+                  {msg.author === "assistant" && msg.filtered?.applied && (
+                    <p
+                      className="mb-2 flex items-start gap-1.5 rounded-2xl bg-emerald-50/80 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-800 ring-1 ring-emerald-200/70"
+                      title={msg.filtered.topLabelBefore ?? undefined}
+                    >
+                      <Target size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
+                      {`${t.chat.filteredCrop} ${msg.filtered.crop ?? ""} — ${t.chat.filteredBoost} ${Math.round(
+                        msg.filtered.topScoreBefore * 100,
+                      )}% → ${Math.round(msg.filtered.topScoreAfter * 100)}%`}
+                    </p>
+                  )}
+
                   {msg.diagnosis && (
                     <div className="mb-3">
                       <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
@@ -451,6 +577,19 @@ export default function AssistantView() {
                     msg.text && (
                       <p className="whitespace-pre-wrap text-[13.5px] font-bold leading-6">{msg.text}</p>
                     )
+                  )}
+
+                  {msg.clarification && (
+                    <div className="mt-2">
+                      <ClarificationWizard
+                        questions={msg.clarification.questions}
+                        copy={t.clarification}
+                        busy={busy}
+                        answered={msg.clarification.answered ?? null}
+                        defaultCrop={profileCropLabel}
+                        onSubmit={(answers) => answerClarification(msg.id, answers)}
+                      />
+                    </div>
                   )}
 
                   {msg.source === "direct" && (

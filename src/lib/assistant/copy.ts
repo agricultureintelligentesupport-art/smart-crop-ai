@@ -44,6 +44,10 @@ export interface AssistantCopy {
     cropApplied: string;
     /** Shown when Step 0 found no usable leaf and kept the full frame. */
     cropNotFound: string;
+    /** Second pass: the verdict was recalculated on the named crop. */
+    filteredCrop: string;
+    /** Second pass: how the probabilities moved ("45% → 100%"). */
+    filteredBoost: string;
   };
   diagnosis: {
     title: string;
@@ -54,6 +58,29 @@ export interface AssistantCopy {
     confidenceHigh: string;
     confidenceMedium: string;
     confidenceLow: string;
+  };
+  /**
+   * Interactive diagnosis wizard (first pass returned requiresClarification):
+   * the farmer names the crop, the server masks MobileNetV2's vector against
+   * it and recalculates the surviving probabilities.
+   */
+  clarification: {
+    /** Small header of the wizard card. */
+    title: string;
+    /** Fallback question when the API sent none (French UI). */
+    question: string;
+    /** One-line explanation under the question. */
+    hint: string;
+    /** Submit button label. */
+    submit: string;
+    /** Submit label while the second pass is in flight. */
+    submitting: string;
+    /** Shown once an answer was sent (the wizard stays in history). */
+    answered: string;
+    /** Prefix of the echoed user bubble ("نوع النبات: طماطم"). */
+    answerPrefix: string;
+    /** French labels for the Arabic options; unmatched options fall through. */
+    optionLabels: Record<string, string>;
   };
 }
 
@@ -99,6 +126,18 @@ const AR: AssistantCopy = {
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
     cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
+    filteredCrop: "🎯 حُسب التشخيص على محصول",
+    filteredBoost: "أُعيد حساب الاحتمالات",
+  },
+  clarification: {
+    title: "توضيح سريع قبل التشخيص",
+    question: "ما هو نوع هذا النبات؟",
+    hint: "اختر نوع النبات — سيتجاهل النظام كل الأمراض التي لا تصيب هذا المحصول ويعيد حساب الاحتمالات المتبقية.",
+    submit: "أكمل التشخيص",
+    submitting: "جارٍ إعادة حساب الاحتمالات…",
+    answered: "تم إرسال الإجابة",
+    answerPrefix: "نوع النبات",
+    optionLabels: {},
   },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
@@ -154,6 +193,25 @@ const FR: AssistantCopy = {
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
     cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",
+    filteredCrop: "🎯 Diagnostic calculé sur la culture",
+    filteredBoost: "Probabilités recalculées",
+  },
+  clarification: {
+    title: "Une précision avant le diagnostic",
+    question: "Quelle est l'espèce de cette plante ?",
+    hint: "Choisissez la culture — toutes les maladies qui ne l'attaquent pas sont écartées et les probabilités restantes sont recalculées.",
+    submit: "Lancer le diagnostic",
+    submitting: "Recalcul des probabilités…",
+    answered: "Réponse envoyée",
+    answerPrefix: "Culture",
+    optionLabels: {
+      "طماطم": "Tomate",
+      "بطاطس": "Pomme de terre",
+      "عنب": "Vigne",
+      "تفاح": "Pommier",
+      "خوخ": "Pêcher",
+      "غير ذلك": "Autre / je ne sais pas",
+    },
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",

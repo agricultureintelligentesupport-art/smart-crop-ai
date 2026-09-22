@@ -45,6 +45,30 @@
  *         detection succeeded, the full frame otherwise.
  *         Env override: `HF_VISION_MODEL` (single id) replaces the default.
  *
+ *   Step 1.5 — Interactive diagnosis (MobileNetV2 logit masking). MobileNetV2
+ *     is the strict diagnostic authority, but a shaky Top-1 must not become a
+ *     confident-sounding report, so the route splits the diagnosis in two:
+ *       • FIRST PASS (no `userAnswers` in the body) — when Step 1's Top-1
+ *         confidence is < {@link CLARIFICATION_CONFIDENCE_THRESHOLD} (60%),
+ *         the request STOPS right after Step 1 and answers 200
+ *         `{ requiresClarification: true, questions: [{ id: "crop",
+ *         question: "ما هو نوع هذا النبات؟", options: ["طماطم", "بطاطس",
+ *         "عنب", "تفاح", "خوخ", "غير ذلك"] }], source: "clarification",
+ *         predictions: <raw MobileNetV2 vector> }`. No LLM is called on this
+ *         pass — the system asks instead of guessing.
+ *       • SECOND PASS (`userAnswers.crop` present) — the frontend resends the
+ *         original image, the answer and (optionally) the raw vector echoed
+ *         from the first pass (validated row by row against the taxonomy;
+ *         anything off-shape is re-classified instead). The vector is masked
+ *         with `applyTaxonomyFilter` — every class that cannot grow on the
+ *         named crop is dropped and the surviving raw scores are summed and
+ *         divided into each survivor, so a 15% tomato class behind a 45%
+ *         potato class becomes the 100% tomato verdict. The masked Top-1 is
+ *         the diagnosis, the masking is reported in `filtered`, and the
+ *         formatter instruction below locks it. "غير ذلك" and unrecognised
+ *         answers leave MobileNetV2's own ranking untouched (a warning is
+ *         emitted when a resolvable crop matched no predicted class).
+ *
  *   Stage 1 — Google Gemini (`gemini-3.5-flash` → `gemini-3.5-flash-lite` →
  *     `gemini-2.5-flash`) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
@@ -70,7 +94,13 @@
  *     `systemInstruction`; the user turn carries the user query, the Firestore
  *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
  *     — the MobileNetV2 reference diagnosis (disease label, confidence score
- *     and candidate diseases). Whenever a photo is attached, the image
+ *     and candidate diseases). After a masking pass (Step 1.5) the SAME
+ *     system prompt is extended by {@link buildLockedSystemPrompt}: Gemini is
+ *     a formatter, the masked diagnosis is locked ("You are a formatter …
+ *     You MUST NOT change this diagnosis"), the anchor rules («أنت مساعد
+ *     زراعي خبير», «دون مقدمات أو إطالة», «باللغة العربية», «عملي») stay in
+ *     force, and the report must cover the visual symptoms, the immediate
+ *     treatment and the prevention for that one disease. Whenever a photo is attached, the image
  *     itself travels with the turn as an `inlineData` part (the Step 0 crop
  *     when detection succeeded, the raw frame otherwise), so:
  *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini inspects the image,
@@ -87,7 +117,9 @@
  *     exhausted.
  *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
  *     answer ships together with a Step 1 diagnosis) carrying Gemini's
- *     generated Arabic reply.
+ *     generated Arabic reply; a masked second pass additionally reports the
+ *     filtering in `filtered` (classes matched/dropped, Top-1 before/after
+ *     masking, whether masking flipped the winner).
  *
  *   FALLBACK B (MobileNetV2 succeeded but every Gemini key failed): the
  *     route constructs a valid structured response DIRECTLY from
@@ -183,13 +215,36 @@ import type {
   AssistantPreprocessing,
   AssistantRequestBody,
   AssistantResponseBody,
-  DiagnosisCandidate,
+  DiagnosisFilterReport,
+  DiagnosisUserAnswers,
 } from "@/lib/assistant/types";
+import {
+  applyTaxonomyFilter,
+  buildClarificationQuestions,
+  buildFilterReport,
+  resolveCropKey,
+  taxonomyForLabel,
+  type FilteredPrediction,
+  type RawPrediction,
+} from "@/lib/vision/taxonomyFilter";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 /** Vision + LLM round-trips; give slow cold starts room on hosted platforms. */
 export const maxDuration = 60;
+
+/**
+ * Interactive diagnosis — MobileNetV2 is the strict diagnostic authority.
+ *
+ * Below this Top-1 confidence the route does NOT diagnose: it stops after
+ * Step 1 and returns `{ requiresClarification: true, questions: [...] }` so
+ * the farmer can pick the crop. The next request carries the original image
+ * plus `userAnswers`, the full MobileNetV2 vector is masked against
+ * {@link applyTaxonomyFilter} (wrong-crop classes dropped, surviving scores
+ * recalculated), and the masked Top-1 — and only it — is handed to Gemini as
+ * a locked diagnosis it may format but never change.
+ */
+export const CLARIFICATION_CONFIDENCE_THRESHOLD = 0.6;
 
 /* ------------------------------------------------------------------ */
 /*  Tunables                                                           */
@@ -590,6 +645,13 @@ const MAX_REPLY_TOKENS = 700;
 const MAX_IMAGE_B64_CHARS = 6 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 4000;
 
+/**
+ * Safety cap on the MobileNetV2 logit vector (the model emits 38 classes).
+ * The full vector travels through the pipeline because the taxonomy filter
+ * needs every raw score to recalculate the surviving probabilities.
+ */
+const MAX_PREDICTION_VECTOR = 64;
+
 const UPSTREAM_TIMEOUT_MS = 25_000;
 
 /**
@@ -667,13 +729,28 @@ function isHfClassificationArray(value: unknown): value is HfClassification[] {
 }
 
 /**
+ * Step 1 outcome: the FULL MobileNetV2 logit vector (every PlantVillage class
+ * the model scored, highest first) plus the model id that produced it. The
+ * vector — not a pre-picked winner — is what the interactive diagnosis flow
+ * masks and recalculates, so the route never loses the raw probabilities.
+ */
+interface PlantClassification {
+  model: string;
+  /** All returned classes, sorted descending (MobileNetV2 emits 38). */
+  predictions: RawPrediction[];
+}
+
+/**
  * Strict Step 1 — MobileNetV2 PlantVillage classification via Hugging Face:
  * the PRIMARY (and only default) classifier is
  * `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` — a clean
  * single-model pipeline, the obsolete field-trained ids and the 400-prone
  * cascade fallbacks are gone. `HF_VISION_MODEL` may pin a replacement id.
  * - Sends the raw image bytes (cropped by Step 0 when available) to the model.
- * - Parses the returned array to extract the primary predicted class + confidence.
+ * - Parses the returned array and keeps the WHOLE prediction vector (label +
+ *   raw score for every class), sorted descending. The Top-1 is the strict
+ *   diagnostic authority; the rest of the vector is the logit mass the
+ *   taxonomy filter re-distributes once the farmer names the crop.
  * - Handles 503/530 model-loading responses with a clear message.
  * - Per-model timeout: UPSTREAM_TIMEOUT_MS (25 s) — long enough for a cold
  *   serverless start under `X-Wait-For-Model: true`.
@@ -686,7 +763,7 @@ async function classifyPlantImageStrict(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
-): Promise<AssistantDiagnosis> {
+): Promise<PlantClassification> {
   const body = Buffer.from(imageBase64, "base64");
 
   let lastErrorDetail: string | null = null;
@@ -760,30 +837,25 @@ async function classifyPlantImageStrict(
         continue;
       }
 
-      // Properly parse returned array: sort descending and extract primary class + confidence.
-      const ranked = [...json].sort((a, b) => b.score - a.score);
-      const top = ranked[0];
-      const pct = Math.round(top.score * 100);
-      const parsed = parsePlantLabel(top.label);
-      const candidates: DiagnosisCandidate[] = ranked
-        .slice(0, 3)
-        .map(({ label, score }) => ({ label, score }));
-
-      const diagnosis: AssistantDiagnosis = {
-        label: top.label,
-        labelAr: parsed.labelAr,
-        cropAr: parsed.cropAr,
-        diseaseAr: parsed.diseaseAr,
-        healthy: parsed.healthy,
-        confidence: top.score,
-        model,
-        candidates,
-      };
+      // Keep the FULL prediction vector: sort descending, retain every class
+      // with its raw score. The Top-1 is the authority; the rest is the logit
+      // mass the taxonomy filter re-distributes after the wizard answers.
+      const predictions: RawPrediction[] = [...json]
+        .filter(
+          (row) =>
+            typeof row?.label === "string" &&
+            row.label.trim().length > 0 &&
+            Number.isFinite(row.score) &&
+            row.score >= 0,
+        )
+        .sort((a, b) => b.score - a.score)
+        .slice(0, MAX_PREDICTION_VECTOR)
+        .map(({ label, score }) => ({ label: label.trim(), score }));
 
       console.log(
-        `[Step 1: HF Success] label=${top.label} confidence=${pct}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
+        `[Step 1: HF Success] label=${predictions[0].label} confidence=${Math.round(predictions[0].score * 100)}% model=${model} timeout=${timeoutMs}ms classes=${predictions.length}`,
       );
-      return diagnosis;
+      return { model, predictions };
     } catch (error) {
       const detail =
         error instanceof Error
@@ -808,6 +880,104 @@ async function classifyPlantImageStrict(
   throw new Error(
     `HF Error: ${lastErrorDetail ?? "Unable to classify image with PlantVillage model (all HF endpoints failed)"}`,
   );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Interactive diagnosis — masking, recalculation, locked verdict      */
+/*  Step 1 produces the FULL MobileNetV2 vector; the wizard answer      */
+/*  masks it by crop, the survivors are renormalised and the masked     */
+/*  Top-1 becomes a diagnosis the formatter LLM may not touch.          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Structured diagnosis from a ranked prediction vector — the raw Top-1 of
+ * the first pass and the masked, recalculated Top-1 of the second pass run
+ * through this exact builder, so the contract never forks.
+ */
+function buildDiagnosisFromVector(
+  ranked: readonly (RawPrediction & { crop?: string | null; symptoms?: string[] })[],
+  model: string,
+  filtered = false,
+): AssistantDiagnosis | null {
+  const top = ranked[0];
+  if (!top) return null;
+  const parsed = parsePlantLabel(top.label);
+  return {
+    label: top.label,
+    labelAr: parsed.labelAr,
+    cropAr: parsed.cropAr ?? top.crop ?? null,
+    diseaseAr: parsed.diseaseAr,
+    healthy: parsed.healthy,
+    confidence: top.score,
+    model,
+    candidates: ranked.slice(0, 3).map(({ label, score }) => ({ label, score })),
+    // The taxonomy's own symptom fingerprint for this class — handed to the
+    // formatter so the Arabic report describes THIS disease, not a generic one.
+    symptoms: top.symptoms ?? taxonomyForLabel(top.label)?.symptoms ?? [],
+    filtered,
+  };
+}
+
+/**
+ * Validate the MobileNetV2 vector a client echoed back from the first pass
+ * (second pass only). Accepted ONLY when every row is a known PlantVillage
+ * class from {@link DISEASE_TAXONOMY} with a finite score in [0, 1] and the
+ * vector is not larger than the model itself — anything else returns null and
+ * the route re-classifies the image, so the diagnostic authority stays
+ * MobileNetV2 and never the caller.
+ */
+function sanitizeEchoedPredictions(raw: unknown): RawPrediction[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_PREDICTION_VECTOR) return null;
+  const rows: RawPrediction[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") return null;
+    const { label, score } = item as RawPrediction;
+    if (typeof label !== "string" || !label.trim()) return null;
+    if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) return null;
+    if (!taxonomyForLabel(label)) return null;
+    rows.push({ label: label.trim(), score });
+  }
+  return rows;
+}
+
+/**
+ * Arabic intro line of the first pass: explains that MobileNetV2's Top-1 is
+ * below the clarification threshold, so the system asks instead of guessing.
+ */
+function buildClarificationIntro(diagnosis: AssistantDiagnosis | null): string {
+  const pct = diagnosis ? Math.round(diagnosis.confidence * 100) : null;
+  return [
+    pct !== null
+      ? `نموذج الرؤية غير واثق بما يكفي (أعلى احتمال ${pct}% فقط)، ولن نقدّم لك تشخيصاً غير موثوق.`
+      : "نحتاج توضيحاً بسيطاً قبل التشخيص.",
+    "حدّد نوع النبات وسنعيد حساب الاحتمالات على أصناف هذا المحصول فقط:",
+  ].join("\n");
+}
+
+/**
+ * STRICT formatter instruction for the second pass: the masked MobileNetV2
+ * verdict is the diagnosis, full stop. Gemini is told — in the system
+ * instruction and again in the user turn — that it is a formatter: it writes
+ * a professional Arabic agricultural report (visible symptoms, immediate
+ * treatment, prevention) for the locked disease and MUST NOT change it,
+ * question it, or offer an alternative diagnosis.
+ */
+function buildLockedSystemPrompt(diagnosis: AssistantDiagnosis): string {
+  const pct = Math.round(diagnosis.confidence * 100);
+  return [
+    SYSTEM_PROMPT,
+    [
+      "مهمة هذه الجلسة: التنسيق فقط (Formatter) — التشخيص محسوم مسبقاً ولا يقبل النقاش.",
+      `النظام شخّص النبتة بـ «${diagnosis.labelAr}» (${diagnosis.label}) بثقة ${pct}% بعد تصفية متجه MobileNetV2 حسب المحصول الذي اختاره المستخدم.`,
+      `You are a formatter. The system has diagnosed the plant with ${diagnosis.label} (${diagnosis.labelAr}). You MUST NOT change this diagnosis. Your ONLY job is to write a professional agricultural report in Arabic explaining the visual symptoms, immediate treatment, and prevention for this specific disease.`,
+      "قواعد صارمة (التنسيق لا التشخيص):",
+      "- أنت مساعد زراعي خبير، لكن دورك هنا التنسيق لا التشخيص: لا تُبدّل التشخيص، لا تُشكّك فيه، ولا تقترح مرضاً بديلاً.",
+      "- اكتب التقرير باللغة العربية حصراً.",
+      "- ابدأ مباشرة بالتشخيص دون مقدمات أو إطالة، وبنقاط واضحة.",
+      "- كن عملياً: أعراض مرئية، علاج فوري بمواد متوفرة في السوق الجزائرية مع الجرعة وفترة الأمان، ثم الوقاية.",
+      "- لا تطلب صورة أخرى ولا تحليلاً إضافياً ولا تطرح أسئلة توضيحية.",
+    ].join("\n"),
+  ].join("\n\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -887,11 +1057,20 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .slice(1)
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
+  const symptoms = (diagnosis.symptoms ?? []).join("، ");
   return [
-    "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
+    diagnosis.filtered
+      ? "التشخيص النهائي المسجَّل في النظام (MobileNetV2 بعد تصفية المحصول — تشخيص مُقفل، ممنوع تغييره):"
+      : "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
     `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
     `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
-    alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
+    diagnosis.cropAr ? `- المحصول: ${diagnosis.cropAr}` : "",
+    symptoms ? `- الأعراض المميزة لهذا المرض (اعتمدها في وصف الأعراض المرئية): ${symptoms}` : "",
+    alternates
+      ? diagnosis.filtered
+        ? `- الأمراض الأخرى المرشّحة لنفس المحصول (للمقارنة فقط، ولا تُغيّر التشخيص): ${alternates}`
+        : `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}`
+      : "",
     diagnosis.healthy
       ? "- النموذج يرى أن النبتة سليمة؛ طمئن المستخدم وقدّم نصائح وقائية."
       : "",
@@ -917,22 +1096,26 @@ function buildUserContent(
   context: AssistantContext | undefined,
   diagnosis: AssistantDiagnosis | null,
   hasImage: boolean,
+  locked = false,
 ): string {
   const sections = [
     `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `التشخيص (من Step 1 — MobileNetV2، مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
       : hasImage
         ? "لا يتوفر تشخيص مرجعي من MobileNetV2 — افحص الصورة المرفقة مباشرةً وابدأ التشخيص من الصورة."
         : "",
-    hasImage && diagnosis
+    hasImage && diagnosis && locked
+      ? "الصورة مرفقة للسياق البصري فقط. التشخيص أعلاه مُقفل ومحسوم: أنت مُنسّق فقط، اكتب التقرير الزراعي عنه (الأعراض المرئية، العلاج الفوري، الوقاية) دون تغييره أو اقتراح تشخيص بديل."
+      : "",
+    hasImage && diagnosis && !locked
       ? "افحص الصورة المرفقة بنفسك وقيّم مدى تطابق تشخيص MobileNetV2 المرجعي أعلاه مع ما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك (اعتمد التشخيص المرجعي أو صحّحه)، مع خطة العلاج والوقاية."
       : "",
     message
       ? `سؤال المستخدم: ${message}`
       : diagnosis
-        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة PlantVillage أعلاه."
+        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة MobileNetV2 أعلاه."
         : "قدّم نفسك في جملة واحدة كمساعد زراعي خبير واطلب سؤال المستخدم دون أي حشو.",
   ].filter(Boolean);
   return sections.join("\n\n");
@@ -1012,6 +1195,7 @@ async function generateWithGeminiModel(
   signal: AbortSignal,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  systemPrompt: string = SYSTEM_PROMPT,
 ): Promise<string> {
   let response: Response;
   try {
@@ -1022,7 +1206,10 @@ async function generateWithGeminiModel(
         headers: { "Content-Type": "application/json" },
         signal,
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          // Default: the expert advisor prompt. Second pass of the interactive
+          // wizard: the SAME prompt plus the locked-formatter rules — Gemini
+          // formats the masked MobileNetV2 verdict, it never re-diagnoses.
+          systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [
             {
               role: "user",
@@ -1128,6 +1315,7 @@ async function generateWithGeminiForKey(
   userContent: string,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  systemPrompt: string = SYSTEM_PROMPT,
 ): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
@@ -1152,6 +1340,7 @@ async function generateWithGeminiForKey(
           controller.signal,
           apiKey,
           image,
+          systemPrompt,
         );
         return { model: model.id, text, warnings };
       } catch (error) {
@@ -1223,6 +1412,7 @@ async function generateWithGemini(
   userContent: string,
   geminiApiKeys: readonly string[],
   image?: AssistantImagePayload | null,
+  systemPrompt: string = SYSTEM_PROMPT,
 ): Promise<GeminiResult> {
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
@@ -1230,7 +1420,7 @@ async function generateWithGemini(
   for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
     const apiKey = geminiApiKeys[keyIndex];
     try {
-      const result = await generateWithGeminiForKey(userContent, apiKey, image);
+      const result = await generateWithGeminiForKey(userContent, apiKey, image, systemPrompt);
       return {
         ...result,
         warnings: [...rotationWarnings, ...result.warnings],
@@ -1381,6 +1571,7 @@ async function generateWithHfLlmModel(
   model: string,
   userContent: string,
   apiKey: string,
+  systemPrompt: string = SYSTEM_PROMPT,
 ): Promise<string> {
   let res: Response;
   try {
@@ -1394,7 +1585,7 @@ async function generateWithHfLlmModel(
       body: JSON.stringify({
         model,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userContent },
         ],
         temperature: 0.4,
@@ -1448,12 +1639,16 @@ async function generateWithHfLlmModel(
  * - Uses the concise professional Arabic advisor system prompt.
  * - Throws an Error prefixed with "LLM Error:" once no model can answer.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string): Promise<string> {
+async function askHfLlmStrict(
+  apiKey: string,
+  userContent: string,
+  systemPrompt: string = SYSTEM_PROMPT,
+): Promise<string> {
   const failures: string[] = [];
 
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, systemPrompt);
 
       console.log(
         `[Stage 2: HF LLM Success] model=${model} replyLength=${text.length}`,
@@ -1866,6 +2061,15 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 
   const warnings: string[] = [];
 
+  // ---- Interactive diagnosis — first pass vs second pass -------------
+  // A body carrying `userAnswers` is the SECOND pass of the wizard: the
+  // farmer already answered the low-confidence question, so the route never
+  // asks twice — it masks MobileNetV2's vector against the answer instead.
+  const userAnswers: DiagnosisUserAnswers =
+    body.userAnswers && typeof body.userAnswers === "object" ? body.userAnswers : {};
+  const cropAnswer = typeof userAnswers.crop === "string" ? userAnswers.crop.trim() : "";
+  const hasCropAnswer = cropAnswer.length > 0;
+
   // ---- Fail-proof sequential pipeline ------------------------------
   // Step 0: leaf Detection & Cropping (when image attached). An open-source
   // object detector localises the leaf, the photo is cropped with sharp and
@@ -1873,45 +2077,140 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // soil, pots) can no longer reach the disease classifier. Non-fatal by
   // construction: every failure degrades to the untouched original frame.
   let preprocessing: AssistantPreprocessing | null = null;
-  /** What actually reaches Step 1: the Step 0 crop or the original image. */
+  /** What actually reaches the LLM turn: the Step 0 crop or the original. */
   let classifyImage: AssistantImagePayload | null = image ?? null;
 
-  // Step 1: Hugging Face MobileNet vision classification (when image attached).
-  // Non-fatal: a vision outage (or a missing HF key) degrades to the LLM /
-  // direct replies instead of failing the request.
-  let diagnosis: AssistantDiagnosis | null = null;
+  // Step 1: Hugging Face MobileNetV2 classification (when image attached) —
+  // the STRICT diagnostic authority. It returns its FULL logit vector, not
+  // just a winner, because the taxonomy filter recalculates the surviving
+  // probabilities from the raw scores. Non-fatal: a vision outage (or a
+  // missing HF key) degrades to the LLM / direct replies, never a 500.
+  let predictions: RawPrediction[] = [];
+  let visionModel: string = resolveVisionModels()[0] ?? HF_VISION_MODELS[0];
   if (image) {
-    const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
-    preprocessing = detection.preprocessing;
-    classifyImage = detection.image;
-
-    if (!huggingfaceKey) {
-      const detail =
-        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
-      console.warn(`[Step 1: HF Skipped] ${detail}`);
-      warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
+    // Second pass fast path: the browser echoes the first pass's raw vector
+    // back (`body.predictions`), so the same photo is not classified twice
+    // and the diagnosis is built from the exact vector the farmer was shown.
+    // Every row is validated against the taxonomy; anything off-shape is
+    // ignored and the image is classified afresh below.
+    const echoedVector = hasCropAnswer ? sanitizeEchoedPredictions(body.predictions) : null;
+    if (echoedVector) {
+      predictions = echoedVector;
+      console.log(
+        `[Step 1: Vector Reused] second pass — ${echoedVector.length} MobileNetV2 classes reused from the first pass (no re-classification).`,
+      );
     } else {
-      try {
-        diagnosis = await classifyPlantImageStrict(
-          classifyImage.data,
-          classifyImage.mimeType,
-          huggingfaceKey,
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
-        console.warn(`[Step 1: HF Unavailable] ${detail}`);
+      const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
+      preprocessing = detection.preprocessing;
+      classifyImage = detection.image;
+
+      if (!huggingfaceKey) {
+        const detail =
+          "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
+        console.warn(`[Step 1: HF Skipped] ${detail}`);
         warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
+      } else {
+        try {
+          const classification = await classifyPlantImageStrict(
+            classifyImage.data,
+            classifyImage.mimeType,
+            huggingfaceKey,
+          );
+          predictions = classification.predictions;
+          visionModel = classification.model;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
+          console.warn(`[Step 1: HF Unavailable] ${detail}`);
+          warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
+        }
       }
     }
   }
 
+  // MobileNetV2's own Top-1 — the strict diagnostic authority.
+  let diagnosis = buildDiagnosisFromVector(predictions, visionModel);
+
+  // ---- FIRST PASS: shaky confidence → ask before diagnosing ----------
+  // Below the threshold the route refuses to forward a coin-flip verdict to
+  // the LLM: it stops here and returns the questionnaire. No LLM is called at
+  // all on this pass, so a wrong-but-confident report can never be produced.
+  if (
+    image &&
+    diagnosis &&
+    !hasCropAnswer &&
+    diagnosis.confidence < CLARIFICATION_CONFIDENCE_THRESHOLD
+  ) {
+    const questions = buildClarificationQuestions();
+    console.log(
+      `[Interactive: Clarification] top=${diagnosis.label} confidence=${Math.round(diagnosis.confidence * 100)}% < ${Math.round(CLARIFICATION_CONFIDENCE_THRESHOLD * 100)}% — asking the farmer which plant this is.`,
+    );
+    const payload: AssistantResponseBody = {
+      reply: buildClarificationIntro(diagnosis),
+      diagnosis: null,
+      source: "clarification",
+      requiresClarification: true,
+      questions,
+      // The raw logit vector travels back with the question so the second
+      // pass is answered from the EXACT same MobileNetV2 output (and skips a
+      // second detection + classification round-trip on the same photo).
+      predictions,
+      ...(preprocessing ? { preprocessing } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+    return NextResponse.json(payload);
+  }
+
+  // ---- SECOND PASS: logit masking + recalculation --------------------
+  // The farmer named the crop: every MobileNetV2 class that cannot grow on
+  // that plant is dropped, the survivors' raw scores are summed and divided
+  // into each survivor (their true relative probability), and the masked
+  // Top-1 becomes the locked diagnosis Gemini may only format.
+  let filterReport: DiagnosisFilterReport | null = null;
+  let lockedDiagnosis = false;
+  if (image && diagnosis && hasCropAnswer) {
+    const filtered = applyTaxonomyFilter(predictions, userAnswers);
+    filterReport = buildFilterReport(predictions, filtered, userAnswers);
+    if (filterReport.applied && filtered.length > 0) {
+      diagnosis = buildDiagnosisFromVector(filtered as FilteredPrediction[], visionModel, true);
+      lockedDiagnosis = true;
+      console.log(
+        `[Interactive: Masked] crop=${filterReport.crop} classes=${filterReport.matchedClasses}/${filterReport.totalClasses} top=${filterReport.topLabelBefore} ${Math.round(filterReport.topScoreBefore * 100)}% → ${filterReport.topLabelAfter} ${Math.round(filterReport.topScoreAfter * 100)}%`,
+      );
+    } else if (resolveCropKey(cropAnswer)) {
+      // The crop was understood but MobileNetV2 never predicted any class of
+      // it — masking would empty the vector, so the raw ranking stands and the
+      // degradation is reported instead of silently mis-masking.
+      const detail = `تعذّرت التصفية حسب المحصول (${cropAnswer}): لا يوجد أي صنف من أصناف MobileNetV2 يطابق هذا المحصول — اعتُمد ترتيب النموذج كما هو.`;
+      console.warn(`[Interactive: Filter Skipped] ${detail}`);
+      warnings.push(detail.slice(0, 400));
+    } else {
+      // "غير ذلك" / unrecognised answer: the farmer opted out of the mask, so
+      // MobileNetV2's own ranking stands as-is (nothing to report).
+      console.log(
+        `[Interactive: Filter Skipped] المحصول المُجاب (${cropAnswer || "—"}) غير محدَّد — لم تُطبَّق أي تصفية؛ اعتُمد ترتيب النموذج كما هو.`,
+      );
+    }
+  }
+
+  // System instruction for this request: the expert advisor prompt, plus the
+  // LOCKED FORMATTER rules whenever the taxonomy filter produced the verdict
+  // (Gemini then formats the MobileNetV2 diagnosis — it never re-diagnoses).
+  const systemPrompt =
+    lockedDiagnosis && diagnosis ? buildLockedSystemPrompt(diagnosis) : SYSTEM_PROMPT;
+
   // One user turn for both LLM stages: user query + Firestore profile context
-  // (Wilaya, crop type, role) + the Step 1 MobileNetV2 reference diagnosis
-  // (disease label, confidence score, candidate diseases) whenever it exists
-  // + the image instruction whenever a photo is attached (hybrid primary
-  // path with the reference, Fallback A without it).
-  const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage));
+  // (Wilaya, crop type, role) + the Step 1 MobileNetV2 verdict (disease label,
+  // confidence score, candidate diseases, symptom fingerprint) whenever it
+  // exists + the image instruction whenever a photo is attached (hybrid
+  // primary path with the reference, Fallback A without it).
+  const userContent = buildUserContent(
+    message,
+    context,
+    diagnosis,
+    Boolean(classifyImage),
+    lockedDiagnosis,
+  );
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
   // gemini-3.5-flash (→ 3.5-flash-lite → 2.5-flash on a retired-id 404) via
@@ -1928,7 +2227,12 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let reply: string | null = null;
   if (geminiApiKeys.length > 0) {
     try {
-      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage);
+      const geminiResult = await generateWithGemini(
+        userContent,
+        geminiApiKeys,
+        classifyImage,
+        systemPrompt,
+      );
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
@@ -1957,7 +2261,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (reply === null) {
     if (huggingfaceKey) {
       try {
-        reply = await askHfLlmStrict(huggingfaceKey, userContent);
+        reply = await askHfLlmStrict(huggingfaceKey, userContent, systemPrompt);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
@@ -1981,6 +2285,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       diagnosis,
       source: diagnosis ? "hybrid" : "llm",
       ...(preprocessing ? { preprocessing } : {}),
+      ...(filterReport ? { filtered: filterReport } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
     return NextResponse.json(payload);
@@ -2010,6 +2315,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     diagnosis,
     source: "direct",
     ...(preprocessing ? { preprocessing } : {}),
+    ...(filterReport ? { filtered: filterReport } : {}),
     warnings,
   };
   return NextResponse.json(payload);

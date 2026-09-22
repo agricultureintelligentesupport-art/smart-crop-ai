@@ -113,16 +113,31 @@ photo (base64)
   │    (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification, the
   │    single clean default; overridable with HF_VISION_MODEL) on the same
   │    free router; receives ONLY the Step 0 crop when detection succeeded,
-  │    the full frame otherwise.
+  │    the full frame otherwise. It returns its WHOLE logit vector (38
+  │    classes), and its Top-1 is the strict diagnostic authority.
+  │
+  ├─ Step 1.5 · Interactive diagnosis (Top-1 < 60%) — the route asks
+  │    "ما هو نوع هذا النبات؟" instead of forwarding a coin-flip verdict:
+  │    `{ requiresClarification: true, questions: [...] }` and NO LLM call.
+  │    The wizard answer comes back with the photo + the echoed vector; the
+  │    taxonomy filter (src/lib/vision/taxonomyFilter.ts) drops every class
+  │    that cannot grow on that crop and RECALCULATES the survivors (raw ÷
+  │    Σ raw), so a 15% tomato class behind a 45% potato class becomes the
+  │    100% tomato verdict. Answering "غير ذلك" leaves the ranking untouched.
   │
   └─ Stages 1–3 · HYBRID Gemini (image + MobileNetV2 reference; raw-image
      Fallback A when MobileNetV2 fails; direct MobileNetV2 card Fallback B
      when every Gemini key fails) → HF LLM chain → built-in formatter.
+     After a masking pass Gemini is a FORMATTER only: the locked diagnosis
+     (label, recalculated confidence, symptom fingerprint) travels in the
+     system + user turn and it must not change, question or replace it.
      Gemini key pool: GEMINI_API_KEY + GEMINI_API_KEYS + numbered
      GEMINI_API_KEY_N — rotated on 429 / RESOURCE_EXHAUSTED / quota.
 ```
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
+The interactive pass, its recalculation maths and the locked formatter rules:
+[`docs/interactive-diagnosis.md`](docs/interactive-diagnosis.md).
 
 
 ## Structure
@@ -153,6 +168,8 @@ src/
 │   └── dashboard/              # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
 │                               # FieldTasksCard, UpgradeCard, WilayaSelect, parts
 ├── lib/
+│   ├── vision/taxonomyFilter.ts # DISEASE_TAXONOMY (38 classes → crop + symptoms),
+│   │                            # applyTaxonomyFilter (mask + recalculation)
 │   ├── content.ts              # onboarding copy (AR/FR)
 │   ├── wilayas.ts              # 58 wilayas + climate/soil/crop baselines, fuzzy search
 │   ├── agronomy.ts             # weather, ET₀, irrigation, NDVI, demo diagnosis
