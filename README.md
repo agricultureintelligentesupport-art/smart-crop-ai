@@ -116,7 +116,7 @@ photo (base64)
   │    the full frame otherwise. It returns its WHOLE logit vector (38
   │    classes), and its Top-1 is the strict diagnostic authority.
   │
-  ├─ Step 1.5 · Interactive diagnosis (Top-1 < 60%) — the route asks
+  ├─ Step 1.5 · Interactive diagnosis (Top-1 < 90%) — the route asks
   │    "ما هو نوع هذا النبات؟" instead of forwarding a coin-flip verdict:
   │    `{ requiresClarification: true, questions: [...] }` and NO LLM call.
   │    The wizard answer comes back with the photo + the echoed vector; the

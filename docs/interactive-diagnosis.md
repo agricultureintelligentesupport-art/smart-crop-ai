@@ -7,11 +7,14 @@
 raw probability each. The LLM stages downstream may *format* its verdict —
 they may never invent one.
 
-But the model's Top-1 is sometimes a coin flip (a 45% potato guess with a 15%
-tomato runner-up), and a low-confidence guess wrapped in a fluent Arabic
-report is worse than no answer at all. So the route now **asks instead of
-guessing**: one question, one answer, and the logit vector itself is
-re-scored against the farmer's crop.
+But MobileNetV2 is **confidently wrong** more often than its softmax admits:
+an 83% "Potato___Late_blight" on a tomato leaf is not a coin flip, yet it is a
+wrong locked diagnosis — and it never reached the taxonomy filter, the only
+mechanism that can drop impossible crops. A confident-looking guess wrapped in
+a fluent Arabic report is worse than no answer at all, so the gate sits at
+**90%**: below it the route **asks instead of guessing** — one question, one
+answer, and the logit vector itself is re-scored against the farmer's crop.
+The check is strict (`< 0.9`), so a Top-1 of exactly 90% still proceeds.
 
 ## The two passes
 
@@ -20,9 +23,9 @@ POST /api/assistant { message, image }
   │
   ├─ Step 0 detect + crop  →  Step 1 MobileNetV2 (FULL vector, 38 classes)
   │
-  ├─ Top-1 ≥ 60%  →  normal hybrid path (Gemini formats the verdict)
+  ├─ Top-1 ≥ 90%  →  normal hybrid path (Gemini formats the verdict)
   │
-  └─ Top-1 < 60%  →  200 {
+  └─ Top-1 < 90%  →  200 {
                        requiresClarification: true,
                        questions: [{
                          id: "crop",
@@ -101,6 +104,8 @@ fingerprint — never the classes the mask removed.
 | Second pass without the echoed vector (or with a malformed one) | The image is re-classified; every echoed row must resolve to a taxonomy class with a finite score in [0,1] before it is trusted. |
 | Vision outage on the second pass | Normal degradation: Fallback A (Gemini inspects the raw image) → HF LLM → built-in card. `/api/assistant` still never returns 500. |
 | Masked Top-1 still < 45% (crop classes split evenly) | The verdict ships with its honest percentage and the direct card keeps the "أرسل صورة أوضح" note. |
+| Top-1 between 60% and 90% (e.g. the 83% regressions) | Treated like any shaky verdict: the questionnaire runs, so the wrong-crop logits are masked away before the LLM sees anything. |
+| Second pass (the questionnaire was already answered) | Never re-asks — the mask runs and the masked Top-1 is the verdict, whatever its recalculated value. |
 
 ## Frontend
 

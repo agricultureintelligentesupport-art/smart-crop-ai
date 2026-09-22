@@ -15,7 +15,7 @@ import {
  * Interactive diagnosis wizard (first pass of `/api/assistant` returned
  * `requiresClarification`).
  *
- * MobileNetV2 is the diagnostic authority, but below 60% Top-1 confidence it
+ * MobileNetV2 is the diagnostic authority, but below 90% Top-1 confidence it
  * cannot tell a tomato from a potato on that photo. So the farmer is asked
  * exactly one question — which plant is this — and the answer is sent back
  * with the original image and the raw logit vector. The server then drops

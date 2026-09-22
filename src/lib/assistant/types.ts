@@ -4,7 +4,7 @@
  *   Step 0  leaf detection & cropping,
  *   Step 1  Hugging Face MobileNetV2 PlantVillage vision diagnosis (the FULL
  *           logit vector, and the strict diagnostic authority),
- *   Step 1.5 interactive diagnosis — below 60% Top-1 the route returns
+ *   Step 1.5 interactive diagnosis — below 90% Top-1 the route returns
  *           `requiresClarification` + `questions` (source `"clarification"`)
  *           and the wizard's answer masks + recalculates the vector,
  *   Stage 1 Google Gemini (primary LLM — a locked formatter after a mask),
@@ -155,7 +155,7 @@ export interface AssistantResponseBody {
   /** Non-fatal pipeline notes (e.g. "vision step skipped"). */
   warnings?: string[];
   /**
-   * Interactive diagnosis (first pass, image + Top-1 confidence < 60%):
+   * Interactive diagnosis (first pass, image + Top-1 confidence < 90%):
    * the route asks BEFORE diagnosing instead of guessing. The frontend renders
    * `questions`, then re-sends the original image plus `userAnswers`.
    */

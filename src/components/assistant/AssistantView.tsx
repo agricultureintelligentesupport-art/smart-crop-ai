@@ -233,7 +233,7 @@ export default function AssistantView() {
   /**
    * One round-trip to `/api/assistant`, handling BOTH passes of the
    * interactive diagnosis flow:
-   *  • first pass — photo only: a Top-1 below 60% comes back as
+   *  • first pass — photo only: a Top-1 below 90% comes back as
    *    `requiresClarification`, and the bubble keeps the questionnaire (plus
    *    the raw MobileNetV2 vector) for the second pass;
    *  • second pass — `answers` set: the original photo + the farmer's crop +

@@ -1552,7 +1552,7 @@ test("interactive diagnosis: a low-confidence Top-1 stops before both LLMs and a
   mockGeminiDownThen(async (url: string) => {
     urls.push(url);
     if (isChatUrl(url)) return new Response(null, { status: 503 });
-    // Step 1 — MobileNetV2 sees a 30% tomato guess: far below the 60%
+    // Step 1 — MobileNetV2 sees a 30% tomato guess: far below the 90%
     // clarification threshold, so the route must ASK instead of diagnosing.
     return Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]);
   });

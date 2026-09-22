@@ -49,8 +49,9 @@
  *     is the strict diagnostic authority, but a shaky Top-1 must not become a
  *     confident-sounding report, so the route splits the diagnosis in two:
  *       • FIRST PASS (no `userAnswers` in the body) — when Step 1's Top-1
- *         confidence is < {@link CLARIFICATION_CONFIDENCE_THRESHOLD} (60%),
- *         the request STOPS right after Step 1 and answers 200
+ *         confidence is < {@link CLARIFICATION_CONFIDENCE_THRESHOLD} (90%,
+ *         raised from 60% after confident-but-wrong 83% verdicts bypassed the
+ *         mask), the request STOPS right after Step 1 and answers 200
  *         `{ requiresClarification: true, questions: [{ id: "crop",
  *         question: "ما هو نوع هذا النبات؟", options: ["طماطم", "بطاطس",
  *         "عنب", "تفاح", "خوخ", "غير ذلك"] }], source: "clarification",
@@ -243,8 +244,18 @@ export const maxDuration = 60;
  * {@link applyTaxonomyFilter} (wrong-crop classes dropped, surviving scores
  * recalculated), and the masked Top-1 — and only it — is handed to Gemini as
  * a locked diagnosis it may format but never change.
+ *
+ * WHY 90% (was 60%): PlantVillage MobileNetV2 is *confidently wrong* far
+ * more often than its softmax suggests — an 83% "Potato___Late_blight" on a
+ * tomato leaf used to sail straight past the 60% gate and reach the LLM as a
+ * locked diagnosis, so the taxonomy filter (the one mechanism that can drop
+ * impossible crops) never ran. Only a Top-1 the model is nearly certain
+ * about may skip the questionnaire: below this value the route ALWAYS asks
+ * instead of diagnosing, trading one extra tap for the guarantee that the
+ * wrong-crop logits can never win unnoticed. The check is strict (`<`), so a
+ * Top-1 of exactly 90% still proceeds.
  */
-export const CLARIFICATION_CONFIDENCE_THRESHOLD = 0.6;
+export const CLARIFICATION_CONFIDENCE_THRESHOLD = 0.9;
 
 /* ------------------------------------------------------------------ */
 /*  Tunables                                                           */

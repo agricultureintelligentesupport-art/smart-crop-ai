@@ -3,9 +3,10 @@
  *
  * Covers the three moving parts that make MobileNetV2 the strict diagnostic
  * authority:
- *   1. FIRST PASS — a Top-1 below 60% stops the pipeline and returns the
- *      clarification questionnaire (`requiresClarification` + `questions`),
- *      with NO LLM call at all;
+ *   1. FIRST PASS — a Top-1 below 90% (raised from 60% after confident-but-
+ *      wrong verdicts like 83% bypassed the mask) stops the pipeline and
+ *      returns the clarification questionnaire (`requiresClarification` +
+ *      `questions`), with NO LLM call at all;
  *   2. SECOND PASS — the full MobileNetV2 vector is masked against the
  *      farmer's crop (wrong-crop classes dropped, survivors recalculated) and
  *      the masked Top-1 becomes the diagnosis;
@@ -128,6 +129,8 @@ interface PayloadLike {
   source: string;
   requiresClarification?: boolean;
   questions?: { id: string; question: string; options: string[] }[];
+  /** Raw MobileNetV2 vector, echoed only on the clarification response. */
+  predictions?: { label: string; score: number }[];
   diagnosis: {
     label: string;
     labelAr: string;
@@ -161,7 +164,7 @@ const warningText = (payload: PayloadLike) => (payload.warnings ?? []).join(" | 
 /*  1. First pass — ask before diagnosing                              */
 /* ------------------------------------------------------------------ */
 
-test("first pass: Top-1 < 60% returns the crop questionnaire and calls no LLM", async () => {
+test("first pass: Top-1 < 90% returns the crop questionnaire and calls no LLM", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -193,7 +196,90 @@ test("first pass: Top-1 < 60% returns the crop questionnaire and calls no LLM", 
   assert.ok(urls[1].includes(MOBILENET_MODEL));
 });
 
-test("first pass: a confident Top-1 (≥ 60%) diagnoses straight away, no questionnaire", async () => {
+/**
+ * The regression this threshold exists for: MobileNetV2 answered
+ * "Potato___Late_blight" with 83% confidence on a tomato leaf. 60% let it
+ * through to the LLM as a locked diagnosis and the taxonomy filter never ran.
+ */
+test("REGRESSION: a confidently-wrong 83% Top-1 now halts for clarification", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isDetectUrl(String(url))) return Response.json([]);
+    if (isClassifyUrl(String(url))) {
+      return Response.json([
+        { label: "Potato___Late_blight", score: 0.83 },
+        { label: "Tomato___Early_blight", score: 0.1 },
+      ]);
+    }
+    assert.fail(`no LLM may be called on a sub-90% first pass: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as PayloadLike;
+
+  // The API HALTS: questionnaire out, no diagnosis, no LLM round-trip.
+  assert.equal(payload.requiresClarification, true);
+  assert.equal(payload.source, "clarification");
+  assert.equal(payload.diagnosis, null);
+  assert.deepEqual(payload.questions, [
+    {
+      id: "crop",
+      question: "ما هو نوع هذا النبات؟",
+      options: ["طماطم", "بطاطس", "عنب", "تفاح", "خوخ", "غير ذلك"],
+    },
+  ]);
+  assert.match(payload.reply, /83%/);
+  // The disputed 83% potato verdict travels as raw logits for the second pass.
+  assert.deepEqual(payload.predictions, [
+    { label: "Potato___Late_blight", score: 0.83 },
+    { label: "Tomato___Early_blight", score: 0.1 },
+  ]);
+  assert.equal(urls.filter((url) => isGeminiUrl(url) || isChatUrl(url)).length, 0);
+});
+
+test("threshold boundary: exactly 90% proceeds, 89% asks", async () => {
+  for (const [score, expectsClarification] of [
+    [0.9, false],
+    [0.89, true],
+    [0.95, false],
+  ] as const) {
+    configureKeys();
+    mock.restoreAll();
+    const llmCalls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isDetectUrl(String(url))) return Response.json([]);
+      if (isClassifyUrl(String(url))) {
+        return Response.json([{ label: "Tomato___Early_blight", score }]);
+      }
+      llmCalls.push(String(url));
+      return geminiReply("تقرير.");
+    });
+
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    const payload = (await response.json()) as PayloadLike;
+
+    assert.equal(
+      Boolean(payload.requiresClarification),
+      expectsClarification,
+      `score ${score} should ${expectsClarification ? "" : "not "}ask`,
+    );
+    if (expectsClarification) {
+      assert.equal(payload.diagnosis, null);
+      assert.equal(llmCalls.length, 0);
+    } else {
+      assert.equal(payload.source, "hybrid");
+      assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+      assert.equal(llmCalls.length, 1);
+      // A confident first pass keeps the plain expert prompt — no lock.
+      assert.doesNotMatch(llmCalls[0] ?? "", /formatter/);
+    }
+  }
+});
+
+test("first pass: a confident Top-1 (≥ 90%) diagnoses straight away, no questionnaire", async () => {
   configureKeys();
   let system = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {

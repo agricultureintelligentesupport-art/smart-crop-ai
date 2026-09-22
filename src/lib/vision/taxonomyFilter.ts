@@ -5,7 +5,7 @@
  * is the STRICT diagnostic authority of the pipeline: it emits one probability
  * per PlantVillage class (38 of them) and the route NEVER lets an LLM talk it
  * out of that verdict. The only thing the system is allowed to do with the
- * vector is MASK it: when the Top-1 confidence is low (< 60%) the farmer is
+ * vector is MASK it: when the Top-1 confidence is low (< 90%) the farmer is
  * asked a single clarifying question — "ما هو نوع هذا النبات؟" — and the
  * classes that cannot belong to the chosen crop are dropped outright.
  *
