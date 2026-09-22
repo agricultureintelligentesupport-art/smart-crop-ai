@@ -100,26 +100,20 @@ vision pipeline before the LLM stages run:
 photo (base64)
   │
   ├─ Step 0 · Detection & Cropping ── open-source object detector on the FREE
-  │    Hugging Face Inference router (facebook/detr-resnet-50 COCO
-  │    DETR-ResNet-50, plant labels only; chain overridable with
-  │    HF_LEAF_DETECT_MODELS). The dominant detection cluster becomes a
-  │    padded, clamped crop window and sharp crops the photo, so hands, soil
-  │    and pots never reach the classifier.
+  │    Hugging Face Inference router (DETR-ResNet-50 fine-tuned on PlantDoc →
+  │    facebook/detr-resnet-50 COCO fallback, plant labels only; chain
+  │    overridable with HF_LEAF_DETECT_MODELS). The dominant detection cluster
+  │    becomes a padded, clamped crop window and sharp crops the photo, so
+  │    hands, soil and pots never reach the classifier.
   │    Every failure (no key, undecodable image, detector down/loading, no
   │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
   │    frame — the outcome lands in `preprocessing` on the API response.
   │
-  ├─ Step 1 · PlantVillage classifier ── MobileNetV2
-  │    (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification, the
-  │    single clean default; overridable with HF_VISION_MODEL) on the same
-  │    free router; receives ONLY the Step 0 crop when detection succeeded,
-  │    the full frame otherwise.
+  ├─ Step 1 · PlantVillage classifier ── MobileNetV2 (ViT fallback) on the
+  │    same free router; receives ONLY the Step 0 crop when detection
+  │    succeeded, the full frame otherwise.
   │
-  └─ Stages 1–3 · HYBRID Gemini (image + MobileNetV2 reference; raw-image
-     Fallback A when MobileNetV2 fails; direct MobileNetV2 card Fallback B
-     when every Gemini key fails) → HF LLM chain → built-in formatter.
-     Gemini key pool: GEMINI_API_KEY + GEMINI_API_KEYS + numbered
-     GEMINI_API_KEY_N — rotated on 429 / RESOURCE_EXHAUSTED / quota.
+  └─ Stages 1–3 · Gemini → HF LLM chain → built-in formatter (unchanged).
 ```
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
