@@ -56,8 +56,31 @@ export interface AssistantPreprocessing {
   durationMs: number;
 }
 
+/**
+ * One prior conversation turn (Conversational Memory). The client replays the
+ * whole chat so the LLM keeps context across turns: oldest turn first, newest
+ * last. The CURRENT turn travels separately (`message` + optional `image`),
+ * because the server enriches it with the Firestore profile context and the
+ * Step 1 vision diagnosis before it reaches the LLM.
+ */
+export interface AssistantChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface AssistantRequestBody {
   message?: string;
+  /**
+   * Prior conversation turns (oldest → newest), current turn excluded — the
+   * conversational memory fed to the LLM stages.
+   */
+  history?: AssistantChatTurn[];
+  /**
+   * Alias of {@link AssistantRequestBody.history} — accepted so clients that
+   * model the whole conversation as a `messages` array work unchanged. When
+   * both fields are present, `history` wins.
+   */
+  messages?: AssistantChatTurn[];
   image?: AssistantImagePayload;
   context?: AssistantContext;
 }

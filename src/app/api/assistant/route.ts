@@ -70,10 +70,12 @@
  *     predate thinking and receive NO `thinkingConfig` (the wrong parameter
  *     is a 400).
  *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
- *     `systemInstruction`; the user turn carries the user query, the Firestore
- *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
- *     — the MobileNetV2 reference diagnosis (disease label, confidence score
- *     and candidate diseases). Whenever a photo is attached, the image
+ *     `systemInstruction`; conversational memory (the client's prior turns,
+ *     replayed under `history`/`messages`) fills the leading `contents`, and
+ *     the CURRENT user turn carries the user query, the Firestore profile
+ *     context (Wilaya, crop, role…) and — whenever Step 1 produced one — the
+ *     MobileNetV2 reference diagnosis (disease label, confidence score and
+ *     candidate diseases). Whenever a photo is attached, the image
  *     itself travels with the turn as an `inlineData` part (the Step 0 crop
  *     when detection succeeded, the raw frame otherwise), so:
  *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini inspects the image,
@@ -122,16 +124,17 @@
  *     When no Hugging Face token is configured at all, Stage 2 is skipped
  *     synchronously — no request, no exception, no waiting — and Stage 3
  *     answers immediately.
- *     The same system prompt, the same user query and the same Step 1 vision
- *     context are fed into the LLM behind a system prompt that enforces the
- *     «Adaptive, Direct, and Empathetic Expert» persona in Arabic
- *     ("أنت مساعد زراعي خبير…"): direct core-finding openings, tone adapted
- *     to the user's state, progressive disclosure (general view → specific
- *     cause → concrete itemized action), bolded key terms and bullets with
- *     no labeled closings, and a single natural follow-up question at the
- *     end — no repeated greetings or rehashed advice on ongoing
- *     conversations, strictly within the agriculture / date-palm / Algerian
- *     farming domain.
+ *     The same system prompt, the same conversational memory, the same user
+ *     query and the same Step 1 vision context are fed into the LLM behind a
+ *     system prompt that enforces the «Adaptive, Direct, and Empathetic
+ *     Expert» persona in Arabic ("أنت مساعد زراعي خبير…"): direct core-finding
+ *     openings, tone adapted to the user's state, progressive disclosure
+ *     (general view → specific cause → concrete itemized action), bolded key
+ *     terms and bullets with no labeled closings, a single natural follow-up
+ *     question at the end, and strict in-character No-Meta-Talk (never expose
+ *     model names or confidence scores) — no repeated greetings or rehashed
+ *     advice on ongoing conversations, strictly within the agriculture /
+ *     date-palm / Algerian farming domain.
  *
  *   Stage 3 (both LLM stages down — zero-failure formatting):
  *     built-in TypeScript formatters answer 200 with `{ source: "direct" }`:
@@ -183,6 +186,7 @@ import {
 } from "@/lib/assistant/leaf-detect";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
+  AssistantChatTurn,
   AssistantContext,
   AssistantDiagnosis,
   AssistantImagePayload,
@@ -866,6 +870,12 @@ async function classifyPlantImageStrict(
  *   4. Readability — bold key terms, clear bullets, no large text blocks,
  *      never labeled closings ("في الختام", "خلاصة القول").
  *   5. Closing — exactly one natural, context-specific follow-up question.
+ *   6. Strict in-character & No Meta-Talk — never expose the technical
+ *      backend: words like "النموذج" (Model), "الذكاء الاصطناعي", "نظام
+ *      التصنيف" and "نسبة الثقة" (Confidence) are forbidden; the diagnosis is
+ *      always presented as the expert's own conclusion, and an uncertain
+ *      result becomes a natural request for a closer photo, never "the model
+ *      is unsure".
  * All of it strictly within the agriculture / date-palm / Algerian farming
  * domain.
  */
@@ -894,9 +904,15 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 5) الخاتمة:
 - أنهِ ردّك بسؤال متابعة واحد فقط، طبيعي ومحدد ومرتبط بالسياق مباشرة، لإبقاء المحادثة متواصلة. مثال: "هل لاحظت أي تساقط للثمار مع هذه البقع؟" أو "متى كانت آخر مرة قمت فيها بالتسميد؟"
 
+6) التقمص التام ومنع المصطلحات التقنية (التزام صارم):
+- أنت مهندس زراعي خبير ولست نظاماً برمجياً: تبنّ كل تشخيص كأنه استنتاجك وخبرتك الشخصية المباشرة.
+- يُمنع منعاً باتاً استخدام أي من هذه الكلمات أو ما شابهها أمام المستخدم: "النموذج" (Model)، "الذكاء الاصطناعي"، "نظام التصنيف"، "نسبة الثقة" (Confidence)، وأسماء أي نماذج أو أدوات تقنية.
+- لا تشرح للمستخدم كيف تحلل الصور أو كيف تعمل من الداخل.
+- إذا كانت النتيجة أو الصورة غير دقيقة، لا تقل "النموذج غير متأكد" أو "نسبة الثقة ضعيفة"، بل قل مباشرة: "الأعراض في هذه الصورة غير واضحة تماماً، هل يمكنك التقاط صورة أقرب للورقة المصابة؟"
+
 التشخيص والعلاج:
-- عند وجود تشخيص من نموذج الرؤية (PlantVillage): قيّمه بمقارنته بما تراه في الصورة، واذكر المرض بالعربية مع نسبة الثقة (مثال: تبقع مبكر 95%)، ثم خطة العلاج والوقاية حسب البنية أعلاه.
-- إن كانت نسبة الثقة ضعيفة (<45%)، اطلب صورة أوضح في سطر واحد مع ذكر التشخيصات البديلة المحتملة.
+- عند توفر نتيجة تحليل مرجعية للصورة: قارنها بما تراه بنفسك في الصورة، واعرض التشخيص النهائي على أنه استنتاجك وخبرتك الشخصية — اذكر المرض بالعربية ثم خطة العلاج والوقاية حسب البنية أعلاه، دون ذكر أي أرقام ثقة أو أسماء نماذج أو أدوات.
+- إن كانت الأعراض غير واضحة أو كانت النتيجة المرجعية ضعيفة، قل مباشرة: "الأعراض في هذه الصورة غير واضحة تماماً، هل يمكنك التقاط صورة أقرب للورقة المصابة؟" — دون أي إشارة إلى عدم تأكد النظام.
 - اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع الجرعات الإرشادية وفترة الأمان قبل الجني.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
 
@@ -989,6 +1005,131 @@ function buildUserContent(
   return sections.join("\n\n");
 }
 
+/* ------------------------------------------------------------------ */
+/*  Conversational memory — prior turns threaded into BOTH LLM stages   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Hard cap on how many prior turns travel into the LLM payload. A long chat
+ * replayed verbatim would blow the context window, inflate latency and cost,
+ * and dilute the current question — the newest turns carry the signal, so
+ * only the tail is kept.
+ */
+const MAX_HISTORY_TURNS = 24;
+
+/** True when the value is a well-formed user/assistant chat turn. */
+function isChatTurn(value: unknown): value is AssistantChatTurn {
+  if (!value || typeof value !== "object") return false;
+  const turn = value as AssistantChatTurn;
+  return (
+    (turn.role === "user" || turn.role === "assistant") &&
+    typeof turn.content === "string"
+  );
+}
+
+/**
+ * Extract + sanitize the conversational memory from the request body. The
+ * client may send it under `history` (canonical) or `messages` (alias — the
+ * whole chat modelled as a messages array). Only well-formed user/assistant
+ * turns with non-empty text survive; the list is trimmed to the newest
+ * {@link MAX_HISTORY_TURNS}. Returns [] when nothing usable was sent, which
+ * keeps every legacy single-turn request behaving exactly as before.
+ */
+function extractHistory(body: AssistantRequestBody): AssistantChatTurn[] {
+  const raw = Array.isArray(body.history)
+    ? body.history
+    : Array.isArray(body.messages)
+      ? body.messages
+      : [];
+  return raw
+    .filter(isChatTurn)
+    .map((turn) => ({ role: turn.role, content: turn.content.trim() }))
+    .filter((turn) => turn.content.length > 0)
+    .slice(-MAX_HISTORY_TURNS);
+}
+
+/** One Gemini content turn: a role plus its text/image parts. */
+interface GeminiContentTurn {
+  role: "user" | "model";
+  parts: ({ text: string } | { inlineData: { mimeType: string; data: string } })[];
+}
+
+/**
+ * Normalize prior turns into Gemini `contents` shape. Gemini enforces a
+ * strict user/model alternation that must START with a user turn, so:
+ *   • assistant → model, user → user;
+ *   • consecutive same-role turns are merged into one (a single speaker can
+ *     still hold the floor across multiple parts);
+ *   • leading model turns are dropped so the conversation opens on user.
+ * Returns [] for an empty history, leaving the current turn as `contents[0]`
+ * (the exact single-turn behaviour the tests and fallbacks rely on).
+ */
+function geminiHistoryContents(history: readonly AssistantChatTurn[]): GeminiContentTurn[] {
+  const turns: GeminiContentTurn[] = [];
+  for (const turn of history) {
+    const role: "user" | "model" = turn.role === "assistant" ? "model" : "user";
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) {
+      // Same speaker again — merge rather than break Gemini's alternation.
+      last.parts.push({ text: turn.content });
+    } else {
+      turns.push({ role, parts: [{ text: turn.content }] });
+    }
+  }
+  // Gemini conversations must start with a user turn.
+  while (turns.length > 0 && turns[0].role !== "user") turns.shift();
+  return turns;
+}
+
+/**
+ * Assemble the FULL Gemini `contents` for one request: the conversational
+ * memory (normalized) followed by the current user turn. When a photo is
+ * attached it travels on the CURRENT turn only (history turns are text — the
+ * original pixels are never replayed). If the last memory turn happens to be
+ * a user turn (e.g. the previous reply failed), the current turn is merged
+ * into it so Gemini's alternation rule is never violated.
+ */
+function buildGeminiContents(
+  history: readonly AssistantChatTurn[],
+  userContent: string,
+  image: AssistantImagePayload | null | undefined,
+): GeminiContentTurn[] {
+  const turns = geminiHistoryContents(history);
+  const currentParts: GeminiContentTurn["parts"] = image
+    ? [
+        // The photo itself (Step 0 crop or the raw frame) — Gemini inspects
+        // it and cross-checks the MobileNetV2 reference in the text part.
+        { inlineData: { mimeType: image.mimeType, data: image.data } },
+        { text: userContent },
+      ]
+    : [{ text: userContent }];
+
+  const lastTurn = turns[turns.length - 1];
+  if (lastTurn && lastTurn.role === "user") {
+    lastTurn.parts.push(...currentParts);
+    return turns;
+  }
+  turns.push({ role: "user", parts: currentParts });
+  return turns;
+}
+
+/**
+ * Assemble the FULL OpenAI-style `messages` array for the Hugging Face stage:
+ * SYSTEM_PROMPT first, then the whole prior conversation (conversational
+ * memory, sanitized), then the current user turn. With no history this is
+ * exactly [system, user] — the single-turn shape the tests assert.
+ */
+function buildHfMessages(
+  history: readonly AssistantChatTurn[],
+  userContent: string,
+): { role: "system" | "user" | "assistant"; content: string }[] {
+  return [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...history.map((turn) => ({ role: turn.role, content: turn.content })),
+    { role: "user" as const, content: userContent },
+  ];
+}
+
 /** Any Stage-1 failure; the caller degrades to Stage 2 (and then 3) either way. */
 class GeminiError extends Error {
   /** Upstream status when the failure came back as an HTTP response. */
@@ -1045,11 +1186,13 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
 /**
  * One `models.generateContent` round-trip against a single Gemini id:
  *   • `systemInstruction` — the expert Arabic advisor system prompt;
- *   • `contents[0].parts` — the user query + profile context + the Step 1
- *     MobileNetV2 reference diagnosis (label, confidence, candidates); when
- *     `image` is set the photo travels too as an `inlineData` part — the
- *     HYBRID PRIMARY PATH (with a MobileNetV2 verdict) or FALLBACK A (raw
- *     image inspected independently);
+ *   • `contents` — the conversational memory (prior user/model turns, when
+ *     the client replayed the chat) followed by the CURRENT user turn: the
+ *     user query + profile context + the Step 1 MobileNetV2 reference
+ *     diagnosis (label, confidence, candidates); when `image` is set the
+ *     photo travels on the current turn as an `inlineData` part — the HYBRID
+ *     PRIMARY PATH (with a MobileNetV2 verdict) or FALLBACK A (raw image
+ *     inspected independently);
  *   • `generationConfig` — the sampling params plus the model's own
  *     `thinkingConfig` when its generation supports one
  *     ({@link GeminiModel.thinking}).
@@ -1064,6 +1207,7 @@ async function generateWithGeminiModel(
   signal: AbortSignal,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  history?: readonly AssistantChatTurn[],
 ): Promise<string> {
   let response: Response;
   try {
@@ -1075,20 +1219,10 @@ async function generateWithGeminiModel(
         signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [
-            {
-              role: "user",
-              parts: image
-                ? [
-                    // The photo itself (Step 0 crop or the raw frame) —
-                    // Gemini inspects it and cross-checks the MobileNetV2
-                    // reference carried in the text part.
-                    { inlineData: { mimeType: image.mimeType, data: image.data } },
-                    { text: userContent },
-                  ]
-                : [{ text: userContent }],
-            },
-          ],
+          // Conversational memory first (when the client replayed the chat),
+          // then the current enriched user turn; with an empty history this
+          // is a single-turn array — exactly the legacy payload shape.
+          contents: buildGeminiContents(history ?? [], userContent, image),
           generationConfig: {
             temperature: 0.4,
             topP: 0.9,
@@ -1181,6 +1315,7 @@ async function generateWithGeminiForKey(
   userContent: string,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  history?: readonly AssistantChatTurn[],
 ): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
@@ -1209,6 +1344,7 @@ async function generateWithGeminiForKey(
           controller.signal,
           apiKey,
           image,
+          history,
         );
         return { model: model.id, text, warnings };
       } catch (error) {
@@ -1280,6 +1416,7 @@ async function generateWithGemini(
   userContent: string,
   geminiApiKeys: readonly string[],
   image?: AssistantImagePayload | null,
+  history?: readonly AssistantChatTurn[],
 ): Promise<GeminiResult> {
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
@@ -1287,7 +1424,7 @@ async function generateWithGemini(
   for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
     const apiKey = geminiApiKeys[keyIndex];
     try {
-      const result = await generateWithGeminiForKey(userContent, apiKey, image);
+      const result = await generateWithGeminiForKey(userContent, apiKey, image, history);
       return {
         ...result,
         warnings: [...rotationWarnings, ...result.warnings],
@@ -1438,6 +1575,7 @@ async function generateWithHfLlmModel(
   model: string,
   userContent: string,
   apiKey: string,
+  history?: readonly AssistantChatTurn[],
 ): Promise<string> {
   let res: Response;
   try {
@@ -1450,10 +1588,9 @@ async function generateWithHfLlmModel(
       },
       body: JSON.stringify({
         model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
+        // System prompt + conversational memory + current user turn; with an
+        // empty history this is exactly [system, user] — the legacy shape.
+        messages: buildHfMessages(history ?? [], userContent),
         temperature: 0.4,
         top_p: 0.9,
         max_tokens: MAX_REPLY_TOKENS,
@@ -1505,12 +1642,16 @@ async function generateWithHfLlmModel(
  * - Uses the «Adaptive, Direct, and Empathetic Expert» advisor system prompt.
  * - Throws an Error prefixed with "LLM Error:" once no model can answer.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string): Promise<string> {
+async function askHfLlmStrict(
+  apiKey: string,
+  userContent: string,
+  history?: readonly AssistantChatTurn[],
+): Promise<string> {
   const failures: string[] = [];
 
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
 
       console.log(
         `[Stage 2: HF LLM Success] model=${model} replyLength=${text.length}`,
@@ -1874,6 +2015,10 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const message = typeof body.message === "string" ? body.message.trim() : "";
   const context = body.context && typeof body.context === "object" ? body.context : undefined;
   const image = body.image;
+  // Conversational memory: the client's prior turns (under `history` or the
+  // `messages` alias), sanitized + capped. Empty for legacy single-turn
+  // requests, which then behave exactly as before.
+  const history = extractHistory(body);
 
   if (message.length > MAX_MESSAGE_CHARS) {
     return bad("Message too long.");
@@ -1986,7 +2131,12 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let reply: string | null = null;
   if (geminiApiKeys.length > 0) {
     try {
-      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage);
+      const geminiResult = await generateWithGemini(
+        userContent,
+        geminiApiKeys,
+        classifyImage,
+        history,
+      );
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
@@ -2015,7 +2165,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (reply === null) {
     if (huggingfaceKey) {
       try {
-        reply = await askHfLlmStrict(huggingfaceKey, userContent);
+        reply = await askHfLlmStrict(huggingfaceKey, userContent, history);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;

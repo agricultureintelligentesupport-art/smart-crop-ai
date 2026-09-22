@@ -29,6 +29,7 @@ import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
 import type {
+  AssistantChatTurn,
   AssistantPreprocessing,
   AssistantResponseBody,
   AssistantSource,
@@ -72,6 +73,13 @@ const nextId = () => `msg-${Date.now()}-${idCounter++}`;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 /** Longest edge sent to the API — plenty for leaf classification. */
 const MAX_EDGE_PX = 1024;
+
+/**
+ * Text stand-in for an image-only user turn when replaying conversational
+ * memory to the API: the original photo is never re-sent on later turns, so
+ * the history records that a leaf photo was shared for diagnosis.
+ */
+const IMAGE_TURN_PLACEHOLDER = "أرفقت صورة لورقة النبتة لتشخيصها.";
 
 /**
  * Read + downscale a photo on-device so a 12 MP phone shot becomes a compact
@@ -139,6 +147,14 @@ export default function AssistantView() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   /** Snapshot of the last request so the retry chip can resend it. */
   const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
+  /**
+   * Conversational memory — every CONFIRMED exchange (user turn + assistant
+   * reply), oldest → newest. A ref (not state) so the in-flight `send`
+   * closure always reads the current history without re-render churn, and it
+   * only grows on success, so a failed request + retry never duplicates a
+   * turn. Replayed to the API on every request as `history`.
+   */
+  const historyRef = useRef<AssistantChatTurn[]>([]);
 
   // Same session gate as the dashboard: assistant answers are personalised,
   // so an authenticated profile — or the local guest bypass — is required.
@@ -218,6 +234,16 @@ export default function AssistantView() {
       // indicator (Step 0 → classification), every single time.
       setVisionPhase(0);
 
+      // Conversational memory: replay every confirmed prior turn so the
+      // advisor keeps context. The current turn travels separately (message +
+      // image) because the server enriches it with the profile + vision
+      // diagnosis. Image-only turns are remembered through a short stand-in.
+      const history = [...historyRef.current];
+      const memoryUserTurn: AssistantChatTurn = {
+        role: "user",
+        content: text || IMAGE_TURN_PLACEHOLDER,
+      };
+
       let errorMessage = t.chat.error;
       try {
         const res = await fetch("/api/assistant", {
@@ -225,6 +251,7 @@ export default function AssistantView() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: text,
+            history,
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
           }),
@@ -240,6 +267,14 @@ export default function AssistantView() {
           throw new Error(`HTTP ${res.status}`);
         }
         const payload = (await res.json()) as AssistantResponseBody;
+        // Commit the confirmed exchange to conversational memory so the next
+        // request replays it (a failed attempt is never committed, so the
+        // retry chip cannot duplicate a turn).
+        historyRef.current = [
+          ...historyRef.current,
+          memoryUserTurn,
+          { role: "assistant", content: payload.reply },
+        ];
         setMessages((prev) => [
           ...prev,
           {
