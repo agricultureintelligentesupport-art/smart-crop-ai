@@ -29,6 +29,21 @@ export interface DashboardCopy {
     irrigation: string;
     profile: string;
   };
+  /** Home quick-action pills (bento row). */
+  quickActions: {
+    aria: string;
+    scan: string;
+    irrigation: string;
+    weather: string;
+  };
+  /** Dedicated assistant tab: plant scan + AI chat entry. */
+  assistantView: {
+    title: string;
+    subtitle: string;
+    chatTitle: string;
+    chatSubtitle: string;
+    chatCta: string;
+  };
   welcome: {
     member: string;
     caption: string;
@@ -38,6 +53,7 @@ export interface DashboardCopy {
     subtitle: string;
     wilaya: string;
     role: string;
+    language: string;
     savedNote: string;
     edit: string;
     close: string;
@@ -150,6 +166,19 @@ const AR: DashboardCopy = {
     irrigation: "السقي",
     profile: "الحساب",
   },
+  quickActions: {
+    aria: "إجراءات سريعة",
+    scan: "تشخيص",
+    irrigation: "السقي",
+    weather: "الطقس",
+  },
+  assistantView: {
+    title: "المستشار الذكي",
+    subtitle: "شخّص أوراق نباتك وتحدّث مع الخبير الزراعي.",
+    chatTitle: "المحادثة مع الخبير",
+    chatSubtitle: "اسأل عن أي مشكلة زراعية واحصل على إرشاد فوري.",
+    chatCta: "افتح المحادثة",
+  },
   welcome: {
     member: "مرحباً، {name}",
     caption: "لوحة مرجعية مبنية على بيانات ولاية {wilaya} لموسم {month}",
@@ -159,6 +188,7 @@ const AR: DashboardCopy = {
     subtitle: "غيّر الولاية أو الصفة لتحديث الطقس والمحاصيل والتنبيهات فوراً.",
     wilaya: "الولاية",
     role: "الصفة",
+    language: "اللغة",
     savedNote: "حُفظت اختياراتك على هذا الجهاز.",
     edit: "تعديل",
     close: "إغلاق",
@@ -302,6 +332,19 @@ const FR: DashboardCopy = {
     irrigation: "Irrigation",
     profile: "Compte",
   },
+  quickActions: {
+    aria: "Actions rapides",
+    scan: "Diagnostic",
+    irrigation: "Irrigation",
+    weather: "Météo",
+  },
+  assistantView: {
+    title: "Assistant IA",
+    subtitle: "Diagnostiquez vos feuilles et discutez avec l'expert agronome.",
+    chatTitle: "Conversation avec l'expert",
+    chatSubtitle: "Posez toute question agricole et obtenez des conseils instantanés.",
+    chatCta: "Ouvrir la conversation",
+  },
   welcome: {
     member: "Bienvenue, {name}",
     caption: "Tableau de référence basé sur la wilaya de {wilaya} pour la saison {month}",
@@ -311,6 +354,7 @@ const FR: DashboardCopy = {
     subtitle: "Changez de wilaya ou de profil : météo, cultures et alertes suivent immédiatement.",
     wilaya: "Wilaya",
     role: "Profil",
+    language: "Langue",
     savedNote: "Vos choix sont enregistrés sur cet appareil.",
     edit: "Modifier",
     close: "Fermer",

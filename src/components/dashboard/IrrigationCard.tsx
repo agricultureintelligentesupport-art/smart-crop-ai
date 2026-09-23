@@ -49,6 +49,9 @@ export default function IrrigationCard({
     return [...local, ...rest];
   }, [wilaya.crops]);
 
+  /** Slider fill fraction (0-100) driving the live gradient track. */
+  const fillPct = ((areaHa - 0.5) / 19.5) * 100;
+
   return (
     <Card
       title={t.irrigation.title}
@@ -89,7 +92,7 @@ export default function IrrigationCard({
               type="button"
               onClick={() => onAreaChange(Math.max(0.5, Math.round((areaHa - 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} −`}
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-colors hover:border-emerald-300 active:bg-emerald-50"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-all duration-150 hover:border-emerald-300 active:scale-95 active:bg-emerald-50"
             >
               −
             </button>
@@ -102,13 +105,16 @@ export default function IrrigationCard({
             onChange={(e) => onAreaChange(Number(e.target.value))}
             aria-label={t.irrigation.area}
             aria-valuetext={`${fmt(areaHa, 1)} ${t.irrigation.areaUnit}`}
-            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-emerald-100 accent-emerald-600"
+            style={{
+              background: `linear-gradient(to ${lang === "ar" ? "left" : "right"}, #047857 0%, #10b981 ${fillPct}%, #d1fae5 ${fillPct}%, #d1fae5 100%)`,
+            }}
+            className="h-2 w-full cursor-pointer appearance-none rounded-full accent-emerald-600"
             />
             <button
               type="button"
               onClick={() => onAreaChange(Math.min(20, Math.round((areaHa + 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} +`}
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-colors hover:border-emerald-300 active:bg-emerald-50"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-all duration-150 hover:border-emerald-300 active:scale-95 active:bg-emerald-50"
             >
               +
             </button>

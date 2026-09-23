@@ -24,7 +24,7 @@ export function Card({
   return (
     <section
       aria-label={title}
-      className={`glass-widget flex min-w-0 flex-col rounded-3xl p-4 ${className}`}
+      className={`glass-widget flex min-w-0 flex-col rounded-3xl p-4 transition-all duration-300 hover:border-emerald-500/30 hover:shadow-[0_22px_46px_-24px_rgba(16,185,129,0.45)] active:scale-[0.995] ${className}`}
     >
       <header className="flex items-start gap-2.5">
         <span

@@ -1,13 +1,8 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import {
-  Leaf,
-  LogOut,
-  MapPin,
-  Settings2,
-  Sprout,
-} from "lucide-react";
+import { Bot, Droplets, Leaf, LogOut, MapPin, Sprout, Sun } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
@@ -20,12 +15,13 @@ import { DASHBOARD } from "@/lib/dashboard/copy";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
-import { DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";import { useLang } from "@/lib/use-lang";
+import { DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
+import { useLang } from "@/lib/use-lang";
 import FieldTasksCard from "./FieldTasksCard";
 import IrrigationCard from "./IrrigationCard";
 import SatelliteCard from "./SatelliteCard";
 import ScanCard from "./ScanCard";
-import WeatherCard from "./WeatherCard";
+import WeatherCard, { fmt } from "./WeatherCard";
 import WilayaSelect from "./WilayaSelect";
 import BottomNav, { type DashboardTab } from "./BottomNav";
 import QuickReadHero from "./QuickReadHero";
@@ -33,10 +29,28 @@ import { Chip, Segmented } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
 
-/** Horizontal padding of the app column, shared by header, screens and nav. */
+/** Horizontal padding of the app column, shared by header, screens and dock. */
 const APP_COLUMN = "mx-auto w-full max-w-[560px]";
-/** Clearance above the floating bottom navigation (+ safe area). */
-const NAV_CLEARANCE = "pb-[calc(6.75rem+env(safe-area-inset-bottom))]";
+/** Clearance above the floating bottom dock (+ safe area). */
+const NAV_CLEARANCE = "pb-[calc(7.25rem+env(safe-area-inset-bottom))]";
+
+/** Screen-level transition: fade + slide-up (with bento stagger on children). */
+const SCREEN = {
+  hidden: { opacity: 0, y: 16 },
+  show: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.3, ease: EASE_OUT, staggerChildren: 0.055 },
+  },
+  exit: { opacity: 0, y: -12, transition: { duration: 0.18, ease: EASE_OUT } },
+} as const;
+
+/** Bento card entrance item. */
+const ITEM = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: EASE_OUT } },
+  exit: { opacity: 0, transition: { duration: 0.12 } },
+} as const;
 
 /**
  * The live member dashboard, rendered by `/dashboard`. Every number reacts to
@@ -48,10 +62,12 @@ const NAV_CLEARANCE = "pb-[calc(6.75rem+env(safe-area-inset-bottom))]";
  * OR a local guest flag ("المتابعة كزائر") is required; anyone else is
  * redirected straight to the auth wizard.
  *
- * UI shell: a mobile-first app screen — clean greeting header, a fixed glass
- * bottom navigation (الرئيسية / المستشار / السقي / الحساب) switching between
- * three in-app screens, with the assistant living on its own route. All data
- * hooks, computations and handlers are unchanged by this shell.
+ * UI shell (bento architecture): four bottom-dock screens —
+ *   الرئيسية   hero ring gauge + quick actions + tasks + NDVI + weather
+ *   السقي      dedicated water-needs calculator
+ *   المستشار   plant-health scan + AI chat entry
+ *   الحساب     profile, wilaya/role, language, sign-out
+ * All data hooks, computations and handlers are unchanged by this shell.
  */
 export default function DashboardView() {
   const router = useRouter();
@@ -65,12 +81,13 @@ export default function DashboardView() {
   /** `null` = follow the stored profile; a value = the user overrode it here. */
   const [wilayaOverride, setWilayaOverride] = useState<string | null>(null);
   const [roleOverride, setRoleOverride] = useState<AuthRole | null>(null);
-  /** Active bottom-navigation screen (UI shell state only). */
+  /** Active bottom-dock screen (UI shell state only). */
   const [tab, setTab] = useState<DashboardTab>("home");
   /** Parcel size in hectares: one input, consumed by every card. */
   const [areaHa, setAreaHa] = useState(2);
 
   const scrollRef = useRef<HTMLElement | null>(null);
+  const weatherRef = useRef<HTMLDivElement | null>(null);
 
   // Derived from the stored profile (server renders the default, so hydration
   // is stable and no effect has to copy state around).
@@ -146,6 +163,18 @@ export default function DashboardView() {
     scrollRef.current?.scrollTo({ top: 0 });
   }, [tab]);
 
+  /** Weather summary pill → jump home and glide to the weather bento card. */
+  const scrollToWeather = () => {
+    if (tab === "home") {
+      weatherRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    setTab("home");
+    window.setTimeout(() => {
+      weatherRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 430);
+  };
+
   /** Brand avatar: a deterministic leaf glyph (never hydration-dependent). */
   const renderAvatar = (size: "md" | "lg") => (
     <span
@@ -158,6 +187,49 @@ export default function DashboardView() {
     </span>
   );
 
+  const footer = (
+    <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
+      {t.footer.builtWith} · {t.footer.disclaimer}
+    </p>
+  );
+
+  const quickActions = (
+    <motion.div
+      variants={ITEM}
+      role="group"
+      aria-label={t.quickActions.aria}
+      className="flex items-center gap-2"
+    >
+      <motion.button
+        type="button"
+        onClick={() => setTab("assistant")}
+        whileTap={{ scale: 0.94 }}
+        className={`glass inline-flex h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-[11.5px] font-black text-emerald-800 shadow-[0_10px_24px_-14px_rgba(6,78,59,0.5)] transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+      >
+        <Bot size={15} strokeWidth={2.6} aria-hidden />
+        <span className="truncate">{t.quickActions.scan}</span>
+      </motion.button>
+      <motion.button
+        type="button"
+        onClick={() => setTab("irrigation")}
+        whileTap={{ scale: 0.94 }}
+        className={`glass inline-flex h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-[11.5px] font-black text-emerald-800 shadow-[0_10px_24px_-14px_rgba(6,78,59,0.5)] transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+      >
+        <Droplets size={15} strokeWidth={2.6} aria-hidden />
+        <span className="truncate">{t.quickActions.irrigation}</span>
+      </motion.button>
+      <motion.button
+        type="button"
+        onClick={scrollToWeather}
+        whileTap={{ scale: 0.94 }}
+        className={`glass inline-flex h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-[11.5px] font-black text-emerald-800 shadow-[0_10px_24px_-14px_rgba(6,78,59,0.5)] transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+      >
+        <Sun size={15} strokeWidth={2.6} aria-hidden />
+        <span className="truncate">{t.quickActions.weather}</span>
+      </motion.button>
+    </motion.div>
+  );
+
   return (
     <div
       dir={lang === "ar" ? "rtl" : "ltr"}
@@ -168,10 +240,10 @@ export default function DashboardView() {
     >
       <AmbientBackdrop variant="dashboard" />
 
-      {/* Unified native header: avatar + greeting + language, location row — edge-to-edge frosted bar. */}
+      {/* Compact native header: avatar + greeting + weather pill / location badge. */}
       <header className="pt-safe relative z-30 shrink-0 border-b border-emerald-500/10 bg-white/60 shadow-[0_16px_36px_-30px_rgba(6,78,59,0.6)] backdrop-blur-xl">
-        <div className={`${APP_COLUMN} flex flex-col gap-2.5 px-4 pb-2.5 pt-2`}>
-          <div className="flex items-center gap-3">
+        <div className={`${APP_COLUMN} flex flex-col gap-2 px-4 pb-2.5 pt-2`}>
+          <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={() => setTab("profile")}
@@ -187,43 +259,26 @@ export default function DashboardView() {
                 {guestActive ? t.header.badgeGuest : t.header.badgeMember}
               </span>
             </div>
-            <LanguageSwitch
-              lang={lang}
-              onChange={setLang}
-              ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-              labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-              layoutId="dashboard-lang-thumb"
-            />
+            <button
+              type="button"
+              onClick={scrollToWeather}
+              aria-label={t.quickActions.weather}
+              className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-white/80 px-2.5 text-[12px] font-black text-emerald-900 ring-1 ring-emerald-500/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition-all duration-150 hover:bg-white active:scale-95 ${FOCUS_RING}`}
+            >
+              <Sun size={14} strokeWidth={2.6} aria-hidden className="text-amber-500" />
+              <span dir="ltr" className="tabular-nums">{fmt(weather.tempC, 1)}°</span>
+            </button>
           </div>
-
-          {/* Location + profile context: smooth rounded badges */}
           <div className="flex items-center gap-1.5">
             <span className="inline-flex h-9 min-w-0 items-center gap-1.5 rounded-full bg-white/80 px-3 text-[11.5px] font-black text-emerald-900 ring-1 ring-emerald-500/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
               <MapPin size={13} strokeWidth={2.8} aria-hidden className="shrink-0 text-emerald-600" />
               <span className="truncate">{lang === "ar" ? wilaya.nameAr : wilaya.nameFr}</span>
             </span>
-            <Chip tone="slate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</Chip>
-            {role && (
-              <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
-                {t.personalize.roleOptions[role]}
-              </Chip>
-            )}
-            <span className="min-w-2 flex-1" />
-            {tab !== "profile" && (
-              <button
-                type="button"
-                onClick={() => setTab("profile")}
-                className={`inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/80 px-3 text-[11px] font-black text-emerald-800 ring-1 ring-emerald-500/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition-colors hover:bg-white active:bg-emerald-50 ${FOCUS_RING}`}
-              >
-                <Settings2 size={13} strokeWidth={2.8} aria-hidden />
-                {t.personalize.edit}
-              </button>
-            )}
           </div>
         </div>
       </header>
 
-      {/* Scroll body — one screen at a time, driven by the bottom bar */}
+      {/* Scroll body — one bento screen at a time, driven by the bottom dock */}
       <main
         ref={scrollRef}
         className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
@@ -231,74 +286,56 @@ export default function DashboardView() {
         <AnimatePresence initial={false} mode="wait">
           <motion.div
             key={tab}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2, ease: EASE_OUT }}
-            className={`${GPU} ${APP_COLUMN} px-4 pt-2 ${NAV_CLEARANCE}`}
+            variants={SCREEN}
+            initial="hidden"
+            animate="show"
+            exit="exit"
+            className={`${GPU} ${APP_COLUMN} flex flex-col gap-3 px-4 pt-3 ${NAV_CLEARANCE}`}
           >
             {tab === "home" && (
-              <div className="flex flex-col gap-3">
-                {/* Daily status hero */}
-                <QuickReadHero
-                  t={t}
-                  lang={lang}
-                  netMmDay={irrigation.netMmDay}
-                  areaHa={areaHa}
-                  crop={crop}
-                />
+              <>
+                {/* Bento hero: ring gauge + advisory */}
+                <motion.div variants={ITEM}>
+                  <QuickReadHero
+                    t={t}
+                    lang={lang}
+                    netMmDay={irrigation.netMmDay}
+                    areaHa={areaHa}
+                    crop={crop}
+                  />
+                </motion.div>
 
-                {/* Data widgets */}
-                <WeatherCard t={t} lang={lang} weather={weather} />
-                <IrrigationCard
-                  t={t}
-                  lang={lang}
-                  wilayaCode={wilayaCode}
-                  areaHa={areaHa}
-                  onAreaChange={setAreaHa}
-                />
-                <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-                <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
-                <ScanCard t={t} wilayaCode={wilayaCode} />
+                {/* Quick actions floating row */}
+                {quickActions}
 
-                {/* Account shortcut (full account screen lives in the bottom bar) */}
-                <section
-                  aria-label={t.nav.profile}
-                  className="glass-card flex items-center gap-3 rounded-3xl p-3.5"
-                >
-                  {renderAvatar("md")}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13.5px] font-black text-emerald-950">
-                      {displayName || (lang === "ar" ? "فلاح" : "Agriculteur")}
-                    </p>
-                    <p className="mt-0.5 truncate text-[10.5px] font-semibold text-emerald-900/65">
-                      {role
-                        ? t.personalize.roleOptions[role]
-                        : lang === "ar"
-                          ? wilaya.nameAr
-                          : wilaya.nameFr}
-                      <span aria-hidden className="mx-1.5 text-emerald-900/25">·</span>
-                      {brand.brand}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void signOut()}
-                    className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-2xl bg-rose-50/90 px-3 text-[11px] font-black text-rose-700 ring-1 ring-rose-200/80 transition-colors hover:bg-rose-100/90 active:bg-rose-100 ${FOCUS_RING}`}
-                  >
-                    <LogOut size={14} strokeWidth={2.6} aria-hidden />
-                    {t.header.signOut}
-                  </button>
-                </section>
+                {/* Today's tasks (top 3) with animated checkboxes */}
+                <motion.div variants={ITEM}>
+                  <FieldTasksCard
+                    t={t}
+                    lang={lang}
+                    wilayaCode={wilayaCode}
+                    crop={crop}
+                    areaHa={areaHa}
+                    limit={3}
+                  />
+                </motion.div>
 
-                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
-                  {t.footer.builtWith} · {t.footer.disclaimer}
-                </p>
-              </div>
+                {/* NDVI mini bento: sparkline + glowing pulse badge */}
+                <motion.div variants={ITEM}>
+                  <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
+                </motion.div>
+
+                {/* Full weather bento (2×2 metrics + forecast carousels) */}
+                <motion.div variants={ITEM} ref={weatherRef} className="scroll-mt-2">
+                  <WeatherCard t={t} lang={lang} weather={weather} />
+                </motion.div>
+
+                {footer}
+              </>
             )}
 
             {tab === "irrigation" && (
-              <div className="flex flex-col gap-3">
+              <>
                 <QuickReadHero
                   t={t}
                   lang={lang}
@@ -313,16 +350,62 @@ export default function DashboardView() {
                   areaHa={areaHa}
                   onAreaChange={setAreaHa}
                 />
-                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
-                  {t.footer.builtWith} · {t.footer.disclaimer}
-                </p>
-              </div>
+                {footer}
+              </>
+            )}
+
+            {tab === "assistant" && (
+              <>
+                {/* AI chat entry card */}
+                <motion.section
+                  aria-label={t.assistantView.title}
+                  className="glass-widget relative overflow-hidden rounded-3xl p-4"
+                >
+                  <div aria-hidden className="pointer-events-none absolute inset-0">
+                    <div className="absolute -top-12 -end-8 h-36 w-36 rounded-full bg-teal-300/25 blur-3xl" />
+                    <div className="absolute -bottom-14 -start-8 h-36 w-36 rounded-full bg-emerald-300/25 blur-3xl" />
+                  </div>
+                  <div className="relative flex items-start gap-3">
+                    <span
+                      aria-hidden
+                      className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-[0_10px_24px_-10px_rgba(13,148,136,0.8)]"
+                    >
+                      <Bot size={20} strokeWidth={2.4} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <h2 className="text-[14px] font-black leading-5 text-emerald-950">
+                        {t.assistantView.title}
+                      </h2>
+                      <p className="mt-0.5 text-[11px] font-semibold leading-4 text-emerald-900/65">
+                        {t.assistantView.subtitle}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="relative mt-3 rounded-2xl bg-white/80 p-3 ring-1 ring-emerald-500/10">
+                    <p className="text-[12px] font-black text-emerald-950">{t.assistantView.chatTitle}</p>
+                    <p className="mt-0.5 text-[10.5px] font-semibold leading-4 text-emerald-900/65">
+                      {t.assistantView.chatSubtitle}
+                    </p>
+                    <Link
+                      href="/assistant"
+                      className={`glow-emerald mt-2.5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-br from-emerald-500 via-emerald-500 to-green-600 text-[12.5px] font-black text-white transition-transform duration-150 active:scale-95 ${FOCUS_RING}`}
+                    >
+                      {t.assistantView.chatCta}
+                    </Link>
+                  </div>
+                </motion.section>
+
+                {/* Plant health scan (camera / upload + radar scanner) */}
+                <ScanCard t={t} wilayaCode={wilayaCode} />
+
+                {footer}
+              </>
             )}
 
             {tab === "profile" && (
-              <div className="flex flex-col gap-3">
+              <>
                 {/* Identity */}
-                <section aria-label={t.nav.profile} className="glass-card rounded-3xl p-4">
+                <section aria-label={t.nav.profile} className="glass-widget rounded-3xl p-4">
                   <div className="flex items-center gap-3">
                     {renderAvatar("lg")}
                     <div className="min-w-0 flex-1">
@@ -332,12 +415,26 @@ export default function DashboardView() {
                       <p className="mt-0.5 line-clamp-2 text-[10.5px] font-semibold leading-4 text-emerald-900/65">
                         {caption}
                       </p>
+                      <p className="mt-0.5 text-[9.5px] font-bold text-emerald-700/70">{brand.brand}</p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <Chip tone="slate">
+                          {lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}
+                        </Chip>
+                        {role && (
+                          <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
+                            {t.personalize.roleOptions[role]}
+                          </Chip>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </section>
 
-                {/* Personalisation */}
-                <section aria-label={t.personalize.title} className="glass-card flex flex-col gap-3 rounded-3xl p-4">
+                {/* Personalisation: wilaya bottom-sheet + role */}
+                <section
+                  aria-label={t.personalize.title}
+                  className="glass-widget flex flex-col gap-3 rounded-3xl p-4"
+                >
                   <div>
                     <p className="text-[13px] font-black text-emerald-950">{t.personalize.title}</p>
                     <p className="mt-0.5 text-[11px] font-semibold text-emerald-900/70">
@@ -365,26 +462,36 @@ export default function DashboardView() {
                   <p className="text-[10.5px] font-semibold text-emerald-900/60">{t.personalize.savedNote}</p>
                 </section>
 
+                {/* Language */}
+                <section aria-label={t.personalize.language} className="glass-widget flex items-center justify-between gap-3 rounded-3xl p-4">
+                  <p className="text-[13px] font-black text-emerald-950">{t.personalize.language}</p>
+                  <LanguageSwitch
+                    lang={lang}
+                    onChange={setLang}
+                    ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
+                    labels={{ ar: t.header.langAr, fr: t.header.langFr }}
+                    layoutId="dashboard-lang-thumb"
+                  />
+                </section>
+
                 {/* Session */}
                 <button
                   type="button"
                   onClick={() => void signOut()}
-                  className={`glass-card inline-flex h-12 items-center justify-center gap-2 rounded-3xl text-[13px] font-black text-rose-700 transition-colors hover:bg-rose-50/80 active:bg-rose-100/80 ${FOCUS_RING}`}
+                  className={`glass-widget inline-flex h-12 items-center justify-center gap-2 rounded-3xl text-[13px] font-black text-rose-700 transition-all duration-150 hover:bg-rose-50/70 active:scale-[0.99] ${FOCUS_RING}`}
                 >
                   <LogOut size={16} strokeWidth={2.6} aria-hidden />
                   {t.header.signOut}
                 </button>
 
-                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
-                  {t.footer.builtWith} · {t.footer.disclaimer}
-                </p>
-              </div>
+                {footer}
+              </>
             )}
           </motion.div>
         </AnimatePresence>
       </main>
 
-      {/* Fixed app bottom navigation */}
+      {/* Fixed floating glass dock */}
       <BottomNav t={t} tab={tab} onTabChange={setTab} />
     </div>
   );

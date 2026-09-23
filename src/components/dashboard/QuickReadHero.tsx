@@ -7,74 +7,79 @@ import { CROPS, type CropKey, type Lang } from "@/lib/wilayas";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { fmt } from "./WeatherCard";
 
-/** Gauge ceiling: the arc fills relative to this many mm/day. */
+/** Gauge ceiling: the ring fills relative to this many mm/day. */
 const GAUGE_MAX_MM = 10;
+const R = 34;
+const CIRC = 2 * Math.PI * R;
 
 /**
- * Semi-circular progress gauge for the hero headline. Purely decorative
- * (aria-hidden): the number itself stays as accessible text next to it.
+ * Animated circular progress ring for the daily water intake. Purely
+ * decorative (aria-hidden): the number itself stays as accessible text in
+ * the ring's centre. Fills via SVG stroke-dashoffset with a travelling
+ * tip dot.
  */
-function ArcGauge({ value }: { value: number }) {
+function RingGauge({ value }: { value: number }) {
   const pct = Math.min(Math.max(value / GAUGE_MAX_MM, 0.05), 1);
-  const r = 30;
-  const cx = 36;
-  const cy = 34;
-  const len = Math.PI * r;
-  const arc = `M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`;
-  // Needle tip position along the arc (180° → 0°).
-  const theta = Math.PI - Math.PI * pct;
-  const tipX = cx + r * Math.cos(theta);
-  const tipY = cy - r * Math.sin(theta);
+  const tipAngle = (-90 + 360 * pct) * (Math.PI / 180);
+  const tipX = 44 + R * Math.cos(tipAngle);
+  const tipY = 44 + R * Math.sin(tipAngle);
 
   return (
-    <svg
-      width="76"
-      height="46"
-      viewBox="0 0 72 44"
-      aria-hidden
-      className="shrink-0 drop-shadow-[0_4px_12px_rgba(255,255,255,0.28)]"
-    >
-      <defs>
-        <linearGradient id="hero-gauge-arc" x1="0" y1="1" x2="1" y2="0">
-          <stop offset="0%" stopColor="#a7f3d0" />
-          <stop offset="55%" stopColor="#ecfeff" />
-          <stop offset="100%" stopColor="#ffffff" />
-        </linearGradient>
-      </defs>
-      <path
-        d={arc}
-        fill="none"
-        stroke="rgba(255,255,255,0.24)"
-        strokeWidth="7"
-        strokeLinecap="round"
-      />
-      <motion.path
-        d={arc}
-        fill="none"
-        stroke="url(#hero-gauge-arc)"
-        strokeWidth="7"
-        strokeLinecap="round"
-        strokeDasharray={len}
-        initial={{ strokeDashoffset: len }}
-        animate={{ strokeDashoffset: len * (1 - pct) }}
-        transition={{ duration: 0.9, ease: EASE_OUT }}
-      />
-      <motion.circle
-        r={3.4}
-        fill="#ffffff"
-        initial={{ cx: cx - r, cy }}
-        animate={{ cx: tipX, cy: tipY }}
-        transition={{ duration: 0.9, ease: EASE_OUT }}
-      />
-    </svg>
+    <div className="relative h-[96px] w-[96px] shrink-0">
+      <svg
+        width="96"
+        height="96"
+        viewBox="0 0 88 88"
+        aria-hidden
+        className="drop-shadow-[0_6px_16px_rgba(255,255,255,0.22)]"
+      >
+        <defs>
+          <linearGradient id="hero-ring-grad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#a7f3d0" />
+            <stop offset="55%" stopColor="#ecfeff" />
+            <stop offset="100%" stopColor="#ffffff" />
+          </linearGradient>
+        </defs>
+        <circle cx="44" cy="44" r={R} fill="none" stroke="rgba(255,255,255,0.22)" strokeWidth="8" />
+        <motion.circle
+          cx="44"
+          cy="44"
+          r={R}
+          fill="none"
+          stroke="url(#hero-ring-grad)"
+          strokeWidth="8"
+          strokeLinecap="round"
+          strokeDasharray={CIRC}
+          initial={{ strokeDashoffset: CIRC }}
+          animate={{ strokeDashoffset: CIRC * (1 - pct) }}
+          transition={{ duration: 1, ease: EASE_OUT }}
+          transform="rotate(-90 44 44)"
+        />
+        <motion.circle
+          r={3.6}
+          fill="#ffffff"
+          initial={{ cx: 44, cy: 44 - R }}
+          animate={{ cx: tipX, cy: tipY }}
+          transition={{ duration: 1, ease: EASE_OUT }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span dir="ltr" className="text-[26px] font-black leading-none tracking-tight tabular-nums">
+          {fmt(value, 1)}
+        </span>
+        <span dir="ltr" className="mt-0.5 text-[9px] font-extrabold text-white/75">
+          mm / day
+        </span>
+      </div>
+    </div>
   );
 }
 
 /**
- * "قراءة سريعة" — the daily status hero. A gradient-mesh emerald→teal card
- * that leads the home screen: headline stat (mm/day) with a live arc gauge,
- * dynamic mini-badges (irrigation window + crop) and the three advisory
- * lines derived from the same irrigation computation the other cards use.
+ * "قراءة سريعة" — the bento hero. A gradient-mesh emerald→teal card with an
+ * animated circular ring gauge for the water intake, dynamic mini-badges
+ * (irrigation window + crop) and the three advisory lines derived from the
+ * same irrigation computation the other cards use.
  */
 export default function QuickReadHero({
   t,
@@ -143,35 +148,22 @@ export default function QuickReadHero({
           </div>
         </div>
 
-        {/* Headline stat + live gauge */}
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="flex items-baseline gap-1.5">
-              <span
-                dir="ltr"
-                className="text-[42px] font-black leading-none tracking-tight tabular-nums drop-shadow-[0_2px_10px_rgba(255,255,255,0.25)]"
-              >
-                {fmt(netMmDay, 1)}
-              </span>
-              <span dir="ltr" className="text-[13px] font-extrabold text-white/80">
-                mm / day
-              </span>
-            </p>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <span
-                dir="ltr"
-                className="inline-flex items-center gap-1 rounded-full bg-white/16 px-2.5 py-1 text-[10.5px] font-black tabular-nums ring-1 ring-white/25"
-              >
-                <Clock size={11} strokeWidth={2.8} aria-hidden />
-                05:30 – 08:30
-              </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-white/16 px-2.5 py-1 text-[10.5px] font-black ring-1 ring-white/25">
-                <Sprout size={11} strokeWidth={2.8} aria-hidden />
-                {CROPS[crop][lang]}
-              </span>
-            </div>
+        {/* Ring gauge + mini-badges */}
+        <div className="flex items-center gap-3">
+          <RingGauge value={netMmDay} />
+          <div className="flex min-w-0 flex-1 flex-col items-start gap-1.5">
+            <span
+              dir="ltr"
+              className="inline-flex items-center gap-1 rounded-full bg-white/16 px-2.5 py-1 text-[10.5px] font-black tabular-nums ring-1 ring-white/25"
+            >
+              <Clock size={11} strokeWidth={2.8} aria-hidden />
+              05:30 – 08:30
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-white/16 px-2.5 py-1 text-[10.5px] font-black ring-1 ring-white/25">
+              <Sprout size={11} strokeWidth={2.8} aria-hidden />
+              {CROPS[crop][lang]}
+            </span>
           </div>
-          <ArcGauge value={netMmDay} />
         </div>
 
         {/* Advisory lines as translucent glass rows */}

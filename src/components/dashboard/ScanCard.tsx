@@ -91,8 +91,18 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
         >
           <span
             aria-hidden
-            className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_10px_26px_-12px_rgba(16,185,129,0.85)]"
+            className="relative grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_10px_26px_-12px_rgba(16,185,129,0.85)]"
           >
+            <motion.span
+              className="absolute inset-0 rounded-2xl border border-emerald-400/60"
+              animate={{ scale: [1, 1.5], opacity: [0.55, 0] }}
+              transition={{ duration: 1.9, repeat: Infinity, ease: "easeOut" }}
+            />
+            <motion.span
+              className="absolute inset-0 rounded-2xl border border-emerald-400/40"
+              animate={{ scale: [1, 1.5], opacity: [0.4, 0] }}
+              transition={{ duration: 1.9, repeat: Infinity, ease: "easeOut", delay: 0.9 }}
+            />
             <ImageUp size={22} strokeWidth={2.3} />
           </span>
           <span className="text-[13px] font-black text-emerald-950">{t.scan.pick}</span>
@@ -119,12 +129,21 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={file.url} alt={file.name} className="h-44 w-full object-cover" />
             {busy && (
-              <motion.div
-                aria-hidden
-                className={`absolute inset-0 bg-gradient-to-b from-emerald-500/10 via-emerald-400/25 to-emerald-500/10 ${GPU}`}
-                animate={{ opacity: [0.35, 0.85, 0.35] }}
-                transition={{ duration: 1.4, repeat: Infinity }}
-              />
+              <>
+                <motion.div
+                  aria-hidden
+                  className={`absolute inset-0 bg-gradient-to-b from-emerald-500/10 via-emerald-400/25 to-emerald-500/10 ${GPU}`}
+                  animate={{ opacity: [0.35, 0.85, 0.35] }}
+                  transition={{ duration: 1.4, repeat: Infinity }}
+                />
+                {/* Radar scanner: a luminous line sweeps the leaf top-to-bottom */}
+                <motion.div
+                  aria-hidden
+                  className={`absolute inset-x-2 h-10 rounded-full bg-gradient-to-b from-transparent via-emerald-200/70 to-transparent ${GPU}`}
+                  animate={{ y: [-44, 190] }}
+                  transition={{ duration: 1.25, repeat: Infinity, ease: "linear" }}
+                />
+              </>
             )}
           </div>
 
@@ -193,7 +212,7 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
               <button
                 type="button"
                 onClick={reset}
-                className="mx-auto inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-[11.5px] font-extrabold text-emerald-800 transition-colors hover:bg-white/70"
+                className="mx-auto inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-[11.5px] font-extrabold text-emerald-800 transition-all duration-150 hover:bg-white/70 active:scale-95"
               >
                 <Camera size={13} strokeWidth={2.6} aria-hidden />
                 {t.scan.retake}

@@ -100,7 +100,7 @@ export default function WeatherCard({
         <div>
           <p className="text-[11px] font-black text-emerald-800">{t.weather.hourLabel}</p>
           <div className="no-scrollbar -mx-1 mt-1.5 overflow-x-auto px-1">
-            <ul className="flex min-w-max snap-x gap-1.5">
+            <ul className="flex min-w-max snap-x snap-mandatory gap-1.5">
               {hours.map((hour, i) => {
                 const active = i === 0;
                 return (
@@ -138,7 +138,7 @@ export default function WeatherCard({
         <div>
           <p className="text-[11px] font-black text-emerald-800">{t.weather.days}</p>
           <div className="no-scrollbar -mx-1 mt-1.5 overflow-x-auto px-1">
-            <ul className="flex min-w-max snap-x gap-1.5">
+            <ul className="flex min-w-max snap-x snap-mandatory gap-1.5">
               {days.map((day, i) => {
                 const active = i === 0;
                 return (
@@ -181,7 +181,7 @@ export default function WeatherCard({
             hot || windy ? "bg-amber-50/90 text-amber-900 ring-1 ring-amber-200" : "bg-emerald-50/80 text-emerald-900 ring-1 ring-emerald-200/70"
           }`}
         >
-          <TriangleAlert size={13} strokeWidth={2.6} aria-hidden className="mt-[3px] shrink-0" />
+          <TriangleAlert size={13} strokeWidth={2.6} aria-hidden className={`mt-[3px] shrink-0 ${hot || windy ? "animate-pulse" : ""}`} />
           {advice}
         </p>
 

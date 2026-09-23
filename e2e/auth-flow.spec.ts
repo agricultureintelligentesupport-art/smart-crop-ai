@@ -366,8 +366,9 @@ test.describe("dashboard session guard", () => {
     await expect(page.getByRole("heading", { level: 1 })).toContainText(/مرحباً، زائر/);
     await expect(page.getByText("حساب زائر")).toBeVisible();
 
-    // Signing out from the guest dashboard wipes the flag and returns to
-    // the wizard — no guest session survives the wipe.
+    // Signing out from the guest dashboard (profile tab) wipes the flag and
+    // returns to the wizard — no guest session survives the wipe.
+    await page.locator("nav").getByRole("button", { name: "الحساب", exact: true }).click();
     await page.getByRole("button", { name: /تسجيل الخروج/ }).click();
     await expect(page).toHaveURL(/\/auth/);
     await page.goto("/dashboard");
@@ -379,15 +380,21 @@ test.describe("member dashboard", () => {
   test("a signed-in member gets the full dashboard, not a placeholder", async ({ page }) => {
     await openDashboard(page);
     await expect(page.getByRole("heading", { level: 1 })).toContainText(/مرحباً/);
+    // Home bento: weather, tasks and NDVI live here.
     await expect(page.getByRole("heading", { name: "الطقس والاحتياج المائي" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "تشخيص صحة النبات" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "مؤشر الغطاء النباتي" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "مهام اليوم" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "مؤشر الغطاء النباتي" })).toBeVisible();
+    // Irrigation tab: the water-needs calculator.
+    await page.locator("nav").getByRole("button", { name: "السقي", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
+    // Assistant tab: the plant-health scan.
+    await page.locator("nav").getByRole("button", { name: "المستشار", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "تشخيص صحة النبات" })).toBeVisible();
   });
 
   test("irrigation calculator reacts to crop, area and system", async ({ page }) => {
     await openDashboard(page);
+    await page.locator("nav").getByRole("button", { name: "السقي", exact: true }).click();
     const perDay = page.getByText("لكل قطعة يومياً").locator("..").getByText(/m³/).first();
     const before = await perDay.textContent();
 
@@ -407,6 +414,7 @@ test.describe("member dashboard", () => {
 
   test("leaf scan produces a diagnosis with field advice", async ({ page }) => {
     await openDashboard(page);
+    await page.locator("nav").getByRole("button", { name: "المستشار", exact: true }).click();
     await page.setInputFiles('input[type="file"]', {
       name: "leaf.png",
       mimeType: "image/png",
@@ -424,7 +432,7 @@ test.describe("member dashboard", () => {
 
   test("personalising the wilaya updates the header and can be persisted", async ({ page }) => {
     await openDashboard(page);
-    await page.getByRole("button", { name: /تعديل/ }).click();
+    await page.locator("nav").getByRole("button", { name: "الحساب", exact: true }).click();
     const picker = page.getByRole("button", { name: /الولاية/ });
     await expect(picker).toBeVisible();
     await picker.click();
@@ -459,9 +467,13 @@ test.describe("bilingual chrome", () => {
 
   test("French dashboard copy is complete", async ({ page }) => {
     await openDashboard(page);
+    await page.locator("nav").getByRole("button", { name: "الحساب", exact: true }).click();
     await page.getByRole("button", { name: "Français" }).click();
+    await page.locator("nav").getByRole("button", { name: "Accueil", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Météo et besoin en eau" })).toBeVisible();
+    await page.locator("nav").getByRole("button", { name: "Irrigation", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Calculateur d'irrigation" })).toBeVisible();
+    await page.locator("nav").getByRole("button", { name: "Assistant", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Diagnostic de la feuille" })).toBeVisible();
   });
 });
