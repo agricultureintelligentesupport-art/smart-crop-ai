@@ -523,7 +523,7 @@ test("Fallback A: MobileNetV2 failure → Gemini inspects the raw image independ
   assert.equal(geminiImage?.mimeType, "image/jpeg");
   assert.equal(geminiImage?.data, "aW1hZ2U=");
   // …with the instruction to diagnose the image independently (no reference).
-  assert.match(geminiUser, /لا يتوفر تشخيص مرجعي من MobileNetV2/);
+  assert.match(geminiUser, /لا تتوفر نتيجة فحص آلي مسبقة للصورة/);
   assert.match(geminiUser, /افحص الصورة المرفقة مباشرة/);
   // The vision outage is a non-fatal warning, never a 500.
   assert.match(warningText(payload), /Step 1 vision unavailable/);
