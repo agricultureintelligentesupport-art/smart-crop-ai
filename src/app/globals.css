@@ -251,3 +251,226 @@
     border-color: #064e3b;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/*  App shell — native surfaces for the signed-in experience           */
+/*                                                                     */
+/*  The auth wizard / onboarding keep the airy glass language above;   */
+/*  the signed-in app uses opaque, crisper surfaces (iOS grouped-card  */
+/*  feel): a single scroll region between a fixed bar and a tab bar,   */
+/*  generous thumb-sized rows and a strict 4/8/12/16/24 spacing beat.  */
+/* ------------------------------------------------------------------ */
+
+:root {
+  /* Warm off-white canvas, one notch softer than pure white */
+  --app-canvas: #f4f8f5;
+  --app-canvas-deep: #e8f3ec;
+  /* Opaque card / tile surfaces (no blur — cheaper, crisper on mobile) */
+  --app-surface: #ffffff;
+  --app-tile: #f6faf7;
+  --app-hairline: rgba(6, 78, 59, 0.09);
+  --app-hairline-strong: rgba(6, 78, 59, 0.16);
+  --app-shadow: 0 1px 2px rgba(6, 78, 59, 0.05), 0 14px 30px -22px rgba(6, 78, 59, 0.5);
+  --app-shadow-lift: 0 1px 2px rgba(6, 78, 59, 0.06), 0 22px 46px -26px rgba(6, 78, 59, 0.55);
+  /* Chrome heights, mirrored by the scroll padding in the views */
+  --app-bar-h: 3.5rem;
+  --app-tab-h: 4rem;
+}
+
+@layer components {
+  /* Full-screen shell: canvas + one scroll region between bar and tabs */
+  .app-canvas {
+    background:
+      radial-gradient(115% 52% at 100% 0%, rgba(16, 185, 129, 0.16), transparent 60%),
+      radial-gradient(85% 42% at 0% 2%, rgba(245, 158, 11, 0.13), transparent 56%),
+      linear-gradient(180deg, #f8fbf8 0%, var(--app-canvas) 42%, var(--app-canvas-deep) 100%);
+  }
+
+  /* Grouped inset card — the workhorse surface of the app */
+  .app-surface {
+    background: var(--app-surface);
+    border: 1px solid var(--app-hairline);
+    border-radius: 1.375rem;
+    box-shadow: var(--app-shadow);
+  }
+
+  .app-surface-lift {
+    box-shadow: var(--app-shadow-lift);
+  }
+
+  /* Nested row surface (metrics, list rows, chips blocks) */
+  .app-tile {
+    background: var(--app-tile);
+    border: 1px solid var(--app-hairline);
+    border-radius: 1rem;
+  }
+
+  /* Translucent top bar — blurs content as it scrolls underneath */
+  .app-bar {
+    background: rgba(248, 251, 248, 0.72);
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    backdrop-filter: blur(18px) saturate(180%);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.22s ease, background-color 0.22s ease, box-shadow 0.22s ease;
+  }
+
+  .app-bar-elevated {
+    background: rgba(248, 251, 248, 0.9);
+    border-bottom-color: var(--app-hairline);
+    box-shadow: 0 10px 24px -22px rgba(6, 78, 59, 0.6);
+  }
+
+  /* The canvas mesh is anchored top-right (start in LTR); mirror it for RTL so
+     the app bar always reads as the same translucent surface. */
+  [dir="rtl"] .app-canvas {
+    background:
+      radial-gradient(115% 52% at 0% 0%, rgba(16, 185, 129, 0.16), transparent 60%),
+      radial-gradient(85% 42% at 100% 2%, rgba(245, 158, 11, 0.13), transparent 56%),
+      linear-gradient(180deg, #f8fbf8 0%, var(--app-canvas) 42%, var(--app-canvas-deep) 100%);
+  }
+
+  /* Bottom tab bar (floats as a pill from sm up) */
+  .app-tabbar {
+    background: rgba(255, 255, 255, 0.88);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    backdrop-filter: blur(22px) saturate(180%);
+    border-top: 1px solid var(--app-hairline);
+  }
+
+  @media (min-width: 640px) {
+    .app-tabbar {
+      border: 1px solid var(--app-hairline);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--app-shadow-lift);
+    }
+  }
+
+  /* Vivid decision surface (hero): deep field emerald + row texture */
+  .app-hero {
+    position: relative;
+    overflow: hidden;
+    color: #ffffff;
+    background:
+      radial-gradient(120% 110% at 88% -10%, rgba(251, 191, 36, 0.45), transparent 55%),
+      linear-gradient(148deg, #036e52 0%, #047857 44%, #0f9d6f 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.28),
+      0 24px 48px -28px rgba(4, 120, 87, 0.9);
+  }
+
+  /* Ploughed-field texture: hairline rows, faded at both ends */
+  .app-hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.5;
+    background-image: repeating-linear-gradient(
+      112deg,
+      rgba(255, 255, 255, 0.12) 0 1px,
+      rgba(255, 255, 255, 0) 1px 15px
+    );
+    -webkit-mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent);
+    mask-image: linear-gradient(180deg, transparent, #000 28%, #000 72%, transparent);
+  }
+
+  /* Native-feeling range slider (direction-aware fill via --range-from) */
+  .range-native {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    /* Full 44px touch strip; the visible track stays 8px, centred. */
+    height: 2.75rem;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .range-native::-webkit-slider-runnable-track {
+    height: 0.5rem;
+    border-radius: 999px;
+    background: linear-gradient(
+      to var(--range-from, right),
+      #059669 0 var(--range-fill, 50%),
+      rgba(6, 78, 59, 0.12) var(--range-fill, 50%) 100%
+    );
+  }
+
+  .range-native::-moz-range-track {
+    height: 0.5rem;
+    border-radius: 999px;
+    background: rgba(6, 78, 59, 0.12);
+  }
+
+  .range-native::-moz-range-progress {
+    height: 0.5rem;
+    border-radius: 999px;
+    background: #059669;
+  }
+
+  .range-native::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 1.5rem;
+    height: 1.5rem;
+    margin-top: -0.5rem;
+    border-radius: 999px;
+    background: #ffffff;
+    border: 3px solid #059669;
+    box-shadow: 0 3px 10px -2px rgba(6, 78, 59, 0.45);
+  }
+
+  .range-native::-moz-range-thumb {
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 999px;
+    background: #ffffff;
+    border: 3px solid #059669;
+    box-shadow: 0 3px 10px -2px rgba(6, 78, 59, 0.45);
+  }
+
+  .range-native:focus-visible {
+    outline: none;
+  }
+
+  .range-native:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.3);
+  }
+
+  .range-native:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.3);
+  }
+
+  /* Safe-area contracts for the shell */
+  .tab-safe {
+    padding-bottom: max(0.25rem, env(safe-area-inset-bottom, 0px));
+  }
+
+  .bar-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .scroll-pad-top {
+    padding-top: calc(var(--app-bar-h) + env(safe-area-inset-top, 0px));
+  }
+
+  .scroll-pad-bottom {
+    padding-bottom: calc(var(--app-tab-h) + 1.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Hidden scrollbar for horizontal snap rows (native carousel feel) */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-bar {
+    transition: none;
+  }
+}

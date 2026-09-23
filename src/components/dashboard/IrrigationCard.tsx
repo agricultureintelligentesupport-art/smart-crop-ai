@@ -1,10 +1,11 @@
 "use client";
 
-import { Droplet, Droplets, Ruler, Sprout, Waves } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Droplet, Droplets, Minus, Plus, Ruler, Sprout, Waves } from "lucide-react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { computeIrrigation, type IrrigationSystem } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, SOILS, WILAYA_BY_CODE, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
+import { FOCUS_RING } from "@/components/auth/ui";
 import { fmt } from "./WeatherCard";
 import { Card, Metric, Segmented } from "./parts";
 
@@ -49,22 +50,31 @@ export default function IrrigationCard({
     return [...local, ...rest];
   }, [wilaya.crops]);
 
+  // Direction-aware slider fill (the track reads from the start edge).
+  const fill = `${Math.round(((areaHa - 0.5) / 19.5) * 100)}%`;
+  const rangeStyle = {
+    "--range-from": lang === "ar" ? "left" : "right",
+    "--range-fill": fill,
+  } as CSSProperties;
+
+  const stepper = `grid h-11 w-11 shrink-0 place-items-center rounded-[0.9rem] border border-[rgba(6,78,59,0.09)] bg-white text-emerald-800 transition-colors hover:border-emerald-300 active:scale-95 ${FOCUS_RING}`;
+
   return (
     <Card
       title={t.irrigation.title}
       subtitle={t.irrigation.subtitle}
-      icon={<Droplets size={17} strokeWidth={2.4} aria-hidden />}
+      icon={<Droplets size={18} strokeWidth={2.4} aria-hidden />}
     >
-      <div className="flex flex-col gap-3">
-        <label className="flex flex-col gap-1">
-          <span className="flex items-center gap-1 text-[11.5px] font-extrabold text-emerald-900">
-            <Sprout size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
+      <div className="flex flex-col gap-4">
+        <label className="flex flex-col gap-1.5">
+          <span className="flex items-center gap-1.5 text-[12.5px] font-extrabold text-emerald-900">
+            <Sprout size={14} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
             {t.irrigation.crop}
           </span>
           <select
             value={crop}
             onChange={(e) => setCrop(e.target.value as CropKey)}
-            className="field-input h-11 px-3"
+            className="field-input h-12 px-3.5 text-[15px]"
           >
             {cropOptions.map((key) => (
               <option key={key} value={key}>
@@ -74,50 +84,55 @@ export default function IrrigationCard({
           </select>
         </label>
 
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1 text-[11.5px] font-extrabold text-emerald-900">
-              <Ruler size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-[12.5px] font-extrabold text-emerald-900">
+              <Ruler size={14} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
               {t.irrigation.area}
             </span>
-            <span dir="ltr" className="text-[12px] font-black tabular-nums text-emerald-700">
+            <span dir="ltr" className="text-[13px] font-black tabular-nums text-emerald-700">
               {fmt(areaHa, 1)} {t.irrigation.areaUnit}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={() => onAreaChange(Math.max(0.5, Math.round((areaHa - 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} −`}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-[#E2F1E8] bg-white/80 text-[16px] font-black text-emerald-800 transition-colors hover:border-emerald-300"
+              className={stepper}
             >
-              −
+              <Minus size={17} strokeWidth={3} aria-hidden />
             </button>
             <input
               type="range"
               min={0.5}
               max={20}
               step={0.5}
-            value={areaHa}
-            onChange={(e) => onAreaChange(Number(e.target.value))}
-            aria-label={t.irrigation.area}
-            aria-valuetext={`${fmt(areaHa, 1)} ${t.irrigation.areaUnit}`}
-            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-emerald-100 accent-emerald-600"
+              value={areaHa}
+              onChange={(e) => onAreaChange(Number(e.target.value))}
+              aria-label={t.irrigation.area}
+              aria-valuetext={`${fmt(areaHa, 1)} ${t.irrigation.areaUnit}`}
+              style={rangeStyle}
+              className="range-native"
             />
             <button
               type="button"
               onClick={() => onAreaChange(Math.min(20, Math.round((areaHa + 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} +`}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-[#E2F1E8] bg-white/80 text-[16px] font-black text-emerald-800 transition-colors hover:border-emerald-300"
+              className={stepper}
             >
-              +
+              <Plus size={17} strokeWidth={3} aria-hidden />
             </button>
           </div>
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-extrabold text-emerald-900">{t.irrigation.soil}</span>
-          <select value={soil} onChange={(e) => setSoil(e.target.value as SoilKey)} className="field-input h-11 px-3">
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[12.5px] font-extrabold text-emerald-900">{t.irrigation.soil}</span>
+          <select
+            value={soil}
+            onChange={(e) => setSoil(e.target.value as SoilKey)}
+            className="field-input h-12 px-3.5 text-[15px]"
+          >
             {ALL_SOILS.map((key) => (
               <option key={key} value={key}>
                 {SOILS[key][lang]}
@@ -126,8 +141,8 @@ export default function IrrigationCard({
           </select>
         </label>
 
-        <div className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-extrabold text-emerald-900">{t.irrigation.system}</span>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[12.5px] font-extrabold text-emerald-900">{t.irrigation.system}</span>
           <Segmented<IrrigationSystem>
             layoutId="dash-irrigation-system"
             ariaLabel={t.irrigation.system}
@@ -165,7 +180,7 @@ export default function IrrigationCard({
           />
         </div>
 
-        <p className="text-[10px] font-semibold leading-4 text-emerald-900/60">
+        <p className="px-1 text-[10.5px] font-semibold leading-5 text-emerald-900/55">
           {t.irrigation.savedCaption} · <span dir="ltr">{fmt(result.savedLitresPerDay)} L</span> ·{" "}
           {t.irrigation.formulaNote}
         </p>

@@ -33,7 +33,7 @@ export default function SatelliteCard({
     <Card
       title={t.satellite.title}
       subtitle={cropLabel ? `${t.satellite.subtitle} · ${cropLabel}` : t.satellite.subtitle}
-      icon={<Satellite size={17} strokeWidth={2.4} aria-hidden />}
+      icon={<Satellite size={18} strokeWidth={2.4} aria-hidden />}
       aside={
         <Chip tone={BAND_TONE[band]} icon={<TrendingUp size={11} strokeWidth={3} aria-hidden />}>
           <span dir="ltr">{reading.trendPct >= 0 ? "+" : ""}{fmt(reading.trendPct)}%</span>
@@ -43,8 +43,8 @@ export default function SatelliteCard({
       <div className="flex flex-col gap-3">
         <div className="flex items-end justify-between gap-3">
           <div>
-            <p className="text-[10.5px] font-bold text-emerald-800/70">{t.satellite.value}</p>
-            <p dir="ltr" className="text-[26px] font-black leading-none tabular-nums text-emerald-950">
+            <p className="text-[11.5px] font-extrabold tracking-wide text-emerald-800/65">{t.satellite.value}</p>
+            <p dir="ltr" className="mt-1 text-[30px] font-black leading-none tabular-nums text-emerald-950">
               {reading.value.toFixed(2)}
             </p>
           </div>
@@ -60,14 +60,14 @@ export default function SatelliteCard({
         />
 
         <div className="flex flex-col gap-1">
-          <div className="flex items-center justify-between text-[10.5px] font-bold text-emerald-800">
+          <div className="flex items-center justify-between text-[11.5px] font-bold text-emerald-800/85">
             <span>{t.satellite.stress}</span>
             <span dir="ltr">{fmt(reading.stressShare * 100)}%</span>
           </div>
           <Progress value={reading.stressShare * 100} tone={reading.stressShare > 0.25 ? "amber" : "emerald"} />
         </div>
 
-        <p className="text-[10px] font-semibold leading-4 text-emerald-900/55">{t.satellite.note}</p>
+        <p className="text-[10.5px] font-semibold leading-5 text-emerald-900/50">{t.satellite.note}</p>
       </div>
     </Card>
   );
