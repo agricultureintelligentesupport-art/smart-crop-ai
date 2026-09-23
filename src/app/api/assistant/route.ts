@@ -76,9 +76,9 @@
  *     and candidate diseases). Whenever a photo is attached, the image
  *     itself travels with the turn as an `inlineData` part (the Step 0 crop
  *     when detection succeeded, the raw frame otherwise), so:
- *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini inspects the image,
- *         evaluates MobileNetV2's reference and generates the final
- *         structured diagnosis report;
+ *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini narrates
+ *         MobileNetV2's result (label, confidence, candidates) in one
+ *         unified voice — no re-diagnosis, no overriding, no new labels;
  *       • FALLBACK A — MobileNetV2 failed: Gemini inspects the raw image
  *         independently and generates the report on its own.
  *     Key pool: EVERY environment variable starting with `GEMINI_API_KEY`
@@ -880,8 +880,9 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - انتقل بسلاسة من العرض العام إلى التدخل المحدد، مستنداً دائماً إلى تاريخ المحادثة وأجوبة المستخدم السابقة.
 
 التشخيص والعلاج:
-- عند وجود تشخيص من نموذج الرؤية (PlantVillage): اعتمد عليه مباشرة، اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية.
-- إن كانت نسبة الثقة ضعيفة (<45%)، اطلب صورة أوضح في سطر واحد مع ذكر التشخيصات البديلة المحتملة.
+- عند وجود تشخيص من تحليل الصورة (PlantVillage): هذه النتيجة هي تقييمك أنت للصورة، فاعرضها بصوت واحد موحّد؛ اذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، واشرح معناه باختصار، ثم قدّم العلاج والوقاية في نقاط عملية.
+- لا تقدّم نفسك كجهة منفصلة تحكم على نتيجة نموذج الرؤية أو تقبلها أو تصحّحها أو تستبدلها، ولا تصف النتيجة بأنها غير موثوقة، ولا تطرح أي تشخيص خارج التشخيص الأرجح والتشخيصات البديلة التي أعادها التحليل فعلاً.
+- إن كانت نسبة الثقة ضعيفة (<45%)، اعرض التشخيص الأرجح بحذر مع ذكر التشخيصات البديلة التي أعادها التحليل فقط، واطلب صورة أوضح أو تفاصيل أكثر في سطر واحد، وقدّم مع ذلك اقتراحاً للعلاج والوقاية للتشخيص الأرجح وحده، مع التنبيه إلى أن صورة أوضح أو معلومات إضافية سترفع دقة التشخيص.
 - اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
 
@@ -929,16 +930,56 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   return [
-    "نتيجة نموذج الرؤية (PlantVillage — MobileNetV2) على صورة المستخدم:",
-    `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
-    `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
-    alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
+    "نتيجة تحليل صورة المستخدم (تصنيف PlantVillage) — هذه هي نتيجة تحليلك أنت للصورة:",
+    `- التشخيص الأرجح (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
+    `- نسبة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
+    alternates
+      ? `- الاحتمالات البديلة التي أعادها التحليل (candidate diseases — وهي وحدها المسموح بذكرها كبدائل): ${alternates}`
+      : "",
     diagnosis.healthy
-      ? "- النموذج يرى أن النبتة سليمة؛ طمئن المستخدم وقدّم نصائح وقائية."
+      ? "- التحليل يشير إلى أن النبتة سليمة؛ طمئن المستخدم وقدّم نصائح وقائية."
       : "",
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * Narration instruction for the HYBRID PRIMARY PATH (photo + Step 1
+ * diagnosis). The LLM and the vision classifier must read as ONE voice: the
+ * LLM phrases the classifier's result as its own assessment — it never
+ * judges, overrides or "corrects" it, and never introduces diagnoses beyond
+ * the top label and the alternates the classifier actually returned. The
+ * low-confidence branch reuses the shared `confidenceBucket` threshold
+ * (<45%) and still asks for a treatment suggestion for the top label.
+ */
+function describeImageDiagnosisInstruction(diagnosis: AssistantDiagnosis): string {
+  const pct = Math.round(diagnosis.confidence * 100);
+  const top = `${diagnosis.labelAr} (${pct}%)`;
+  const hasAlternates = diagnosis.candidates.length > 1;
+  const unifiedVoice =
+    "اعرض نتيجة التحليل أعلاه بصوت واحد موحّد باعتبارها تقييمك أنت للصورة: أنت وتحليل الصور نظام واحد، لا جهتان منفصلتان. " +
+    "لا تقدّم النتيجة كرأي «نموذج مرجعي» أو جهة أخرى تحكم عليها أو تقبلها أو تصحّحها، ولا تكتب عبارات مثل «نتيجة النموذج غير موثوقة» أو «أجريت تحليلي الميداني الخاص» أو «التشخيص النهائي المصحّح». " +
+    "لا تطرح أي مرض أو تشخيص خارج التشخيص الأرجح والاحتمالات البديلة المذكورة أعلاه، ولا تستنتج تشخيصاً جديداً من قراءة مستقلة للصورة المرفقة.";
+  const treatmentTarget = diagnosis.healthy
+    ? "نصائح وقائية مناسبة للنبتة السليمة"
+    : `اقتراحاً للعلاج والوقاية خاصاً بـ${diagnosis.labelAr} وحده`;
+  const byConfidence =
+    confidenceBucket(diagnosis.confidence) === "low"
+      ? `الثقة منخفضة (أقل من 45%): اعرض ${top} كالاحتمال الأرجح بصياغة حذرة، ` +
+        (hasAlternates
+          ? "ثم اذكر باختصار الاحتمالات البديلة المذكورة أعلاه فقط وبنسبها كاحتمالات ثانوية، "
+          : "") +
+        "واقترح إرسال صورة أوضح (ورقة أو ثمرة كاملة في إضاءة نهارية) أو تفاصيل إضافية لرفع الدقة. " +
+        `ومع ذلك قدّم ${treatmentTarget} بصيغة اقتراح، مع التنبيه إلى أن صورة أوضح أو معلومات أكثر ستزيد دقة التشخيص؛ لا تحجب التوجيه العلاجي، ولا تقدّم علاجات لعدة تشخيصات متنافسة.`
+      : diagnosis.healthy
+        ? `اذكر بصياغة طبيعية واثقة أن النبتة تبدو سليمة — ${top} — ثم قدّم ${treatmentTarget}.`
+        : `اذكر ${top} بصياغة طبيعية واثقة، واشرح باختصار ما تعنيه هذه الإصابة، ثم قدّم خطة العلاج والوقاية الخاصة بها.`;
+  return [
+    unifiedVoice,
+    byConfidence,
+    "اكتب الجواب كخبير واحد يتحدث بشكل طبيعي عمّا تُظهره الصورة على الأرجح، دون تقسيمه إلى «نتيجة النموذج / تحليلي الخاص / التشخيص النهائي».",
+  ].join("\n");
 }
 
 /**
@@ -948,8 +989,8 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
  * label, confidence score and candidate diseases) when one is available +
  * the user's own query. When a photo is attached, an image instruction is
  * added: with a MobileNetV2 verdict in hand (HYBRID PRIMARY PATH) Gemini
- * must inspect the attached image, evaluate the reference and issue the
- * final structured report; without one (FALLBACK A) it must diagnose the
+ * narrates that result as its own unified assessment (see
+ * describeImageDiagnosisInstruction); without one (FALLBACK A) it must diagnose the
  * raw image independently. Keeping one builder guarantees the fallback LLM
  * answers from exactly the same context the primary was given.
  */
@@ -964,17 +1005,15 @@ function buildUserContent(
     ...(isFirstTurn ? [`سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`] : []),
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `تشخيص PlantVillage (من Step 1 — نتيجة تحليل الصورة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
       : hasImage
         ? "لا يتوفر تشخيص مرجعي من MobileNetV2 — افحص الصورة المرفقة مباشرةً وابدأ التشخيص من الصورة."
         : "",
-    hasImage && diagnosis
-      ? "افحص الصورة المرفقة بنفسك وقيّم مدى تطابق تشخيص MobileNetV2 المرجعي أعلاه مع ما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك (اعتمد التشخيص المرجعي أو صحّحه)، مع خطة العلاج والوقاية."
-      : "",
+    hasImage && diagnosis ? describeImageDiagnosisInstruction(diagnosis) : "",
     message
       ? `سؤال المستخدم: ${message}`
       : diagnosis
-        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة PlantVillage أعلاه."
+        ? "لم يكتب المستخدم سؤالاً — قدّم التشخيص وخطة العلاج والوقاية مباشرة بناءً على نتيجة التحليل أعلاه."
         : "قدّم نفسك في جملة واحدة كمساعد زراعي خبير واطلب سؤال المستخدم دون أي حشو.",
   ].filter(Boolean);
   return sections.join("\n\n");
@@ -1077,8 +1116,8 @@ async function generateWithGeminiModel(
               parts: image
                 ? [
                     // The photo itself (Step 0 crop or the raw frame) —
-                    // Gemini inspects it and cross-checks the MobileNetV2
-                    // reference carried in the text part.
+                    // context for Gemini, which narrates the MobileNetV2
+                    // result carried in the text part in one unified voice.
                     { inlineData: { mimeType: image.mimeType, data: image.data } },
                     { text: userContent },
                   ]

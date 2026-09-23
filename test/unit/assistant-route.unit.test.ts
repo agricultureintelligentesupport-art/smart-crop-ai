@@ -673,11 +673,57 @@ test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference
   assert.match(geminiUser, /اللفحة المتأخرة/);
   assert.match(geminiUser, /عفن الأوراق/);
   assert.match(geminiUser, /3%/);
-  // …and Gemini is instructed to inspect the image against the reference.
-  assert.match(geminiUser, /افحص الصورة المرفقة/);
+  // …and Gemini is instructed to narrate the classifier's result in ONE
+  // unified voice — never judging/correcting it or adding new diagnoses.
+  assert.match(geminiUser, /بصوت واحد موحّد/);
+  assert.match(geminiUser, /لا تطرح أي مرض أو تشخيص خارج/);
+  assert.doesNotMatch(geminiUser, /اعتمد التشخيص المرجعي أو صحّحه|قيّم مدى تطابق|افحص الصورة المرفقة بنفسك/);
+  // High confidence (95%) → the confident narration branch, not the
+  // low-confidence clearer-photo fallback.
+  assert.match(geminiUser, /بصياغة طبيعية واثقة/);
+  assert.doesNotMatch(geminiUser, /الثقة منخفضة/);
   assert.match(geminiUser, /شخّص هذه الورقة/);
   // Secrets never travel back to the client.
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
+});
+
+test("hybrid low confidence: Gemini narrates top + returned alternates only, asks for a clearer photo and still suggests treatment for the top label", async () => {
+  configureKeys();
+  let geminiUser = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isGeminiUrl(String(url))) {
+      geminiUser = geminiUserText(parseGeminiBody(init));
+      return geminiReply("على الأرجح لفحة مبكرة؛ أرسل صورة أوضح.");
+    }
+    if (isDetectUrl(String(url))) return Response.json([]);
+    assert.ok(isClassifyUrl(String(url)));
+    return Response.json([
+      { label: "Tomato___Early_blight", score: 0.4 },
+      { label: "Tomato___Late_blight", score: 0.35 },
+      { label: "Tomato___Leaf_Mold", score: 0.25 },
+    ]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+
+  // Top label + only the alternates the classifier returned.
+  assert.match(geminiUser, /40%/);
+  assert.match(geminiUser, /اللفحة المتأخرة/);
+  assert.match(geminiUser, /35%/);
+  assert.match(geminiUser, /عفن الأوراق/);
+  // Low-confidence branch: cautious wording + clearer photo…
+  assert.match(geminiUser, /الثقة منخفضة/);
+  assert.match(geminiUser, /صورة أوضح/);
+  // …but treatment is still suggested, for the top label only.
+  assert.match(geminiUser, /قدّم اقتراحاً للعلاج والوقاية خاصاً بـ/);
+  assert.match(geminiUser, /ولا تقدّم علاجات لعدة تشخيصات متنافسة/);
+  // One unified voice — no judging/correcting framing.
+  assert.match(geminiUser, /بصوت واحد موحّد/);
+  assert.doesNotMatch(geminiUser, /اعتمد التشخيص المرجعي أو صحّحه|قيّم مدى تطابق|افحص الصورة المرفقة بنفسك/);
 });
 
 for (const [name, failure] of [
