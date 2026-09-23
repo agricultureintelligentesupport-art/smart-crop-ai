@@ -71,7 +71,7 @@ export default function FieldTasksCard({
     <Card
       title={t.tasks.title}
       subtitle={`${t.tasks.subtitle} · ${CROPS[crop][lang]}`}
-      icon={<ClipboardList size={17} strokeWidth={2.4} aria-hidden />}
+      icon={<ClipboardList size={18} strokeWidth={2.4} aria-hidden />}
       aside={
         <Chip tone={remaining === 0 ? "emerald" : "amber"}>
           {remaining === 0 ? t.tasks.done : t.tasks.remaining.replace("{n}", String(remaining))}
@@ -80,31 +80,33 @@ export default function FieldTasksCard({
     >
       <Progress value={(doneCount / tasks.length) * 100} />
 
-      <ul className="mt-3 flex flex-col gap-2">
+      <ul className="mt-3.5 flex flex-col gap-2">
         {tasks.map((task) => {
           const checked = Boolean(done[task.id]);
           return (
             <li key={task.id}>
               <label
-                className={`flex cursor-pointer items-start gap-2.5 rounded-2xl px-2.5 py-2 ring-1 transition-colors ${
-                  checked ? "bg-emerald-50/80 ring-emerald-200" : "bg-white/70 ring-[#E2F1E8] hover:ring-emerald-200"
+                className={`flex min-h-[3.25rem] cursor-pointer items-start gap-3 rounded-[1rem] px-3 py-2.5 ring-1 transition-colors ${
+                  checked
+                    ? "bg-emerald-50 ring-emerald-200"
+                    : "bg-[#f6faf7] ring-[rgba(6,78,59,0.07)] hover:ring-emerald-200"
                 }`}
               >
                 <input
                   type="checkbox"
                   checked={checked}
                   onChange={(e) => setDone((prev) => ({ ...prev, [task.id]: e.target.checked }))}
-                  className="mt-[3px] h-4 w-4 shrink-0 accent-emerald-600"
+                  className="mt-[3px] h-5 w-5 shrink-0 accent-emerald-600"
                 />
                 <span className="min-w-0">
                   <span
-                    className={`block text-[12.5px] font-black ${
+                    className={`block text-[13.5px] font-black ${
                       checked ? "text-emerald-700/70 line-through" : "text-emerald-950"
                     }`}
                   >
                     {task.title}
                   </span>
-                  <span className="mt-0.5 block text-[11px] font-semibold leading-5 text-emerald-900/70">
+                  <span className="mt-1 block text-[11.5px] font-semibold leading-[1.7] text-emerald-900/65">
                     {task.detail}
                   </span>
                 </span>

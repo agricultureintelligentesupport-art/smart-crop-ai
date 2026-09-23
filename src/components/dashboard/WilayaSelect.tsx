@@ -48,19 +48,19 @@ export default function WilayaSelect({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="listbox"
-        className={`glass-card flex h-12 w-full items-center gap-2 rounded-2xl px-3 text-start transition-colors hover:border-emerald-300 ${FOCUS_RING}`}
+        className={`app-surface flex h-14 w-full items-center gap-2.5 rounded-[1.1rem] px-3.5 text-start transition-colors hover:border-emerald-300 ${FOCUS_RING}`}
       >
-        <MapPin size={15} strokeWidth={2.6} aria-hidden className="shrink-0 text-emerald-600" />
+        <MapPin size={17} strokeWidth={2.6} aria-hidden className="shrink-0 text-emerald-600" />
         <span className="min-w-0 flex-1">
-          <span className="block text-[9.5px] font-bold text-emerald-800/70">{t.personalize.wilaya}</span>
-          <span className="block truncate text-[12.5px] font-black text-emerald-950">
+          <span className="block text-[10.5px] font-bold tracking-wide text-emerald-800/65">{t.personalize.wilaya}</span>
+          <span className="block truncate text-[14px] font-black text-emerald-950">
             {lang === "ar" ? current.nameAr : current.nameFr}
             <span aria-hidden className="mx-1 text-emerald-900/30">·</span>
             <span dir="ltr">{current.code}</span>
           </span>
         </span>
         <ChevronDown
-          size={16}
+          size={18}
           strokeWidth={2.6}
           aria-hidden
           className={`shrink-0 text-emerald-700 transition-transform ${open ? "rotate-180" : ""}`}
@@ -74,7 +74,8 @@ export default function WilayaSelect({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.99 }}
             transition={{ duration: 0.2, ease: EASE_OUT }}
-            className={`glass-card absolute inset-x-0 top-[54px] z-40 rounded-3xl p-2.5 ${GPU}`}
+            data-nested-popover="true"
+            className={`app-surface absolute inset-x-0 top-[54px] z-40 p-2.5 ${GPU}`}
           >
             <label className="sr-only" htmlFor="dash-wilaya-search">
               {t.personalize.search}
@@ -93,7 +94,7 @@ export default function WilayaSelect({
                 placeholder={t.personalize.searchPlaceholder}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                className="field-input h-11 ps-10 pe-3 text-[14px]"
+                className="field-input h-12 ps-10 pe-3 text-[15px]"
               />
             </div>
 
@@ -111,20 +112,20 @@ export default function WilayaSelect({
                         setOpen(false);
                         setQuery("");
                       }}
-                      className={`flex w-full items-center gap-2 rounded-xl px-2 py-2 text-start transition-colors ${FOCUS_RING} ${
-                        active ? "bg-emerald-50/90" : "hover:bg-white/80"
+                      className={`flex min-h-[2.75rem] w-full items-center gap-2.5 rounded-[0.9rem] px-2 py-2 text-start transition-colors ${FOCUS_RING} ${
+                        active ? "bg-emerald-50" : "hover:bg-[#f6faf7]"
                       }`}
                     >
                       <span
                         aria-hidden
                         dir="ltr"
-                        className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[10px] font-black ${
-                          active ? "bg-emerald-500 text-white" : "bg-white text-emerald-700 ring-1 ring-[#E2F1E8]"
+                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-[0.6rem] text-[11px] font-black ${
+                          active ? "bg-emerald-500 text-white" : "app-tile text-emerald-700"
                         }`}
                       >
                         {w.code}
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-emerald-950">
+                      <span className="min-w-0 flex-1 truncate text-[13px] font-bold text-emerald-950">
                         {lang === "ar" ? w.nameAr : w.nameFr}
                         <span aria-hidden className="mx-1.5 text-emerald-900/25">·</span>
                         <span className="text-[11px] font-semibold text-emerald-800/70">
@@ -137,7 +138,7 @@ export default function WilayaSelect({
                 );
               })}
               {results.length === 0 && (
-                <li className="px-2 py-6 text-center text-[12px] font-bold text-emerald-900/60">
+                <li className="px-2 py-6 text-center text-[12.5px] font-bold text-emerald-900/60">
                   {t.personalize.noResults}
                 </li>
               )}

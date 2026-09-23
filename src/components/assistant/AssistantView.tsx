@@ -1,11 +1,9 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useMotionValueEvent, useScroll } from "framer-motion";
 import {
   Bot,
-  Home,
   ImagePlus,
-  LayoutDashboard,
   LoaderCircle,
   ScanSearch,
   Scissors,
@@ -13,7 +11,6 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   useCallback,
@@ -23,7 +20,9 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
-import AmbientBackdrop from "@/components/AmbientBackdrop";
+import AppBar, { AppBarBrand } from "@/components/app/AppBar";
+import TabBar from "@/components/app/TabBar";
+import { SHELL_COLUMN } from "@/components/app/shell";
 import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
@@ -38,6 +37,7 @@ import type {
 import { useProfile } from "@/lib/auth/profile";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
+import { APP_SHELL } from "@/lib/app/copy";
 import { useLang } from "@/lib/use-lang";
 import DiagnosisCard from "./DiagnosisCard";
 import Markdown from "./Markdown";
@@ -118,6 +118,7 @@ export default function AssistantView() {
   const router = useRouter();
   const { lang, setLang } = useLang("ar");
   const t = ASSISTANT[lang];
+  const shell = APP_SHELL[lang];
   const { profile, ready } = useProfile();
   const { user: authUser, profile: authProfile } = useAuth();
   const { isGuest } = useGuest();
@@ -138,6 +139,12 @@ export default function AssistantView() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  /** App-bar elevation, driven by the conversation's own scroll region. */
+  const [elevated, setElevated] = useState(false);
+  const { scrollY } = useScroll({ container: scrollRef });
+  useMotionValueEvent(scrollY, "change", (value) => setElevated(value > 8));
+
   /** Snapshot of the last request so the retry chip can resend it. */
   const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
 
@@ -329,30 +336,23 @@ export default function AssistantView() {
   return (
     <div
       dir={lang === "ar" ? "rtl" : "ltr"}
-      className={`screen-h relative flex flex-col overflow-hidden text-emerald-950 ${
+      className={`screen-h app-canvas relative flex flex-col overflow-hidden text-emerald-950 ${
         lang === "ar" ? "font-arabic" : "font-latin"
       }`}
-      style={{ background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 58%, #DCF5E6 100%)" }}
     >
-      <AmbientBackdrop variant="dashboard" />
 
       {/* Header */}
-      <header className="pt-safe relative z-30 mx-auto flex w-full max-w-[860px] shrink-0 items-center justify-between gap-2 px-3.5 pb-1.5 sm:px-5">
-        <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)]">
-            <Bot size={15} strokeWidth={2.4} className="text-white" aria-hidden />
-          </span>
-          <span className="flex min-w-0 flex-col leading-tight">
-            <span className="truncate text-[11.5px] font-black whitespace-nowrap text-emerald-950">
-              {t.header.title}
-            </span>
-            <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
-              {t.header.subtitle}
-            </span>
-          </span>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1.5">
+      <AppBar
+        label={shell.barLabel}
+        elevated={elevated}
+        leading={
+          <AppBarBrand
+            icon={<Bot size={17} strokeWidth={2.4} className="text-white" aria-hidden />}
+            title={t.header.title}
+            subtitle={t.header.subtitle}
+          />
+        }
+        trailing={
           <LanguageSwitch
             lang={lang}
             onChange={setLang}
@@ -360,36 +360,22 @@ export default function AssistantView() {
             labels={{ ar: t.header.langAr, fr: t.header.langFr }}
             layoutId="assistant-lang-thumb"
           />
-          <Link
-            href="/dashboard"
-            aria-label={t.header.navDashboard}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <LayoutDashboard size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-          <Link
-            href="/"
-            aria-label={t.header.navHome}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <Home size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-        </div>
-      </header>
+        }
+      />
 
       {/* Conversation */}
       <main
         ref={scrollRef}
-        className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        className="scroll-area scroll-pad-top relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
         aria-live="polite"
       >
-        <div className="mx-auto flex w-full max-w-[860px] flex-col gap-3 px-3.5 pb-4 pt-2 sm:px-5">
+        <div className={`${SHELL_COLUMN} flex flex-col gap-3 px-4 pb-4 pt-2`}>
           {emptyChat && (
             <motion.section
               initial={{ opacity: 0, y: 14 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.45, ease: EASE_OUT }}
-              className={`glass-card ${GPU} mt-4 rounded-3xl p-5 sm:mt-10 sm:p-7`}
+              className={`app-surface ${GPU} mt-4 p-5 sm:mt-8 sm:p-6`}
             >
               <span className="mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_28px_rgba(16,185,129,0.45)]">
                 <Sparkles size={24} strokeWidth={2.2} className="text-white" aria-hidden />
@@ -414,7 +400,7 @@ export default function AssistantView() {
                   className={`max-w-[92%] sm:max-w-[78%] ${
                     msg.author === "user"
                       ? "rounded-3xl rounded-es-lg bg-gradient-to-br from-emerald-500 to-green-600 px-4 py-3 text-white shadow-[0_10px_28px_rgba(16,185,129,0.32)]"
-                      : "glass-card rounded-3xl rounded-ss-lg px-4 py-3.5"
+                      : "app-surface rounded-[1.35rem] rounded-ss-lg px-4 py-3.5"
                   }`}
                 >
                   {msg.author === "assistant" && (
@@ -486,7 +472,7 @@ export default function AssistantView() {
               animate={{ opacity: 1, y: 0 }}
               className={`${GPU} flex justify-start`}
             >
-              <div className="glass-card flex items-center gap-2.5 rounded-3xl rounded-ss-lg px-4 py-3">
+              <div className="app-surface flex items-center gap-2.5 rounded-[1.35rem] rounded-ss-lg px-4 py-3">
                 <LoaderCircle size={15} strokeWidth={2.6} className="animate-spin text-emerald-600" aria-hidden />
                 <span className="text-[12px] font-bold text-emerald-900/70">
                   {busyWithImage
@@ -502,7 +488,7 @@ export default function AssistantView() {
       </main>
 
       {/* Composer */}
-      <footer className="relative z-20 mx-auto w-full max-w-[860px] shrink-0 px-3.5 pb-3.5 sm:px-5 sm:pb-5">
+      <footer className={`${SHELL_COLUMN} relative z-20 shrink-0 px-4 pb-[calc(var(--app-tab-h)+0.75rem+env(safe-area-inset-bottom,0px))]`}>
         {/* Quick-action chips */}
         <div className="scroll-area mb-2 flex gap-1.5 overflow-x-auto pb-0.5">
           {t.chips.map((chip) => (
@@ -511,14 +497,14 @@ export default function AssistantView() {
               type="button"
               disabled={busy}
               onClick={() => onChip(chip)}
-              className={`glass ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-3.5 py-2 text-[11.5px] font-black text-emerald-800 transition-colors hover:bg-white/95 disabled:opacity-50`}
+              className={`app-surface ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-4 py-2.5 text-[12px] font-black text-emerald-800 transition-colors hover:border-emerald-300 disabled:opacity-50`}
             >
               {chip.label}
             </button>
           ))}
         </div>
 
-        <div className="glass-card rounded-3xl p-2">
+        <div className="app-surface p-2">
           <AnimatePresence>
             {pendingImage && (
               <motion.div
@@ -600,6 +586,8 @@ export default function AssistantView() {
           </div>
         </div>
       </footer>
+
+      <TabBar active="assistant" lang={lang} />
     </div>
   );
 }

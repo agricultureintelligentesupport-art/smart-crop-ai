@@ -1,27 +1,17 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
-import {
-  Bot,
-  Clock,
-  Home,
-  Leaf,
-  LogOut,
-  MapPin,
-  Settings2,
-  ShieldCheck,
-  Sprout,
-  Sun,
-  Waves,
-} from "lucide-react";
-import Link from "next/link";
+import { useMotionValueEvent, useScroll } from "framer-motion";
+import { Leaf, LogOut, MapPin, Settings2, Sprout } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import AmbientBackdrop from "@/components/AmbientBackdrop";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import AppBar, { AppBarAction, AppBarBrand } from "@/components/app/AppBar";
+import TabBar from "@/components/app/TabBar";
+import { SHELL_COLUMN } from "@/components/app/shell";
 import LanguageSwitch from "@/components/auth/LanguageSwitch";
-import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
+import { FOCUS_RING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
+import { APP_SHELL } from "@/lib/app/copy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
@@ -29,20 +19,30 @@ import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
 import { CROPS, DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
+import AccountSheet from "./AccountSheet";
 import FieldTasksCard from "./FieldTasksCard";
+import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
+import QuickActions, { type QuickTarget } from "./QuickActions";
 import SatelliteCard from "./SatelliteCard";
 import ScanCard from "./ScanCard";
 import WeatherCard, { fmt } from "./WeatherCard";
-import WilayaSelect from "./WilayaSelect";
-import { Chip, Segmented } from "./parts";
+import { SectionHeader } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
+
+/** How long a jump target keeps its focus ring after a quick action. */
+const HIGHLIGHT_MS = 1400;
 
 /**
  * The live member dashboard, rendered by `/dashboard`. Every number reacts to
  * the wilaya + crop + parcel inputs, so the page is fully operational without
  * a backend: it is seeded, deterministic and clearly labelled as an estimate.
+ *
+ * Presentation is a native app shell: a translucent top bar, one scroll region
+ * holding a large title, a hero decision card, thumb-zone quick actions and
+ * grouped card sections, then a bottom tab bar. All state, derivations and
+ * handlers below are unchanged — only what wraps them is.
  *
  * Session-gated with a guest escape hatch: an authenticated user (Google,
  * phone or e-mail — Firebase session or gateway-backed on-device session)
@@ -53,6 +53,7 @@ export default function DashboardView() {
   const router = useRouter();
   const { lang, setLang } = useLang("ar");
   const t = DASHBOARD[lang];
+  const shell = APP_SHELL[lang];
   const brand = AUTH[lang].header;
   const { profile, ready, patch, clear } = useProfile();
   const { user: authUser, profile: authProfile, signOut: authSignOut, updateProfile } = useAuth();
@@ -131,193 +132,217 @@ export default function DashboardView() {
     router.push("/auth");
   };
 
+  /* ---------------- Shell behaviour (presentation only) ---------------- */
+
+  /** The one scroll region: drives the top bar's elevation. */
+  const scrollRef = useRef<HTMLElement | null>(null);
+  const [elevated, setElevated] = useState(false);
+  const { scrollY } = useScroll({ container: scrollRef });
+  useMotionValueEvent(scrollY, "change", (value) => setElevated(value > 8));
+
+  /** Quick-action jump targets + the ring that answers "where did I land?". */
+  const tasksRef = useRef<HTMLDivElement | null>(null);
+  const irrigationRef = useRef<HTMLDivElement | null>(null);
+  const scanRef = useRef<HTMLDivElement | null>(null);
+  const [highlight, setHighlight] = useState<QuickTarget | null>(null);
+  const highlightTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+  }, []);
+
+  const jumpTo = useCallback((target: QuickTarget) => {
+    const node =
+      target === "scan" ? scanRef.current : target === "irrigation" ? irrigationRef.current : tasksRef.current;
+    node?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setHighlight(target);
+    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
+    highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
+  }, []);
+
+  // The "حسابي" tab deep-links to the dashboard with `#account` from other
+  // screens. Read through the URL (hydration-safe, no state mirrored from an
+  // effect) so the sheet can be opened, closed and re-opened by navigation.
+  const hashAccount = useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener("hashchange", onChange);
+      return () => window.removeEventListener("hashchange", onChange);
+    },
+    () => window.location.hash === "#account",
+    () => false,
+  );
+  const accountOpen = openPersonalize || hashAccount;
+  const closeAccount = () => {
+    // Clear the hash first so the re-render triggered by the state update
+    // already sees a hash-less URL.
+    if (window.location.hash === "#account") {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    setOpenPersonalize(false);
+  };
+
+  const ring = (target: QuickTarget) =>
+    highlight === target ? "rounded-[1.5rem] ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-[#f4f8f5]" : "";
+
+  const advice = {
+    line1: t.advice.line1
+      .replace("{mm}", fmt(irrigation.netMmDay, 1))
+      .replace("{area}", fmt(areaHa, 1)),
+    line2: t.advice.line2.replace("{from}", "05:30").replace("{to}", "08:30"),
+    line3: t.advice.line3
+      .replace("{crop}", CROPS[crop][lang])
+      .replace("{risk}", lang === "ar" ? "الآفات الفطرية" : "les maladies fongiques"),
+  };
+
   return (
     <div
       dir={lang === "ar" ? "rtl" : "ltr"}
-      className={`screen-h relative flex flex-col overflow-hidden text-emerald-950 ${
+      className={`screen-h app-canvas relative flex flex-col overflow-hidden text-emerald-950 ${
         lang === "ar" ? "font-arabic" : "font-latin"
       }`}
-      style={{ background: "linear-gradient(180deg, #F4FBF7 0%, #E6F7EF 58%, #DCF5E6 100%)" }}
     >
-      <AmbientBackdrop variant="dashboard" />
-
-      {/* Header */}
-      <header className="pt-safe relative z-30 mx-auto flex w-full max-w-[900px] shrink-0 items-center justify-between gap-2 px-3.5 pb-1.5 sm:px-5">
-        <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)]">
-            <Leaf size={15} strokeWidth={2.4} className="text-white" aria-hidden />
-          </span>
-          <span className="flex min-w-0 flex-col leading-tight">
-            <span className="truncate text-[11.5px] font-black whitespace-nowrap text-emerald-950">
-              {brand.brand}
-            </span>
-            <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
-              {guestActive ? t.header.badgeGuest : t.header.badgeMember}
-            </span>
-          </span>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1.5">
-          <LanguageSwitch
-            lang={lang}
-            onChange={setLang}
-            ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-            labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-            layoutId="dashboard-lang-thumb"
+      <AppBar
+        label={shell.barLabel}
+        elevated={elevated}
+        leading={
+          <AppBarBrand
+            icon={<Leaf size={17} strokeWidth={2.4} className="text-white" aria-hidden />}
+            title={brand.brand}
+            subtitle={guestActive ? t.header.badgeGuest : t.header.badgeMember}
+            status={
+              <span
+                aria-hidden
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  guestActive ? "bg-amber-500" : "bg-emerald-500"
+                } shadow-[0_0_0_3px_rgba(16,185,129,0.18)]`}
+              />
+            }
           />
-          <Link
-            href="/assistant"
-            aria-label={lang === "ar" ? "المساعد الذكي" : "Assistant IA"}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <Bot size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-          <Link
-            href="/"
-            aria-label={t.header.navHome}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <Home size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            aria-label={t.header.signOut}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <LogOut size={16} strokeWidth={2.4} aria-hidden />
-          </button>
-        </div>
-      </header>
+        }
+        trailing={
+          <>
+            <LanguageSwitch
+              lang={lang}
+              onChange={setLang}
+              ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
+              labels={{ ar: t.header.langAr, fr: t.header.langFr }}
+              layoutId="dashboard-lang-thumb"
+            />
+            <AppBarAction label={t.header.signOut} onClick={() => void signOut()}>
+              <LogOut size={18} strokeWidth={2.4} aria-hidden />
+            </AppBarAction>
+          </>
+        }
+      />
 
-      {/* Scroll body */}
-      <main className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <div className="mx-auto flex w-full max-w-[900px] flex-col gap-3 px-3.5 pb-6 pt-1 sm:px-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* One scroll region between the two bars. */}
+      <main
+        ref={scrollRef}
+        className="scroll-area scroll-pad-top relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      >
+        <div className={`${SHELL_COLUMN} lg:max-w-[720px] scroll-pad-bottom flex flex-col gap-5 px-4 pt-2`}>
+          {/* Large title + context */}
+          <header className="flex flex-col gap-3 pt-1">
             <div>
-              <h1 className="text-[20px] font-black leading-tight text-emerald-950">{greeting}</h1>
-              <p className="mt-0.5 text-[11.5px] font-semibold text-emerald-900/70">
+              <h1 className="text-[26px] font-black leading-tight tracking-tight text-emerald-950">{greeting}</h1>
+              <p className="mt-1.5 text-[12.5px] font-semibold leading-5 text-emerald-900/60">
                 {t.welcome.caption
                   .replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)
                   .replace("{month}", month)}
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Chip tone="slate" icon={<MapPin size={11} strokeWidth={3} aria-hidden />}>
-                {lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}
-              </Chip>
-              {role && (
-                <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
-                  {t.personalize.roleOptions[role]}
-                </Chip>
-              )}
+
+            <div className="app-surface flex items-center gap-2.5 p-2 ps-3.5">
+              <MapPin size={18} strokeWidth={2.5} aria-hidden className="shrink-0 text-emerald-600" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13.5px] font-black text-emerald-950">
+                  {lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
+                </p>
+                <p className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] font-semibold text-emerald-900/60">
+                  <span className="truncate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</span>
+                  {role && (
+                    <>
+                      <span aria-hidden className="text-emerald-900/25">·</span>
+                      <Sprout size={11} strokeWidth={3} aria-hidden className="shrink-0 text-emerald-500" />
+                      <span className="truncate">{t.personalize.roleOptions[role]}</span>
+                    </>
+                  )}
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setOpenPersonalize((v) => !v)}
-                aria-expanded={openPersonalize}
-                className={`glass inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[10.5px] font-black text-emerald-800 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
+                onClick={() => (accountOpen ? closeAccount() : setOpenPersonalize(true))}
+                aria-expanded={accountOpen}
+                className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-3.5 text-[12px] font-black text-emerald-800 ring-1 ring-emerald-100 transition-colors hover:bg-emerald-100/80 ${FOCUS_RING}`}
               >
-                <Settings2 size={12} strokeWidth={3} aria-hidden />
-                {openPersonalize ? t.personalize.close : t.personalize.edit}
+                <Settings2 size={14} strokeWidth={2.8} aria-hidden />
+                {accountOpen ? t.personalize.close : t.personalize.edit}
               </button>
             </div>
+          </header>
+
+          {/* Today's decision + thumb-zone shortcuts */}
+          <HeroCard t={t} irrigation={irrigation} cropLabel={CROPS[crop][lang]} advice={advice} />
+
+          <QuickActions t={t} onJump={jumpTo} />
+
+          <div ref={tasksRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("tasks")}`}>
+            <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
           </div>
 
-          {/* Personalisation */}
-          <AnimatePresence initial={false}>
-            {openPersonalize && (
-              <motion.section
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.24, ease: EASE_OUT }}
-                className={`${GPU} overflow-hidden`}
-                aria-label={t.personalize.title}
+          {/* Weather + water calculator */}
+          <section id="section-weather" aria-label={t.sections.weather} className="flex scroll-mt-[4.5rem] flex-col">
+            <SectionHeader title={t.sections.weather} />
+            <div className="grid gap-3 lg:grid-cols-2">
+              <WeatherCard t={t} lang={lang} weather={weather} />
+              <div
+                ref={irrigationRef}
+                className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("irrigation")}`}
               >
-                <div className="glass-card flex flex-col gap-3 rounded-3xl p-3.5">
-                  <div>
-                    <p className="text-[13px] font-black text-emerald-950">{t.personalize.title}</p>
-                    <p className="mt-0.5 text-[11px] font-semibold text-emerald-900/70">{t.personalize.subtitle}</p>
-                  </div>
-
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <WilayaSelect t={t} lang={lang} value={wilayaCode} onChange={updateWilaya} />
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[9.5px] font-bold text-emerald-800/70">{t.personalize.role}</span>
-                      <Segmented<AuthRole>
-                        layoutId="dash-role"
-                        ariaLabel={t.personalize.role}
-                        value={role ?? "farmer"}
-                        onChange={updateRole}
-                        options={[
-                          { id: "farmer", label: t.personalize.roleOptions.farmer },
-                          { id: "agronomist", label: t.personalize.roleOptions.agronomist },
-                          { id: "investor", label: t.personalize.roleOptions.investor },
-                        ]}
-                      />
-                    </div>
-                  </div>
-
-                  <p className="text-[10.5px] font-semibold text-emerald-900/60">{t.personalize.savedNote}</p>
-                </div>
-              </motion.section>
-            )}
-          </AnimatePresence>
-
-          {/* Quick read strip */}
-          <section
-            aria-label={t.advice.title}
-            className="glass-card flex flex-col gap-1.5 rounded-3xl p-3.5"
-          >
-            <div className="flex items-center gap-2">
-              <span aria-hidden className="grid h-8 w-8 place-items-center rounded-2xl bg-amber-50 text-amber-600 ring-1 ring-amber-100">
-                <Sun size={15} strokeWidth={2.5} />
-              </span>
-              <div>
-                <p className="text-[13px] font-black text-emerald-950">{t.advice.title}</p>
-                <p className="text-[10.5px] font-semibold text-emerald-900/65">{t.advice.subtitle}</p>
+                <IrrigationCard
+                  t={t}
+                  lang={lang}
+                  wilayaCode={wilayaCode}
+                  areaHa={areaHa}
+                  onAreaChange={setAreaHa}
+                />
               </div>
             </div>
-            <ul className="mt-1 flex flex-col gap-1 text-[11.5px] font-bold text-emerald-900/85">
-              <li className="flex items-start gap-1.5">
-                <Waves size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line1
-                  .replace("{mm}", fmt(irrigation.netMmDay, 1))
-                  .replace("{area}", fmt(areaHa, 1))}
-              </li>
-              <li className="flex items-start gap-1.5">
-                <Clock size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line2.replace("{from}", "05:30").replace("{to}", "08:30")}
-              </li>
-              <li className="flex items-start gap-1.5">
-                <ShieldCheck size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line3
-                  .replace("{crop}", CROPS[crop][lang])
-                  .replace("{risk}", lang === "ar" ? "الآفات الفطرية" : "les maladies fongiques")}
-              </li>
-            </ul>
           </section>
 
-          {/* Cards */}
-          <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-            <WeatherCard t={t} lang={lang} weather={weather} />
-            <IrrigationCard
-              t={t}
-              lang={lang}
-              wilayaCode={wilayaCode}
-              areaHa={areaHa}
-              onAreaChange={setAreaHa}
-            />
-            <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-            <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
-            <ScanCard t={t} wilayaCode={wilayaCode} />
-          </div>
+          {/* Field health: satellite index + leaf diagnosis */}
+          <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
+            <SectionHeader title={t.sections.field} />
+            <div className="grid gap-3 lg:grid-cols-2">
+              <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
+              <div ref={scanRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("scan")}`}>
+                <ScanCard t={t} wilayaCode={wilayaCode} />
+              </div>
+            </div>
+          </section>
 
-          <p className="mx-auto max-w-[70ch] text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
+          <p className="mx-auto max-w-[70ch] px-2 pb-2 text-center text-[11px] font-semibold leading-5 text-emerald-900/55">
             {t.footer.builtWith} · {t.footer.disclaimer}
           </p>
         </div>
       </main>
+
+      {/* The account sheet owns the screen while it is open — no competing tab bar. */}
+      {!accountOpen && (
+        <TabBar active="home" lang={lang} onAccount={() => setOpenPersonalize(true)} accountOpen={accountOpen} />
+      )}
+
+      <AccountSheet
+        open={accountOpen}
+        onClose={closeAccount}
+        t={t}
+        lang={lang}
+        displayName={displayName || (lang === "ar" ? "فلاح" : "Agriculteur")}
+        statusLabel={guestActive ? t.header.badgeGuest : t.header.badgeMember}
+        role={role}
+        wilayaCode={wilayaCode}
+        onWilayaChange={updateWilaya}
+        onRoleChange={updateRole}
+      />
     </div>
   );
 }

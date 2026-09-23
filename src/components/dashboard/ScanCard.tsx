@@ -5,7 +5,7 @@ import { Camera, CircleCheck, ImageUp, Microscope, ScanLine, ShieldCheck, Sparkl
 import { useEffect, useRef, useState } from "react";
 import { diagnoseImage, type Diagnosis } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
-import { GPU, PrimaryButton } from "@/components/auth/ui";
+import { FOCUS_RING, GPU, PrimaryButton } from "@/components/auth/ui";
 import { Card, Chip, Progress } from "./parts";
 
 interface PickedFile {
@@ -64,7 +64,7 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
     <Card
       title={t.scan.title}
       subtitle={t.scan.subtitle}
-      icon={<ScanLine size={17} strokeWidth={2.4} aria-hidden />}
+      icon={<ScanLine size={18} strokeWidth={2.4} aria-hidden />}
       aside={
         analysis ? (
           <Chip tone={analysis.key === "healthy" ? "emerald" : "amber"}>
@@ -85,18 +85,18 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
             setDragging(false);
             pick(e.dataTransfer.files?.[0]);
           }}
-          className={`flex cursor-pointer flex-col items-center gap-2 rounded-3xl border-2 border-dashed px-4 py-7 text-center transition-colors ${
-            dragging ? "border-emerald-400 bg-emerald-50/80" : "border-emerald-300/70 bg-white/60 hover:border-emerald-400"
+          className={`flex min-h-[11rem] cursor-pointer flex-col items-center justify-center gap-2.5 rounded-[1.25rem] border-2 border-dashed px-4 py-7 text-center transition-colors ${
+            dragging ? "border-emerald-400 bg-emerald-50" : "border-emerald-300/70 bg-[#f6faf7] hover:border-emerald-400"
           }`}
         >
           <span
             aria-hidden
-            className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_10px_26px_-12px_rgba(16,185,129,0.85)]"
+            className="grid h-14 w-14 place-items-center rounded-[1.1rem] bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_12px_28px_-12px_rgba(16,185,129,0.9)]"
           >
-            <ImageUp size={22} strokeWidth={2.3} />
+            <ImageUp size={24} strokeWidth={2.3} />
           </span>
-          <span className="text-[13px] font-black text-emerald-950">{t.scan.pick}</span>
-          <span className="text-[10.5px] font-semibold text-emerald-900/60">{t.scan.pickHint}</span>
+          <span className="text-[14px] font-black text-emerald-950">{t.scan.pick}</span>
+          <span className="text-[11.5px] font-semibold text-emerald-900/60">{t.scan.pickHint}</span>
           <input
             type="file"
             accept="image/*"
@@ -107,17 +107,13 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
               e.target.value = "";
             }}
           />
-          <span className="mt-1 inline-flex items-center gap-1 text-[10.5px] font-bold text-emerald-700">
-            <Camera size={12} strokeWidth={2.6} aria-hidden />
-            {t.scan.pickHint}
-          </span>
         </label>
       ) : (
         <div className="flex flex-col gap-3">
-          <div className="relative overflow-hidden rounded-3xl ring-1 ring-[#E2F1E8]">
+          <div className="relative overflow-hidden rounded-[1.25rem] ring-1 ring-[rgba(6,78,59,0.08)]">
             {/* Local object URL preview: plain <img> is correct here, next/image cannot optimise blobs. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={file.url} alt={file.name} className="h-44 w-full object-cover" />
+            <img src={file.url} alt={file.name} className="h-48 w-full object-cover" />
             {busy && (
               <motion.div
                 aria-hidden
@@ -144,9 +140,9 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
               transition={{ duration: 0.3 }}
               className={`${GPU} flex flex-col gap-3`}
             >
-              <div className="rounded-3xl border border-emerald-200/70 bg-emerald-50/60 p-3">
-                <p className="text-[10.5px] font-black tracking-wide text-emerald-800">{t.scan.result}</p>
-                <p className="mt-0.5 flex items-center gap-1.5 text-[15px] font-black text-emerald-950">
+              <div className="rounded-[1.25rem] border border-emerald-200/70 bg-emerald-50/70 p-3.5">
+                <p className="text-[11.5px] font-black tracking-wide text-emerald-800/70">{t.scan.result}</p>
+                <p className="mt-1 flex items-center gap-1.5 text-[16px] font-black text-emerald-950">
                   {analysis.key === "healthy" ? (
                     <CircleCheck size={16} strokeWidth={2.8} aria-hidden className="text-emerald-600" />
                   ) : (
@@ -154,10 +150,10 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
                   )}
                   {copy?.name}
                 </p>
-                <p className="mt-1 text-[11px] font-semibold leading-5 text-emerald-900/75">{copy?.summary}</p>
+                <p className="mt-1.5 text-[11.5px] font-semibold leading-[1.75] text-emerald-900/75">{copy?.summary}</p>
 
                 <div className="mt-2.5 flex flex-col gap-1">
-                  <div className="flex items-center justify-between text-[10.5px] font-bold text-emerald-800">
+                  <div className="flex items-center justify-between text-[11.5px] font-bold text-emerald-800/85">
                     <span>{t.scan.confidence}</span>
                     <span dir="ltr">{Math.round(analysis.confidence * 100)}%</span>
                   </div>
@@ -165,22 +161,22 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
                 </div>
 
                 <div className="mt-2.5 flex items-center justify-between gap-2">
-                  <span className="text-[10.5px] font-bold text-emerald-800">{t.scan.severity}</span>
+                  <span className="text-[11.5px] font-bold text-emerald-800/85">{t.scan.severity}</span>
                   <Chip tone={severityIndex >= 2 ? "amber" : "emerald"}>{t.scan.severityLabels[severityIndex]}</Chip>
                 </div>
               </div>
 
               <div>
-                <p className="text-[11px] font-black text-emerald-800">{t.scan.treatment}</p>
+                <p className="text-[12px] font-black tracking-wide text-emerald-800/70">{t.scan.treatment}</p>
                 <ul className="mt-1.5 flex flex-col gap-1">
                   {copy?.steps.map((step, i) => (
                     <li
                       key={step}
-                      className="flex items-start gap-2 rounded-2xl bg-white/70 px-2.5 py-2 text-[11.5px] font-semibold leading-5 text-emerald-900 ring-1 ring-[#E2F1E8]"
+                      className="flex min-h-[2.75rem] items-start gap-2.5 rounded-[1rem] bg-[#f6faf7] px-3 py-2.5 text-[12px] font-semibold leading-[1.7] text-emerald-900 ring-1 ring-[rgba(6,78,59,0.07)]"
                     >
                       <span
                         aria-hidden
-                        className="mt-[1px] grid h-4 w-4 shrink-0 place-items-center rounded-full bg-emerald-500 text-[9px] font-black text-white"
+                        className="mt-[2px] grid h-[1.1rem] w-[1.1rem] shrink-0 place-items-center rounded-full bg-emerald-500 text-[10px] font-black text-white"
                       >
                         {i + 1}
                       </span>
@@ -193,7 +189,7 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
               <button
                 type="button"
                 onClick={reset}
-                className="mx-auto inline-flex items-center gap-1.5 rounded-2xl px-3 py-2 text-[11.5px] font-extrabold text-emerald-800 transition-colors hover:bg-white/70"
+                className={`mx-auto inline-flex h-11 items-center gap-1.5 rounded-full bg-[#f6faf7] px-4 text-[12.5px] font-extrabold text-emerald-800 ring-1 ring-[rgba(6,78,59,0.07)] transition-colors hover:bg-emerald-50 ${FOCUS_RING}`}
               >
                 <Camera size={13} strokeWidth={2.6} aria-hidden />
                 {t.scan.retake}
@@ -203,8 +199,8 @@ export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCo
         </div>
       )}
 
-      <p className="mt-3 flex items-start gap-1.5 text-[10px] font-semibold leading-4 text-emerald-900/60">
-        <ShieldCheck size={12} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
+      <p className="mt-3.5 flex items-start gap-1.5 text-[10.5px] font-semibold leading-5 text-emerald-900/50">
+        <ShieldCheck size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
         {t.scan.privacy} {t.scan.engineNote}
       </p>
     </Card>

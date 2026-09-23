@@ -21,6 +21,35 @@ export interface DashboardCopy {
     langAr: string;
     langFr: string;
   };
+  /** Native app-shell vocabulary: hero decision card, quick actions, sections. */
+  hero: {
+    eyebrow: string;
+    needLabel: string;
+    perHa: string;
+    window: string;
+    /** Time range of the day's best irrigation window (LTR-pinned in the UI). */
+    windowValue: string;
+  };
+  quick: {
+    title: string;
+    scan: string;
+    irrigation: string;
+    tasks: string;
+    /** Accessible label for a quick action: "انتقل إلى {target}". */
+    goTo: string;
+  };
+  sections: {
+    weather: string;
+    field: string;
+  };
+  account: {
+    title: string;
+    subtitle: string;
+    personalization: string;
+    intro: string;
+    introHint: string;
+    about: string;
+  };
   welcome: {
     member: string;
     caption: string;
@@ -134,6 +163,32 @@ const AR: DashboardCopy = {
     signOut: "تسجيل الخروج",
     langAr: "العربية",
     langFr: "Français",
+  },
+  hero: {
+    eyebrow: "قرار اليوم",
+    needLabel: "حاجة القطعة اليوم",
+    perHa: "لكل هكتار",
+    window: "نافذة السقي",
+    windowValue: "05:30 — 08:30",
+  },
+  quick: {
+    title: "وصول سريع",
+    scan: "تشخيص ورقة",
+    irrigation: "حاسبة السقي",
+    tasks: "مهام اليوم",
+    goTo: "انتقل إلى {target}",
+  },
+  sections: {
+    weather: "الطقس والسقي",
+    field: "صحة النبات",
+  },
+  account: {
+    title: "حسابي",
+    subtitle: "خصّص الولاية والصفة؛ تتحدّث كل أرقام اللوحة فوراً.",
+    personalization: "التخصيص",
+    intro: "الشاشة التعريفية",
+    introHint: "أعد مشاهدة الجولة التعريفية بميزات التطبيق.",
+    about: "حول التطبيق",
   },
   welcome: {
     member: "مرحباً، {name}",
@@ -279,6 +334,32 @@ const FR: DashboardCopy = {
     signOut: "Se déconnecter",
     langAr: "العربية",
     langFr: "Français",
+  },
+  hero: {
+    eyebrow: "Décision du jour",
+    needLabel: "Besoin de la parcelle",
+    perHa: "Par hectare",
+    window: "Fenêtre d'irrigation",
+    windowValue: "05:30 — 08:30",
+  },
+  quick: {
+    title: "Accès rapide",
+    scan: "Scanner une feuille",
+    irrigation: "Calculateur d'irrigation",
+    tasks: "Tâches du jour",
+    goTo: "Aller à {target}",
+  },
+  sections: {
+    weather: "Météo et eau",
+    field: "Santé des cultures",
+  },
+  account: {
+    title: "Mon profil",
+    subtitle: "Choisissez wilaya et profil : tous les chiffres suivent aussitôt.",
+    personalization: "Personnalisation",
+    intro: "Écran de présentation",
+    introHint: "Revoir la visite guidée des fonctionnalités.",
+    about: "À propos",
   },
   welcome: {
     member: "Bienvenue, {name}",

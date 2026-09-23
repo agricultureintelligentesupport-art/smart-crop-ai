@@ -39,7 +39,7 @@ function LanguageSwitch({
             onClick={() => onChange(l.code)}
             aria-pressed={active}
             aria-label={labels[l.code]}
-            className={`relative grid h-10 min-w-[46px] place-items-center rounded-full px-2.5 text-[12px] font-black transition-colors ${FOCUS_RING} ${
+            className={`relative grid h-11 min-w-[46px] place-items-center rounded-full px-2.5 text-[12px] font-black transition-colors ${FOCUS_RING} ${
               active ? "text-white" : "text-emerald-800/70 hover:text-emerald-700"
             }`}
           >

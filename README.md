@@ -17,8 +17,11 @@ npm run dev   # http://localhost:3000
 | `/auth` | Full authentication workflow, sign-in tab |
 | `/login` | Same workflow, sign-in tab (explicit entry point) |
 | `/register` | Same workflow, create-account tab |
-| `/dashboard` | Member dashboard — requires an authenticated session |
+| `/dashboard` | Member dashboard (app shell: top bar + bottom tab bar) — requires an authenticated session |
 | `/guest` | Removed — forwards to `/auth` (guest mode is gone) |
+
+> `#account` opens the dashboard's account sheet directly (the "حسابي" tab
+deep-links to it from `/assistant`).
 
 Every route is interactive end to end. There are no "coming soon" screens:
 every CTA leads to a working destination, and every dashboard feature requires
@@ -76,7 +79,12 @@ Step 3 · wilaya     Searchable list of all 58 wilayas + climate preview
 ## The dashboard
 
 One component (`DashboardView`), rendered at `/dashboard` for authenticated
-members only. Every number is derived from the wilaya baseline (temperature,
+members only. The signed-in screens run on a native app shell — translucent
+top bar, a single scroll region, a bottom tab bar and bottom sheets — styled
+by the shared surfaces in `globals.css` ("App shell") over the
+`components/app/` primitives. See
+[`docs/redesign/README.md`](docs/redesign/README.md) for the design language
+and before/after screenshots. Every number is derived from the wilaya baseline (temperature,
 humidity, wind, rainfall, soil, crops) through `src/lib/agronomy.ts`, which is
 deterministic and offline — no hydration mismatch, no fake "live" data.
 
@@ -138,6 +146,7 @@ src/
 │   └── dashboard/page.tsx      # member dashboard (session required)
 ├── components/
 │   ├── AmbientBackdrop.tsx     # shared GPU-isolated gradient + glow layer
+│   ├── app/                    # signed-in shell: AppBar, TabBar, Sheet, shell tokens
 │   ├── onboarding/             # carousel, header, 3 animated SVG scenes
 │   ├── auth/
 │   │   ├── AuthFlow.tsx        # step router (method → role → wilaya → success)
@@ -150,8 +159,9 @@ src/
 │   │   ├── SuccessStep.tsx     # recap → dashboard
 │   │   ├── useAuthFlow.ts      # the state machine + SDK-ready handlers
 │   │   └── ui.tsx              # buttons, fields, strength meter, notice, badges
-│   └── dashboard/              # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
-│                               # FieldTasksCard, UpgradeCard, WilayaSelect, parts
+│   └── dashboard/              # DashboardView shell, HeroCard, QuickActions, AccountSheet,
+│                               # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
+│                               # FieldTasksCard, WilayaSelect, parts
 ├── lib/
 │   ├── content.ts              # onboarding copy (AR/FR)
 │   ├── wilayas.ts              # 58 wilayas + climate/soil/crop baselines, fuzzy search
@@ -191,6 +201,12 @@ instead of downloading one (handy in sandboxes and slim CI images).
   `html/body`, `overscroll-behavior: none`. Each screen owns exactly one scroll
   container, so the header and step ladder stay pinned on 320px phones with the
   keyboard open.
+- **Signed-in shell**: fixed translucent top bar (`.app-bar`, elevates on
+  scroll via `useScroll` on the screen's own scroll container) + bottom tab bar
+  (`.app-tabbar`, safe-area padded, floating pill from `sm` up). Content clears
+  both with the `.scroll-pad-top` / `.scroll-pad-bottom` contracts, and
+  contextual tasks open in the shared bottom sheet
+  (`components/app/Sheet.tsx`, focus-trapped + drag-to-dismiss).
 - **RTL/LTR**: AR⇄FR flips `dir` on the screen and on `<html>`. Physical values
   (carousel swipe vectors, enter/exit offsets, phone-country ordering, SVG HUD
   labels) are pinned LTR where the content is Latin/numeric.
