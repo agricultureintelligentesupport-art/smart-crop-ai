@@ -41,6 +41,7 @@ import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import DiagnosisCard from "./DiagnosisCard";
 import Markdown from "./Markdown";
+import BottomDock from "@/components/BottomDock";
 
 /* ------------------------------------------------------------------ */
 /*  Local chat model                                                   */
@@ -377,13 +378,19 @@ export default function AssistantView() {
         </div>
       </header>
 
-      {/* Conversation */}
+      {/* Conversation — smooth content transition without reload */}
       <main
         ref={scrollRef}
         className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
         aria-live="polite"
       >
-        <div className="mx-auto flex w-full max-w-[860px] flex-col gap-3 px-3.5 pb-4 pt-2 sm:px-5">
+        <motion.div
+          key={lang}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.32, ease: EASE_OUT }}
+          className={`${GPU} mx-auto flex w-full max-w-[860px] flex-col gap-3 px-3.5 pb-28 pt-2 sm:px-5`}
+        >
           {emptyChat && (
             <motion.section
               initial={{ opacity: 0, y: 14 }}
@@ -498,11 +505,14 @@ export default function AssistantView() {
               </div>
             </motion.div>
           )}
-        </div>
+        </motion.div>
       </main>
 
+      {/* Floating Glass Dock — bottom navigation bar */}
+      <BottomDock lang={lang} />
+
       {/* Composer */}
-      <footer className="relative z-20 mx-auto w-full max-w-[860px] shrink-0 px-3.5 pb-3.5 sm:px-5 sm:pb-5">
+      <footer className="relative z-20 mx-auto w-full max-w-[860px] shrink-0 px-3.5 pb-24 sm:px-5 sm:pb-28">
         {/* Quick-action chips */}
         <div className="scroll-area mb-2 flex gap-1.5 overflow-x-auto pb-0.5">
           {t.chips.map((chip) => (

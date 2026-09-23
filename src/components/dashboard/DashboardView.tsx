@@ -36,6 +36,7 @@ import ScanCard from "./ScanCard";
 import WeatherCard, { fmt } from "./WeatherCard";
 import WilayaSelect from "./WilayaSelect";
 import { Chip, Segmented } from "./parts";
+import BottomDock from "@/components/BottomDock";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
 
@@ -190,9 +191,15 @@ export default function DashboardView() {
         </div>
       </header>
 
-      {/* Scroll body */}
+      {/* Scroll body — fluid tab switching: content animates smoothly without reload */}
       <main className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <div className="mx-auto flex w-full max-w-[900px] flex-col gap-3 px-3.5 pb-6 pt-1 sm:px-5">
+        <motion.div
+          key={wilayaCode + lang}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.32, ease: EASE_OUT }}
+          className={`${GPU} mx-auto flex w-full max-w-[900px] flex-col gap-3 px-3.5 pb-28 pt-1 sm:px-5`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h1 className="text-[20px] font-black leading-tight text-emerald-950">{greeting}</h1>
@@ -316,8 +323,11 @@ export default function DashboardView() {
           <p className="mx-auto max-w-[70ch] text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
             {t.footer.builtWith} · {t.footer.disclaimer}
           </p>
-        </div>
+        </motion.div>
       </main>
+
+      {/* Modern Floating Glass Dock — bottom navigation bar */}
+      <BottomDock lang={lang} />
     </div>
   );
 }
