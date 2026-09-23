@@ -168,49 +168,58 @@ export default function DashboardView() {
     >
       <AmbientBackdrop variant="dashboard" />
 
-      {/* Clean app header: greeting + status, location pill, language. */}
-      <header className="pt-safe relative z-30 shrink-0 px-4 pb-1 pt-3">
-        <div className={`${APP_COLUMN} flex items-center gap-2.5`}>
-          {renderAvatar("md")}
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[17px] font-black leading-6 text-emerald-950">{greeting}</h1>
-            <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-white/70 px-2 py-[2px] text-[9.5px] font-black text-emerald-700 ring-1 ring-[#E2F1E8]">
-              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              {guestActive ? t.header.badgeGuest : t.header.badgeMember}
-            </span>
-          </div>
-          <LanguageSwitch
-            lang={lang}
-            onChange={setLang}
-            ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-            labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-            layoutId="dashboard-lang-thumb"
-          />
-        </div>
-
-        {/* Context strip: where the farm is + entry to personalisation */}
-        <div className={`${APP_COLUMN} mt-2.5 flex items-center gap-1.5`}>
-          <span className="glass inline-flex h-9 min-w-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-black text-emerald-900">
-            <MapPin size={13} strokeWidth={2.8} aria-hidden className="shrink-0 text-emerald-600" />
-            <span className="truncate">{lang === "ar" ? wilaya.nameAr : wilaya.nameFr}</span>
-          </span>
-          <Chip tone="slate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</Chip>
-          {role && (
-            <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
-              {t.personalize.roleOptions[role]}
-            </Chip>
-          )}
-          <span className="min-w-2 flex-1" />
-          {tab !== "profile" && (
+      {/* Unified native header: avatar + greeting + language, location row — edge-to-edge frosted bar. */}
+      <header className="pt-safe relative z-30 shrink-0 border-b border-emerald-500/10 bg-white/60 shadow-[0_16px_36px_-30px_rgba(6,78,59,0.6)] backdrop-blur-xl">
+        <div className={`${APP_COLUMN} flex flex-col gap-2.5 px-4 pb-2.5 pt-2`}>
+          <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={() => setTab("profile")}
-              className={`glass inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11px] font-black text-emerald-800 transition-colors hover:bg-white/95 active:bg-emerald-50 ${FOCUS_RING}`}
+              aria-label={t.nav.profile}
+              className={`shrink-0 rounded-2xl transition-transform duration-150 active:scale-95 ${FOCUS_RING}`}
             >
-              <Settings2 size={13} strokeWidth={2.8} aria-hidden />
-              {t.personalize.edit}
+              {renderAvatar("md")}
             </button>
-          )}
+            <div className="min-w-0 flex-1">
+              <h1 className="truncate text-[17px] font-black leading-6 text-emerald-950">{greeting}</h1>
+              <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-white/80 px-2 py-[2px] text-[9.5px] font-black text-emerald-700 ring-1 ring-emerald-500/15">
+                <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
+                {guestActive ? t.header.badgeGuest : t.header.badgeMember}
+              </span>
+            </div>
+            <LanguageSwitch
+              lang={lang}
+              onChange={setLang}
+              ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
+              labels={{ ar: t.header.langAr, fr: t.header.langFr }}
+              layoutId="dashboard-lang-thumb"
+            />
+          </div>
+
+          {/* Location + profile context: smooth rounded badges */}
+          <div className="flex items-center gap-1.5">
+            <span className="inline-flex h-9 min-w-0 items-center gap-1.5 rounded-full bg-white/80 px-3 text-[11.5px] font-black text-emerald-900 ring-1 ring-emerald-500/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
+              <MapPin size={13} strokeWidth={2.8} aria-hidden className="shrink-0 text-emerald-600" />
+              <span className="truncate">{lang === "ar" ? wilaya.nameAr : wilaya.nameFr}</span>
+            </span>
+            <Chip tone="slate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</Chip>
+            {role && (
+              <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
+                {t.personalize.roleOptions[role]}
+              </Chip>
+            )}
+            <span className="min-w-2 flex-1" />
+            {tab !== "profile" && (
+              <button
+                type="button"
+                onClick={() => setTab("profile")}
+                className={`inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-white/80 px-3 text-[11px] font-black text-emerald-800 ring-1 ring-emerald-500/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] transition-colors hover:bg-white active:bg-emerald-50 ${FOCUS_RING}`}
+              >
+                <Settings2 size={13} strokeWidth={2.8} aria-hidden />
+                {t.personalize.edit}
+              </button>
+            )}
+          </div>
         </div>
       </header>
 

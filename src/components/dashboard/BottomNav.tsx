@@ -6,10 +6,11 @@ import Link from "next/link";
 import { FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 
-/** Screens driven by the bottom bar. `assistant` is a routed page, not a tab. */
+/** Screens driven by the bottom dock. `assistant` is a routed page, not a tab. */
 export type DashboardTab = "home" | "irrigation" | "profile";
 
-const THUMB_LAYOUT_ID = "dash-nav-thumb";
+const PILL_LAYOUT_ID = "dash-nav-thumb";
+const DOT_LAYOUT_ID = "dash-nav-dot";
 
 function NavItem({
   icon: Icon,
@@ -34,31 +35,40 @@ function NavItem({
       }`}
     >
       {active && (
-        <motion.span
-          layoutId={THUMB_LAYOUT_ID}
-          transition={SPRING}
-          className={`absolute inset-0 rounded-[20px] bg-gradient-to-b from-emerald-500/15 to-emerald-500/10 ring-1 ring-emerald-500/25 ${GPU}`}
-        />
+        <>
+          <motion.span
+            layoutId={PILL_LAYOUT_ID}
+            transition={SPRING}
+            className={`absolute inset-0 rounded-[20px] bg-gradient-to-b from-emerald-500/15 to-teal-500/10 ring-1 ring-emerald-500/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)] ${GPU}`}
+          />
+          <motion.span
+            layoutId={DOT_LAYOUT_ID}
+            transition={SPRING}
+            aria-hidden
+            className="absolute bottom-[3px] h-1 w-1 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.9)]"
+          />
+        </>
       )}
       <span className="relative z-10 flex flex-col items-center gap-0.5">
         <motion.span
           aria-hidden
-          animate={{ y: active ? -1 : 0, scale: active ? 1.06 : 1 }}
+          animate={{ y: active ? -1 : 0, scale: active ? 1.08 : 1 }}
           transition={SPRING}
           className="block"
         >
-          <Icon size={21} strokeWidth={active ? 2.5 : 2.1} />
+          <Icon size={21} strokeWidth={active ? 2.6 : 2.1} />
         </motion.span>
-        <span className="text-[10px] font-black leading-none">{label}</span>
+        <span className={`text-[10px] leading-none ${active ? "font-black" : "font-bold"}`}>{label}</span>
       </span>
     </motion.button>
   );
 }
 
 /**
- * Mobile app-shell bottom navigation: a floating glass pill fixed above the
+ * Mobile app-shell bottom dock: a premium frosted-glass pill fixed above the
  * safe area, with four primary destinations. Home / Irrigation / Profile are
  * in-dashboard screens; Assistant routes to the AI assistant page.
+ * A spring pill + glowing dot slide between active items.
  * Order follows the RTL/LTR document direction automatically.
  */
 export default function BottomNav({
@@ -77,8 +87,8 @@ export default function BottomNav({
       aria-label={t.nav.aria}
       className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center"
     >
-      <div className="pointer-events-auto w-full max-w-[560px] px-3 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
-        <div className="glass flex items-center gap-1 rounded-[26px] p-1.5 shadow-[0_18px_40px_-18px_rgba(6,78,59,0.45)]">
+      <div className="pointer-events-auto w-full max-w-[560px] px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        <div className="glass-dock flex items-center gap-1 rounded-[26px] p-1.5">
           <NavItem
             icon={House}
             label={t.nav.home}
@@ -96,7 +106,7 @@ export default function BottomNav({
             >
               <span className="flex flex-col items-center gap-0.5">
                 <Bot size={21} strokeWidth={2.1} aria-hidden />
-                <span className="text-[10px] font-black leading-none">{t.nav.assistant}</span>
+                <span className="text-[10px] font-bold leading-none">{t.nav.assistant}</span>
               </span>
             </Link>
           </motion.div>

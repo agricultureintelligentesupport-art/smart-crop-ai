@@ -9,6 +9,15 @@ import { Card, Chip, Metric } from "./parts";
 export const fmt = (value: number, digits = 0) =>
   new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 
+/** Presentational icon derived from the existing rain% data point. */
+function SkyIcon({ rainPct, size = 12 }: { rainPct: number; size?: number }) {
+  return rainPct >= 45 ? (
+    <CloudRain size={size} strokeWidth={2.6} aria-hidden className="text-sky-600" />
+  ) : (
+    <Sun size={size} strokeWidth={2.6} aria-hidden className="text-amber-500" />
+  );
+}
+
 export default function WeatherCard({
   t,
   lang,
@@ -35,10 +44,20 @@ export default function WeatherCard({
       }
     >
       <div className="flex flex-col gap-3">
-        {/* Current conditions — compact hero strip */}
-        <div className="flex items-center justify-between gap-3 rounded-2xl bg-emerald-50/80 px-3 py-2.5 ring-1 ring-emerald-100">
+        {/* Current conditions — gradient mini-hero strip */}
+        <div
+          className="flex items-center justify-between gap-3 rounded-2xl px-3 py-3 ring-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]"
+          style={{
+            background: hot
+              ? "linear-gradient(120deg, rgba(251,191,36,0.16), rgba(255,255,255,0.72))"
+              : "linear-gradient(120deg, rgba(16,185,129,0.14), rgba(255,255,255,0.72))",
+          }}
+        >
           <div className="flex items-baseline gap-1">
-            <span dir="ltr" className="text-[30px] font-black leading-none tracking-tight tabular-nums text-emerald-950">
+            <span
+              dir="ltr"
+              className="text-[32px] font-black leading-none tracking-tight tabular-nums text-emerald-950"
+            >
               {fmt(tempC, 1)}°
             </span>
             <span dir="ltr" className="text-[12px] font-black text-emerald-700/70">C</span>
@@ -88,9 +107,9 @@ export default function WeatherCard({
                   <li
                     key={hour.label}
                     title={t.weather.rainChance.replace("{n}", String(hour.rainPct))}
-                    className={`flex w-[58px] shrink-0 snap-start flex-col items-center gap-0.5 rounded-2xl py-2 ring-1 transition-colors ${
+                    className={`flex w-[58px] shrink-0 snap-start flex-col items-center gap-0.5 rounded-2xl py-2 ring-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] transition-colors ${
                       active
-                        ? "bg-emerald-500/10 ring-emerald-500/45"
+                        ? "bg-gradient-to-b from-emerald-500/15 to-teal-500/10 ring-emerald-500/40"
                         : "bg-white/70 ring-[#E2F1E8]"
                     }`}
                   >
@@ -100,6 +119,7 @@ export default function WeatherCard({
                     <span dir="ltr" className="text-[13px] font-black tabular-nums text-emerald-950">
                       {fmt(hour.tempC, 0)}°
                     </span>
+                    <SkyIcon rainPct={hour.rainPct} />
                     <span dir="ltr" className="text-[9px] font-bold tabular-nums text-emerald-700/70">
                       {fmt(hour.rainPct)}%
                     </span>
@@ -124,9 +144,9 @@ export default function WeatherCard({
                 return (
                   <li
                     key={day.labelKey}
-                    className={`flex w-[54px] shrink-0 snap-start flex-col items-center gap-0.5 rounded-2xl px-1 py-2 ring-1 transition-colors ${
+                    className={`flex w-[58px] shrink-0 snap-start flex-col items-center gap-0.5 rounded-2xl px-1 py-2 ring-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] transition-colors ${
                       active
-                        ? "bg-emerald-500/10 ring-emerald-500/45"
+                        ? "bg-gradient-to-b from-emerald-500/15 to-teal-500/10 ring-emerald-500/40"
                         : "bg-white/70 ring-[#E2F1E8]"
                     }`}
                   >
@@ -138,6 +158,9 @@ export default function WeatherCard({
                     </span>
                     <span dir="ltr" className="text-[9.5px] font-bold tabular-nums text-emerald-800/60">
                       {fmt(day.minC)}°
+                    </span>
+                    <span aria-hidden className="flex items-center gap-0.5">
+                      <SkyIcon rainPct={day.rainPct} size={11} />
                     </span>
                     <span dir="ltr" className="text-[9.5px] font-bold tabular-nums text-emerald-600">
                       {fmt(day.rainPct)}%
@@ -154,7 +177,7 @@ export default function WeatherCard({
         </div>
 
         <p
-          className={`flex items-start gap-1.5 rounded-2xl px-2.5 py-2 text-[11px] font-bold leading-5 ${
+          className={`flex items-start gap-1.5 rounded-2xl px-2.5 py-2 text-[11px] font-bold leading-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] ${
             hot || windy ? "bg-amber-50/90 text-amber-900 ring-1 ring-amber-200" : "bg-emerald-50/80 text-emerald-900 ring-1 ring-emerald-200/70"
           }`}
         >

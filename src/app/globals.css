@@ -128,6 +128,33 @@
     transform: translateZ(0);
   }
 
+  /* Premium dashboard widget surface: frosted glass with a soft inner
+     highlight, a faint emerald under-glow and a long soft drop shadow.
+     GPU-isolated like `.glass-card` (translateZ(0), no will-change). */
+  .glass-widget {
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(16, 185, 129, 0.14);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(18px) saturate(160%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      inset 0 -14px 30px -22px rgba(16, 185, 129, 0.28),
+      0 18px 44px -26px rgba(6, 78, 59, 0.42);
+    transform: translateZ(0);
+  }
+
+  /* Premium frosted dock surface (bottom navigation). */
+  .glass-dock {
+    background: rgba(255, 255, 255, 0.82);
+    border: 1px solid rgba(16, 185, 129, 0.16);
+    -webkit-backdrop-filter: blur(24px) saturate(170%);
+    backdrop-filter: blur(24px) saturate(170%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.95),
+      0 24px 48px -20px rgba(6, 78, 59, 0.5);
+    transform: translateZ(0);
+  }
+
   /* Form fields: 16px text avoids the iOS zoom-on-focus jump. */
   .field-input {
     width: 100%;
@@ -232,14 +259,18 @@
    transparency, get an opaque surface instead of a washed-out one. */
 @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
   .glass,
-  .glass-card {
+  .glass-card,
+  .glass-widget,
+  .glass-dock {
     background: #ffffff;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
   .glass,
-  .glass-card {
+  .glass-card,
+  .glass-widget,
+  .glass-dock {
     background: #ffffff;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -248,7 +279,9 @@
 
 @media (prefers-contrast: more) {
   .glass,
-  .glass-card {
+  .glass-card,
+  .glass-widget,
+  .glass-dock {
     background: #ffffff;
     border-color: #064e3b;
     -webkit-backdrop-filter: none;

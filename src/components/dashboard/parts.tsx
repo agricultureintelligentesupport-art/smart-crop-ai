@@ -24,12 +24,12 @@ export function Card({
   return (
     <section
       aria-label={title}
-      className={`glass-card flex min-w-0 flex-col rounded-3xl p-4 ${className}`}
+      className={`glass-widget flex min-w-0 flex-col rounded-3xl p-4 ${className}`}
     >
       <header className="flex items-start gap-2.5">
         <span
           aria-hidden
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-50 to-teal-100 text-emerald-700 ring-1 ring-emerald-500/15"
         >
           {icon}
         </span>
@@ -48,11 +48,11 @@ export function Card({
 
 /** Icon tints for the 2×2 metric widget grid (weather + irrigation). */
 const METRIC_TINTS = {
-  emerald: "bg-emerald-50 text-emerald-600 ring-emerald-100",
-  sky: "bg-sky-50 text-sky-600 ring-sky-100",
-  blue: "bg-blue-50 text-blue-600 ring-blue-100",
-  amber: "bg-amber-50 text-amber-600 ring-amber-100",
-  rose: "bg-rose-50 text-rose-600 ring-rose-100",
+  emerald: "bg-gradient-to-br from-emerald-50 to-emerald-100 text-emerald-600 ring-emerald-200/70",
+  sky: "bg-gradient-to-br from-sky-50 to-sky-100 text-sky-600 ring-sky-200/70",
+  blue: "bg-gradient-to-br from-blue-50 to-blue-100 text-blue-600 ring-blue-200/70",
+  amber: "bg-gradient-to-br from-amber-50 to-amber-100 text-amber-600 ring-amber-200/70",
+  rose: "bg-gradient-to-br from-rose-50 to-rose-100 text-rose-600 ring-rose-200/70",
 } as const;
 
 export type MetricTint = keyof typeof METRIC_TINTS;
@@ -72,17 +72,17 @@ export function Metric({
 }) {
   const resolved: MetricTint = tone === "warn" ? "amber" : tint;
   return (
-    <div className="min-w-0 rounded-2xl bg-white/80 p-2.5 ring-1 ring-[#E2F1E8]">
+    <div className="min-w-0 rounded-2xl bg-white/85 p-3 ring-1 ring-emerald-500/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.95),0_10px_24px_-18px_rgba(6,78,59,0.45)]">
       <span
         aria-hidden
         className={`grid h-8 w-8 place-items-center rounded-xl ring-1 ${METRIC_TINTS[resolved]}`}
       >
         {icon}
       </span>
-      <p className="mt-1.5 truncate text-[10px] font-bold text-emerald-800/70">{label}</p>
+      <p className="mt-2 truncate text-[10px] font-bold text-emerald-800/70">{label}</p>
       <p
         dir="ltr"
-        className={`mt-0.5 truncate text-start text-[15px] font-black tabular-nums ${
+        className={`mt-0.5 truncate text-start text-[16px] font-black tabular-nums tracking-tight ${
           tone === "warn" ? "text-amber-700" : "text-emerald-950"
         }`}
       >
