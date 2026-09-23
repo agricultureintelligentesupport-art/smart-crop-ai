@@ -21,6 +21,14 @@ export interface DashboardCopy {
     langAr: string;
     langFr: string;
   };
+  /** Bottom navigation bar (mobile app shell). */
+  nav: {
+    aria: string;
+    home: string;
+    assistant: string;
+    irrigation: string;
+    profile: string;
+  };
   welcome: {
     member: string;
     caption: string;
@@ -134,6 +142,13 @@ const AR: DashboardCopy = {
     signOut: "تسجيل الخروج",
     langAr: "العربية",
     langFr: "Français",
+  },
+  nav: {
+    aria: "التنقل الرئيسي",
+    home: "الرئيسية",
+    assistant: "المستشار",
+    irrigation: "السقي",
+    profile: "الحساب",
   },
   welcome: {
     member: "مرحباً، {name}",
@@ -279,6 +294,13 @@ const FR: DashboardCopy = {
     signOut: "Se déconnecter",
     langAr: "العربية",
     langFr: "Français",
+  },
+  nav: {
+    aria: "Navigation principale",
+    home: "Accueil",
+    assistant: "Assistant",
+    irrigation: "Irrigation",
+    profile: "Compte",
   },
   welcome: {
     member: "Bienvenue, {name}",

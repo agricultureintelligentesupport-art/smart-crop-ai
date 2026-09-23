@@ -2,21 +2,14 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Bot,
-  Clock,
-  Home,
   Leaf,
   LogOut,
   MapPin,
   Settings2,
-  ShieldCheck,
   Sprout,
-  Sun,
-  Waves,
 } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
 import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
@@ -27,17 +20,23 @@ import { DASHBOARD } from "@/lib/dashboard/copy";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
-import { CROPS, DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
-import { useLang } from "@/lib/use-lang";
+import { DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";import { useLang } from "@/lib/use-lang";
 import FieldTasksCard from "./FieldTasksCard";
 import IrrigationCard from "./IrrigationCard";
 import SatelliteCard from "./SatelliteCard";
 import ScanCard from "./ScanCard";
-import WeatherCard, { fmt } from "./WeatherCard";
+import WeatherCard from "./WeatherCard";
 import WilayaSelect from "./WilayaSelect";
+import BottomNav, { type DashboardTab } from "./BottomNav";
+import QuickReadHero from "./QuickReadHero";
 import { Chip, Segmented } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
+
+/** Horizontal padding of the app column, shared by header, screens and nav. */
+const APP_COLUMN = "mx-auto w-full max-w-[560px]";
+/** Clearance above the floating bottom navigation (+ safe area). */
+const NAV_CLEARANCE = "pb-[calc(6.75rem+env(safe-area-inset-bottom))]";
 
 /**
  * The live member dashboard, rendered by `/dashboard`. Every number reacts to
@@ -48,6 +47,11 @@ const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
  * phone or e-mail — Firebase session or gateway-backed on-device session)
  * OR a local guest flag ("المتابعة كزائر") is required; anyone else is
  * redirected straight to the auth wizard.
+ *
+ * UI shell: a mobile-first app screen — clean greeting header, a fixed glass
+ * bottom navigation (الرئيسية / المستشار / السقي / الحساب) switching between
+ * three in-app screens, with the assistant living on its own route. All data
+ * hooks, computations and handlers are unchanged by this shell.
  */
 export default function DashboardView() {
   const router = useRouter();
@@ -61,9 +65,12 @@ export default function DashboardView() {
   /** `null` = follow the stored profile; a value = the user overrode it here. */
   const [wilayaOverride, setWilayaOverride] = useState<string | null>(null);
   const [roleOverride, setRoleOverride] = useState<AuthRole | null>(null);
-  const [openPersonalize, setOpenPersonalize] = useState(false);
+  /** Active bottom-navigation screen (UI shell state only). */
+  const [tab, setTab] = useState<DashboardTab>("home");
   /** Parcel size in hectares: one input, consumed by every card. */
   const [areaHa, setAreaHa] = useState(2);
+
+  const scrollRef = useRef<HTMLElement | null>(null);
 
   // Derived from the stored profile (server renders the default, so hydration
   // is stable and no effect has to copy state around).
@@ -104,6 +111,9 @@ export default function DashboardView() {
     "{name}",
     displayName || (lang === "ar" ? "فلاح" : "Agriculteur"),
   );
+  const caption = t.welcome.caption
+    .replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)
+    .replace("{month}", month);
 
   const updateWilaya = (code: string) => {
     setWilayaOverride(code);
@@ -131,6 +141,23 @@ export default function DashboardView() {
     router.push("/auth");
   };
 
+  // New screens start at the top (the scroll container persists across tabs).
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [tab]);
+
+  /** Brand avatar: a deterministic leaf glyph (never hydration-dependent). */
+  const renderAvatar = (size: "md" | "lg") => (
+    <span
+      aria-hidden
+      className={`grid shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_8px_20px_-8px_rgba(16,185,129,0.8)] ring-1 ring-emerald-500/40 ${
+        size === "lg" ? "h-14 w-14" : "h-11 w-11"
+      }`}
+    >
+      <Leaf size={size === "lg" ? 24 : 19} strokeWidth={2.4} />
+    </span>
+  );
+
   return (
     <div
       dir={lang === "ar" ? "rtl" : "ltr"}
@@ -141,23 +168,17 @@ export default function DashboardView() {
     >
       <AmbientBackdrop variant="dashboard" />
 
-      {/* Header */}
-      <header className="pt-safe relative z-30 mx-auto flex w-full max-w-[900px] shrink-0 items-center justify-between gap-2 px-3.5 pb-1.5 sm:px-5">
-        <div className="glass flex h-12 min-w-0 items-center gap-2 rounded-2xl px-2 shadow-sm">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_18px_rgba(16,185,129,0.55)]">
-            <Leaf size={15} strokeWidth={2.4} className="text-white" aria-hidden />
-          </span>
-          <span className="flex min-w-0 flex-col leading-tight">
-            <span className="truncate text-[11.5px] font-black whitespace-nowrap text-emerald-950">
-              {brand.brand}
-            </span>
-            <span className="hidden truncate text-[8px] font-bold whitespace-nowrap text-emerald-700/80 min-[380px]:block">
+      {/* Clean app header: greeting + status, location pill, language. */}
+      <header className="pt-safe relative z-30 shrink-0 px-4 pb-1 pt-3">
+        <div className={`${APP_COLUMN} flex items-center gap-2.5`}>
+          {renderAvatar("md")}
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-[17px] font-black leading-6 text-emerald-950">{greeting}</h1>
+            <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-white/70 px-2 py-[2px] text-[9.5px] font-black text-emerald-700 ring-1 ring-[#E2F1E8]">
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
               {guestActive ? t.header.badgeGuest : t.header.badgeMember}
             </span>
-          </span>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-1.5">
+          </div>
           <LanguageSwitch
             lang={lang}
             onChange={setLang}
@@ -165,159 +186,197 @@ export default function DashboardView() {
             labels={{ ar: t.header.langAr, fr: t.header.langFr }}
             layoutId="dashboard-lang-thumb"
           />
-          <Link
-            href="/assistant"
-            aria-label={lang === "ar" ? "المساعد الذكي" : "Assistant IA"}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <Bot size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-          <Link
-            href="/"
-            aria-label={t.header.navHome}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <Home size={16} strokeWidth={2.4} aria-hidden />
-          </Link>
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            aria-label={t.header.signOut}
-            className={`glass grid h-12 w-12 place-items-center rounded-2xl text-emerald-900 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-          >
-            <LogOut size={16} strokeWidth={2.4} aria-hidden />
-          </button>
+        </div>
+
+        {/* Context strip: where the farm is + entry to personalisation */}
+        <div className={`${APP_COLUMN} mt-2.5 flex items-center gap-1.5`}>
+          <span className="glass inline-flex h-9 min-w-0 items-center gap-1.5 rounded-full px-3 text-[11.5px] font-black text-emerald-900">
+            <MapPin size={13} strokeWidth={2.8} aria-hidden className="shrink-0 text-emerald-600" />
+            <span className="truncate">{lang === "ar" ? wilaya.nameAr : wilaya.nameFr}</span>
+          </span>
+          <Chip tone="slate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</Chip>
+          {role && (
+            <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
+              {t.personalize.roleOptions[role]}
+            </Chip>
+          )}
+          <span className="min-w-2 flex-1" />
+          {tab !== "profile" && (
+            <button
+              type="button"
+              onClick={() => setTab("profile")}
+              className={`glass inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-[11px] font-black text-emerald-800 transition-colors hover:bg-white/95 active:bg-emerald-50 ${FOCUS_RING}`}
+            >
+              <Settings2 size={13} strokeWidth={2.8} aria-hidden />
+              {t.personalize.edit}
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Scroll body */}
-      <main className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <div className="mx-auto flex w-full max-w-[900px] flex-col gap-3 px-3.5 pb-6 pt-1 sm:px-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h1 className="text-[20px] font-black leading-tight text-emerald-950">{greeting}</h1>
-              <p className="mt-0.5 text-[11.5px] font-semibold text-emerald-900/70">
-                {t.welcome.caption
-                  .replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)
-                  .replace("{month}", month)}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Chip tone="slate" icon={<MapPin size={11} strokeWidth={3} aria-hidden />}>
-                {lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}
-              </Chip>
-              {role && (
-                <Chip tone="emerald" icon={<Sprout size={11} strokeWidth={3} aria-hidden />}>
-                  {t.personalize.roleOptions[role]}
-                </Chip>
-              )}
-              <button
-                type="button"
-                onClick={() => setOpenPersonalize((v) => !v)}
-                aria-expanded={openPersonalize}
-                className={`glass inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[10.5px] font-black text-emerald-800 transition-colors hover:bg-white/95 ${FOCUS_RING}`}
-              >
-                <Settings2 size={12} strokeWidth={3} aria-hidden />
-                {openPersonalize ? t.personalize.close : t.personalize.edit}
-              </button>
-            </div>
-          </div>
+      {/* Scroll body — one screen at a time, driven by the bottom bar */}
+      <main
+        ref={scrollRef}
+        className="scroll-area relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      >
+        <AnimatePresence initial={false} mode="wait">
+          <motion.div
+            key={tab}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2, ease: EASE_OUT }}
+            className={`${GPU} ${APP_COLUMN} px-4 pt-2 ${NAV_CLEARANCE}`}
+          >
+            {tab === "home" && (
+              <div className="flex flex-col gap-3">
+                {/* Daily status hero */}
+                <QuickReadHero
+                  t={t}
+                  lang={lang}
+                  netMmDay={irrigation.netMmDay}
+                  areaHa={areaHa}
+                  crop={crop}
+                />
 
-          {/* Personalisation */}
-          <AnimatePresence initial={false}>
-            {openPersonalize && (
-              <motion.section
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.24, ease: EASE_OUT }}
-                className={`${GPU} overflow-hidden`}
-                aria-label={t.personalize.title}
-              >
-                <div className="glass-card flex flex-col gap-3 rounded-3xl p-3.5">
+                {/* Data widgets */}
+                <WeatherCard t={t} lang={lang} weather={weather} />
+                <IrrigationCard
+                  t={t}
+                  lang={lang}
+                  wilayaCode={wilayaCode}
+                  areaHa={areaHa}
+                  onAreaChange={setAreaHa}
+                />
+                <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
+                <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
+                <ScanCard t={t} wilayaCode={wilayaCode} />
+
+                {/* Account shortcut (full account screen lives in the bottom bar) */}
+                <section
+                  aria-label={t.nav.profile}
+                  className="glass-card flex items-center gap-3 rounded-3xl p-3.5"
+                >
+                  {renderAvatar("md")}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13.5px] font-black text-emerald-950">
+                      {displayName || (lang === "ar" ? "فلاح" : "Agriculteur")}
+                    </p>
+                    <p className="mt-0.5 truncate text-[10.5px] font-semibold text-emerald-900/65">
+                      {role
+                        ? t.personalize.roleOptions[role]
+                        : lang === "ar"
+                          ? wilaya.nameAr
+                          : wilaya.nameFr}
+                      <span aria-hidden className="mx-1.5 text-emerald-900/25">·</span>
+                      {brand.brand}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-2xl bg-rose-50/90 px-3 text-[11px] font-black text-rose-700 ring-1 ring-rose-200/80 transition-colors hover:bg-rose-100/90 active:bg-rose-100 ${FOCUS_RING}`}
+                  >
+                    <LogOut size={14} strokeWidth={2.6} aria-hidden />
+                    {t.header.signOut}
+                  </button>
+                </section>
+
+                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
+                  {t.footer.builtWith} · {t.footer.disclaimer}
+                </p>
+              </div>
+            )}
+
+            {tab === "irrigation" && (
+              <div className="flex flex-col gap-3">
+                <QuickReadHero
+                  t={t}
+                  lang={lang}
+                  netMmDay={irrigation.netMmDay}
+                  areaHa={areaHa}
+                  crop={crop}
+                />
+                <IrrigationCard
+                  t={t}
+                  lang={lang}
+                  wilayaCode={wilayaCode}
+                  areaHa={areaHa}
+                  onAreaChange={setAreaHa}
+                />
+                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
+                  {t.footer.builtWith} · {t.footer.disclaimer}
+                </p>
+              </div>
+            )}
+
+            {tab === "profile" && (
+              <div className="flex flex-col gap-3">
+                {/* Identity */}
+                <section aria-label={t.nav.profile} className="glass-card rounded-3xl p-4">
+                  <div className="flex items-center gap-3">
+                    {renderAvatar("lg")}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[15px] font-black text-emerald-950">
+                        {displayName || (lang === "ar" ? "فلاح" : "Agriculteur")}
+                      </p>
+                      <p className="mt-0.5 line-clamp-2 text-[10.5px] font-semibold leading-4 text-emerald-900/65">
+                        {caption}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Personalisation */}
+                <section aria-label={t.personalize.title} className="glass-card flex flex-col gap-3 rounded-3xl p-4">
                   <div>
                     <p className="text-[13px] font-black text-emerald-950">{t.personalize.title}</p>
-                    <p className="mt-0.5 text-[11px] font-semibold text-emerald-900/70">{t.personalize.subtitle}</p>
+                    <p className="mt-0.5 text-[11px] font-semibold text-emerald-900/70">
+                      {t.personalize.subtitle}
+                    </p>
                   </div>
 
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <WilayaSelect t={t} lang={lang} value={wilayaCode} onChange={updateWilaya} />
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[9.5px] font-bold text-emerald-800/70">{t.personalize.role}</span>
-                      <Segmented<AuthRole>
-                        layoutId="dash-role"
-                        ariaLabel={t.personalize.role}
-                        value={role ?? "farmer"}
-                        onChange={updateRole}
-                        options={[
-                          { id: "farmer", label: t.personalize.roleOptions.farmer },
-                          { id: "agronomist", label: t.personalize.roleOptions.agronomist },
-                          { id: "investor", label: t.personalize.roleOptions.investor },
-                        ]}
-                      />
-                    </div>
+                  <WilayaSelect t={t} lang={lang} value={wilayaCode} onChange={updateWilaya} />
+
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[9.5px] font-bold text-emerald-800/70">{t.personalize.role}</span>
+                    <Segmented<AuthRole>
+                      layoutId="dash-role"
+                      ariaLabel={t.personalize.role}
+                      value={role ?? "farmer"}
+                      onChange={updateRole}
+                      options={[
+                        { id: "farmer", label: t.personalize.roleOptions.farmer },
+                        { id: "agronomist", label: t.personalize.roleOptions.agronomist },
+                        { id: "investor", label: t.personalize.roleOptions.investor },
+                      ]}
+                    />
                   </div>
 
                   <p className="text-[10.5px] font-semibold text-emerald-900/60">{t.personalize.savedNote}</p>
-                </div>
-              </motion.section>
-            )}
-          </AnimatePresence>
+                </section>
 
-          {/* Quick read strip */}
-          <section
-            aria-label={t.advice.title}
-            className="glass-card flex flex-col gap-1.5 rounded-3xl p-3.5"
-          >
-            <div className="flex items-center gap-2">
-              <span aria-hidden className="grid h-8 w-8 place-items-center rounded-2xl bg-amber-50 text-amber-600 ring-1 ring-amber-100">
-                <Sun size={15} strokeWidth={2.5} />
-              </span>
-              <div>
-                <p className="text-[13px] font-black text-emerald-950">{t.advice.title}</p>
-                <p className="text-[10.5px] font-semibold text-emerald-900/65">{t.advice.subtitle}</p>
+                {/* Session */}
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className={`glass-card inline-flex h-12 items-center justify-center gap-2 rounded-3xl text-[13px] font-black text-rose-700 transition-colors hover:bg-rose-50/80 active:bg-rose-100/80 ${FOCUS_RING}`}
+                >
+                  <LogOut size={16} strokeWidth={2.6} aria-hidden />
+                  {t.header.signOut}
+                </button>
+
+                <p className="mx-auto max-w-[70ch] pb-1 text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
+                  {t.footer.builtWith} · {t.footer.disclaimer}
+                </p>
               </div>
-            </div>
-            <ul className="mt-1 flex flex-col gap-1 text-[11.5px] font-bold text-emerald-900/85">
-              <li className="flex items-start gap-1.5">
-                <Waves size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line1
-                  .replace("{mm}", fmt(irrigation.netMmDay, 1))
-                  .replace("{area}", fmt(areaHa, 1))}
-              </li>
-              <li className="flex items-start gap-1.5">
-                <Clock size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line2.replace("{from}", "05:30").replace("{to}", "08:30")}
-              </li>
-              <li className="flex items-start gap-1.5">
-                <ShieldCheck size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-                {t.advice.line3
-                  .replace("{crop}", CROPS[crop][lang])
-                  .replace("{risk}", lang === "ar" ? "الآفات الفطرية" : "les maladies fongiques")}
-              </li>
-            </ul>
-          </section>
-
-          {/* Cards */}
-          <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-            <WeatherCard t={t} lang={lang} weather={weather} />
-            <IrrigationCard
-              t={t}
-              lang={lang}
-              wilayaCode={wilayaCode}
-              areaHa={areaHa}
-              onAreaChange={setAreaHa}
-            />
-            <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-            <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
-            <ScanCard t={t} wilayaCode={wilayaCode} />
-          </div>
-
-          <p className="mx-auto max-w-[70ch] text-center text-[10.5px] font-semibold leading-5 text-emerald-900/60">
-            {t.footer.builtWith} · {t.footer.disclaimer}
-          </p>
-        </div>
+            )}
+          </motion.div>
+        </AnimatePresence>
       </main>
+
+      {/* Fixed app bottom navigation */}
+      <BottomNav t={t} tab={tab} onTabChange={setTab} />
     </div>
   );
 }

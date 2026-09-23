@@ -89,7 +89,7 @@ export default function IrrigationCard({
               type="button"
               onClick={() => onAreaChange(Math.max(0.5, Math.round((areaHa - 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} −`}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-[#E2F1E8] bg-white/80 text-[16px] font-black text-emerald-800 transition-colors hover:border-emerald-300"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-colors hover:border-emerald-300 active:bg-emerald-50"
             >
               −
             </button>
@@ -108,7 +108,7 @@ export default function IrrigationCard({
               type="button"
               onClick={() => onAreaChange(Math.min(20, Math.round((areaHa + 0.5) * 2) / 2))}
               aria-label={`${t.irrigation.area} +`}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-[#E2F1E8] bg-white/80 text-[16px] font-black text-emerald-800 transition-colors hover:border-emerald-300"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-[#E2F1E8] bg-white/80 text-[17px] font-black text-emerald-800 transition-colors hover:border-emerald-300 active:bg-emerald-50"
             >
               +
             </button>
@@ -145,23 +145,27 @@ export default function IrrigationCard({
           <Metric
             label={t.irrigation.perHectare}
             value={`${fmt(result.litresPerHaDay)} L`}
-            icon={<Droplet size={11} strokeWidth={2.8} aria-hidden />}
+            tint="sky"
+            icon={<Droplet size={14} strokeWidth={2.6} aria-hidden />}
           />
           <Metric
             label={t.irrigation.perDay}
             value={`${fmt(result.dailyM3, 1)} m³`}
-            icon={<Waves size={11} strokeWidth={2.8} aria-hidden />}
+            tint="emerald"
+            icon={<Waves size={14} strokeWidth={2.6} aria-hidden />}
           />
           <Metric
             label={t.irrigation.perWeek}
             value={`${fmt(result.weeklyM3)} m³`}
-            icon={<Waves size={11} strokeWidth={2.8} aria-hidden />}
+            tint="blue"
+            icon={<Waves size={14} strokeWidth={2.6} aria-hidden />}
           />
           <Metric
             label={t.irrigation.saved}
             value={`${fmt(result.savedPct)}%`}
             tone={result.savedPct >= 30 ? "default" : "warn"}
-            icon={<Droplets size={11} strokeWidth={2.8} aria-hidden />}
+            tint="amber"
+            icon={<Droplets size={14} strokeWidth={2.6} aria-hidden />}
           />
         </div>
 

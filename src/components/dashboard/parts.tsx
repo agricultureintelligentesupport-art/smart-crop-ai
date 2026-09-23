@@ -46,28 +46,48 @@ export function Card({
   );
 }
 
+/** Icon tints for the 2×2 metric widget grid (weather + irrigation). */
+const METRIC_TINTS = {
+  emerald: "bg-emerald-50 text-emerald-600 ring-emerald-100",
+  sky: "bg-sky-50 text-sky-600 ring-sky-100",
+  blue: "bg-blue-50 text-blue-600 ring-blue-100",
+  amber: "bg-amber-50 text-amber-600 ring-amber-100",
+  rose: "bg-rose-50 text-rose-600 ring-rose-100",
+} as const;
+
+export type MetricTint = keyof typeof METRIC_TINTS;
+
 export function Metric({
   label,
   value,
   icon,
   tone = "default",
+  tint = "emerald",
 }: {
   label: string;
   value: string;
   icon?: ReactNode;
   tone?: "default" | "warn";
+  tint?: MetricTint;
 }) {
+  const resolved: MetricTint = tone === "warn" ? "amber" : tint;
   return (
-    <div
-      className={`min-w-0 rounded-2xl px-2.5 py-2 ${
-        tone === "warn" ? "bg-amber-50/90 ring-1 ring-amber-200" : "bg-white/70 ring-1 ring-[#E2F1E8]"
-      }`}
-    >
-      <p className="flex items-center gap-1 text-[10px] font-bold text-emerald-800/70">
+    <div className="min-w-0 rounded-2xl bg-white/80 p-2.5 ring-1 ring-[#E2F1E8]">
+      <span
+        aria-hidden
+        className={`grid h-8 w-8 place-items-center rounded-xl ring-1 ${METRIC_TINTS[resolved]}`}
+      >
         {icon}
-        {label}
+      </span>
+      <p className="mt-1.5 truncate text-[10px] font-bold text-emerald-800/70">{label}</p>
+      <p
+        dir="ltr"
+        className={`mt-0.5 truncate text-start text-[15px] font-black tabular-nums ${
+          tone === "warn" ? "text-amber-700" : "text-emerald-950"
+        }`}
+      >
+        {value}
       </p>
-      <p className="mt-0.5 truncate text-[14px] font-black tabular-nums text-emerald-950">{value}</p>
     </div>
   );
 }
@@ -124,7 +144,7 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(option.id)}
-            className={`relative flex h-9 flex-1 items-center justify-center rounded-xl px-1 text-[11.5px] font-extrabold transition-colors ${FOCUS_RING} ${
+            className={`relative flex h-11 flex-1 cursor-pointer items-center justify-center rounded-xl px-1 text-[11.5px] font-extrabold transition-colors ${FOCUS_RING} ${
               active ? "text-white" : "text-emerald-900/70 hover:text-emerald-800"
             }`}
           >

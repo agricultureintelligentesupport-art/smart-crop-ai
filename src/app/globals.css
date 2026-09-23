@@ -11,6 +11,16 @@
   --font-latin: var(--font-jakarta), -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* Horizontal app carousels (hourly / weekly forecast): scrollable by touch,
+   with no visible scrollbar rail. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Artwork palette — bright, optimistic Agro-Tech (light-only)        */
 /* ------------------------------------------------------------------ */
@@ -33,7 +43,6 @@
   body {
     height: 100%;
   }
-
   /* Keyboard-first focus: one visible ring everywhere, never on mouse clicks. */
   a:focus-visible,
   button:focus-visible,
