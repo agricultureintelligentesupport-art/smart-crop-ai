@@ -183,6 +183,7 @@ import type {
   AssistantContext,
   AssistantDiagnosis,
   AssistantImagePayload,
+  AssistantHistoryTurn,
   AssistantPreprocessing,
   AssistantRequestBody,
   AssistantResponseBody,
@@ -879,10 +880,15 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
 
-حدود المجال (التزام صارم):
-- اختصاصك 100٪: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي.
-- إن خرج السؤال عن الفلاحة، أعد المحادثة بجملة مهنية واحدة نحو اختصاصك دون محاضرة.
-- لا تدّعي اليقين المطلق: في الحالات الحرجة انصح بمعاينة مهندس زراعي محلي، في سطر واحد.`;
+احترام رغبة المستخدم:
+- إذا صرّح المستخدم برفض الموضوع الحالي أو طلب تغييره، تقبّل ذلك فوراً في نفس الرد، ولا تكرر نفس المقدمة أو تفرض سياق الملف الشخصي (الولاية/المحصول) مرة أخرى.
+- سياق الملف الشخصي معلومة خلفية اختيارية، وليست قاعدة تُفرض في كل رد.
+
+حدود المجال (بمرونة):
+- اختصاصك الأساسي: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي.
+- إن خرج السؤال عن الفلاحة لكنه مفيد عموماً، أجب عنه بإيجاز وبشكل نافع، ثم أشر بلطف إلى اختصاصك الزراعي عند الحاجة.
+- لا تدّعي اليقين المطلق: في الحالات الحرجة انصح بمعاينة مهندس زراعي محلي، في سطر واحد.
+`;
 
 function describeContext(context: AssistantContext | undefined): string {
   if (!context) return "لا يوجد سياق ملف شخصي.";
@@ -947,9 +953,10 @@ function buildUserContent(
   context: AssistantContext | undefined,
   diagnosis: AssistantDiagnosis | null,
   hasImage: boolean,
+  isFirstTurn: boolean,
 ): string {
   const sections = [
-    `سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`,
+    ...(isFirstTurn ? [`سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`] : []),
     describeDiagnosis(diagnosis),
     diagnosis
       ? `تشخيص PlantVillage (من Step 1 — مرّر مباشرة إلى نموذج اللغة): ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
@@ -1043,6 +1050,7 @@ async function generateWithGeminiModel(
   signal: AbortSignal,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  history: AssistantHistoryTurn[] = [],
 ): Promise<string> {
   let response: Response;
   try {
@@ -1055,6 +1063,10 @@ async function generateWithGeminiModel(
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
           contents: [
+            ...history.map((turn) => ({
+              role: turn.role === "assistant" ? "model" : "user",
+              parts: [{ text: turn.content }],
+            })),
             {
               role: "user",
               parts: image
@@ -1160,6 +1172,7 @@ async function generateWithGeminiForKey(
   userContent: string,
   apiKey: string,
   image?: AssistantImagePayload | null,
+  history: AssistantHistoryTurn[] = [],
 ): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
@@ -1188,6 +1201,7 @@ async function generateWithGeminiForKey(
           controller.signal,
           apiKey,
           image,
+          history,
         );
         return { model: model.id, text, warnings };
       } catch (error) {
@@ -1259,6 +1273,7 @@ async function generateWithGemini(
   userContent: string,
   geminiApiKeys: readonly string[],
   image?: AssistantImagePayload | null,
+  history: AssistantHistoryTurn[] = [],
 ): Promise<GeminiResult> {
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
@@ -1266,7 +1281,7 @@ async function generateWithGemini(
   for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
     const apiKey = geminiApiKeys[keyIndex];
     try {
-      const result = await generateWithGeminiForKey(userContent, apiKey, image);
+      const result = await generateWithGeminiForKey(userContent, apiKey, image, history);
       return {
         ...result,
         warnings: [...rotationWarnings, ...result.warnings],
@@ -1417,6 +1432,7 @@ async function generateWithHfLlmModel(
   model: string,
   userContent: string,
   apiKey: string,
+  history: AssistantHistoryTurn[] = [],
 ): Promise<string> {
   let res: Response;
   try {
@@ -1431,6 +1447,7 @@ async function generateWithHfLlmModel(
         model,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          ...history,
           { role: "user", content: userContent },
         ],
         temperature: 0.4,
@@ -1484,12 +1501,12 @@ async function generateWithHfLlmModel(
  * - Uses the concise professional Arabic advisor system prompt.
  * - Throws an Error prefixed with "LLM Error:" once no model can answer.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string): Promise<string> {
+async function askHfLlmStrict(apiKey: string, userContent: string, history: AssistantHistoryTurn[] = []): Promise<string> {
   const failures: string[] = [];
 
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
 
       console.log(
         `[Stage 2: HF LLM Success] model=${model} replyLength=${text.length}`,
@@ -1852,6 +1869,18 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 
   const message = typeof body.message === "string" ? body.message.trim() : "";
   const context = body.context && typeof body.context === "object" ? body.context : undefined;
+  const history = Array.isArray(body.history)
+    ? body.history
+        .filter(
+          (turn): turn is AssistantHistoryTurn =>
+            Boolean(turn) &&
+            (turn.role === "user" || turn.role === "assistant") &&
+            typeof turn.content === "string" &&
+            turn.content.trim().length > 0,
+        )
+        .slice(-10)
+    : [];
+  const isFirstTurn = history.length === 0;
   const image = body.image;
 
   if (message.length > MAX_MESSAGE_CHARS) {
@@ -1947,7 +1976,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // (disease label, confidence score, candidate diseases) whenever it exists
   // + the image instruction whenever a photo is attached (hybrid primary
   // path with the reference, Fallback A without it).
-  const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage));
+  const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage), isFirstTurn);
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
   // gemini-1.5-flash or the GEMINI_MODEL override (→ 2.0-flash → 2.5-flash
@@ -1965,7 +1994,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let reply: string | null = null;
   if (geminiApiKeys.length > 0) {
     try {
-      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage);
+      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage, history);
       reply = geminiResult.text;
       // Non-fatal degradations the chain walked past (a retired primary id
       // 404ing before its successor answered) are still surfaced to the
@@ -1994,7 +2023,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (reply === null) {
     if (huggingfaceKey) {
       try {
-        reply = await askHfLlmStrict(huggingfaceKey, userContent);
+        reply = await askHfLlmStrict(huggingfaceKey, userContent, history);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;

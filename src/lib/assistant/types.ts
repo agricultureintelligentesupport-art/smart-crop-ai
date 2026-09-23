@@ -56,10 +56,16 @@ export interface AssistantPreprocessing {
   durationMs: number;
 }
 
+export interface AssistantHistoryTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface AssistantRequestBody {
   message?: string;
   image?: AssistantImagePayload;
   context?: AssistantContext;
+  history?: AssistantHistoryTurn[];
 }
 
 /** One raw candidate from the vision classifier. */

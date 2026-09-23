@@ -33,6 +33,7 @@ import type {
   AssistantResponseBody,
   AssistantSource,
   AssistantDiagnosis,
+  AssistantHistoryTurn,
 } from "@/lib/assistant/types";
 import { useProfile } from "@/lib/auth/profile";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
@@ -205,6 +206,14 @@ export default function AssistantView() {
       if ((!text && !image) || busy) return;
 
       lastRequestRef.current = { message: text, image };
+      const history: AssistantHistoryTurn[] = messages
+        .filter((item) => item.text.trim().length > 0)
+        .slice(-10)
+        .map((item) => ({
+          role: item.author === "user" ? "user" : "assistant",
+          content: item.text,
+        }));
+
       setMessages((prev) => [
         ...prev,
         { id: nextId(), author: "user", text, imageUrl: image?.previewUrl },
@@ -227,6 +236,7 @@ export default function AssistantView() {
             message: text,
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
+            history,
           }),
         });
         if (!res.ok) {
@@ -260,7 +270,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, messages, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {
