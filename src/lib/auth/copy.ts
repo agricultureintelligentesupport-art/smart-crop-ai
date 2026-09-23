@@ -33,6 +33,7 @@ export interface AuthCopy {
     method: string;
     role: string;
     location: string;
+    farm: string;
     done: string;
     stepWord: string;
     ofWord: string;
@@ -172,6 +173,27 @@ export interface AuthCopy {
     wind: string;
     rain: string;
     clear: string;
+    useMyLocation: string;
+    locating: string;
+    geoDetected: string;
+    geoDenied: string;
+  };
+  farm: {
+    title: string;
+    subtitle: string;
+    cropLabel: string;
+    cropHint: string;
+    suggestedLabel: string;
+    allLabel: string;
+    landLabel: string;
+    landPlaceholder: string;
+    landUnit: string;
+    landHint: string;
+    landError: string;
+    encourage: string;
+    confirm: string;
+    skip: string;
+    back: string;
   };
   success: {
     title: string;
@@ -180,6 +202,10 @@ export interface AuthCopy {
     summaryMethod: string;
     summaryRole: string;
     summaryWilaya: string;
+    summaryCrop: string;
+    summaryLand: string;
+    landValue: string;
+    skipped: string;
     cta: string;
     secondary: string;
     perks: string[];
@@ -207,6 +233,7 @@ const AR: AuthCopy = {
     method: "الطريقة",
     role: "الصفة",
     location: "الولاية",
+    farm: "المزرعة",
     done: "مكتملة",
     stepWord: "خطوة",
     ofWord: "من",
@@ -363,6 +390,27 @@ const AR: AuthCopy = {
     wind: "رياح {n} كم/س",
     rain: "أمطار {n} مم/سنة",
     clear: "مسح البحث",
+    useMyLocation: "استخدام موقعي الحالي",
+    locating: "جارٍ تحديد موقعك…",
+    geoDetected: "تم تحديد ولايتك: {name}",
+    geoDenied: "تعذّر الوصول إلى الموقع — اختر ولايتك يدوياً من القائمة.",
+  },
+  farm: {
+    title: "مزرعتك",
+    subtitle: "خطوة اختيارية — تساعدنا على تخصيص السقي والتوصيات لأرضك.",
+    cropLabel: "نوع المحصول",
+    cropHint: "اختر محصولك الأساسي — يمكنك تغييره لاحقاً.",
+    suggestedLabel: "مقترحة لولايتك",
+    allLabel: "كل المحاصيل",
+    landLabel: "حجم الأرض",
+    landPlaceholder: "مثال: 2.5",
+    landUnit: "هكتار",
+    landHint: "مساحة القطعة التي تسقيها، بالهكتار.",
+    landError: "أدخل مساحة صحيحة أكبر من صفر (بالهكتار).",
+    encourage: "كلما زادت التفاصيل، كانت توصيات السقي أدق.",
+    confirm: "تأكيد وإتمام",
+    skip: "تخطي",
+    back: "رجوع",
   },
   success: {
     title: "أهلاً بك في محصولي الذكي",
@@ -371,6 +419,10 @@ const AR: AuthCopy = {
     summaryMethod: "طريقة الدخول",
     summaryRole: "الصفة",
     summaryWilaya: "الولاية",
+    summaryCrop: "المحصول",
+    summaryLand: "مساحة الأرض",
+    landValue: "{n} هكتار",
+    skipped: "لم يُحدد",
     cta: "الدخول إلى لوحة التحكم",
     secondary: "تعديل الاختيارات",
     perks: [
@@ -402,6 +454,7 @@ const FR: AuthCopy = {
     method: "Méthode",
     role: "Profil",
     location: "Wilaya",
+    farm: "Exploitation",
     done: "terminée",
     stepWord: "Étape",
     ofWord: "sur",
@@ -562,6 +615,27 @@ const FR: AuthCopy = {
     wind: "Vent {n} km/h",
     rain: "Pluie {n} mm/an",
     clear: "Effacer la recherche",
+    useMyLocation: "Utiliser ma position",
+    locating: "Localisation en cours…",
+    geoDetected: "Wilaya détectée : {name}",
+    geoDenied: "Position inaccessible — choisissez votre wilaya dans la liste.",
+  },
+  farm: {
+    title: "Votre exploitation",
+    subtitle: "Étape optionnelle — elle adapte l'irrigation et les conseils à votre parcelle.",
+    cropLabel: "Culture principale",
+    cropHint: "Choisissez votre culture principale — modifiable plus tard.",
+    suggestedLabel: "Recommandées pour votre wilaya",
+    allLabel: "Toutes les cultures",
+    landLabel: "Surface cultivée",
+    landPlaceholder: "Ex. : 2,5",
+    landUnit: "ha",
+    landHint: "Surface de la parcelle irriguée, en hectares.",
+    landError: "Saisissez une surface valide supérieure à zéro (en hectares).",
+    encourage: "Plus vous précisez, plus les conseils d'irrigation sont fiables.",
+    confirm: "Confirmer et terminer",
+    skip: "Passer",
+    back: "Retour",
   },
   success: {
     title: "Bienvenue sur Smart Crop AI",
@@ -570,6 +644,10 @@ const FR: AuthCopy = {
     summaryMethod: "Méthode de connexion",
     summaryRole: "Profil",
     summaryWilaya: "Wilaya",
+    summaryCrop: "Culture",
+    summaryLand: "Surface",
+    landValue: "{n} ha",
+    skipped: "Non renseigné",
     cta: "Ouvrir le tableau de bord",
     secondary: "Modifier les choix",
     perks: [

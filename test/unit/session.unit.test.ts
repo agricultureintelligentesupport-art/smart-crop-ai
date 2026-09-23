@@ -127,16 +127,34 @@ test("resolveSessionBinding: account switch discards the cached identity", () =>
     storedProfile({ uid: "user-A", role: "farmer", wilayaCode: "16" }),
     devicePrefs,
   );
-  assert.deepEqual(binding, { role: null, wilayaCode: null, uidChanged: true });
+  assert.deepEqual(binding, {
+    role: null,
+    wilayaCode: null,
+    preferredCrop: null,
+    landSizeHa: null,
+    uidChanged: true,
+  });
 });
 
 test("resolveSessionBinding: account switch keeps the new session's own values", () => {
   const binding = resolveSessionBinding(
-    session({ uid: "user-B", role: "agronomist", wilayaCode: "07" }),
+    session({
+      uid: "user-B",
+      role: "agronomist",
+      wilayaCode: "07",
+      preferredCrop: "dates",
+      landSizeHa: 4,
+    }),
     storedProfile({ uid: "user-A", role: "farmer", wilayaCode: "16" }),
     devicePrefs,
   );
-  assert.deepEqual(binding, { role: "agronomist", wilayaCode: "07", uidChanged: true });
+  assert.deepEqual(binding, {
+    role: "agronomist",
+    wilayaCode: "07",
+    preferredCrop: "dates",
+    landSizeHa: 4,
+    uidChanged: true,
+  });
 });
 
 test("resolveSessionBinding: same user merges session > cached > device", () => {
@@ -147,16 +165,22 @@ test("resolveSessionBinding: same user merges session > cached > device", () => 
       storedProfile({ uid: "user-A", role: "farmer", wilayaCode: "16" }),
       devicePrefs,
     ),
-    { role: "agronomist", wilayaCode: "07", uidChanged: false },
+    { role: "agronomist", wilayaCode: "07", preferredCrop: null, landSizeHa: null, uidChanged: false },
   );
   // Then the cached profile (e.g. onboarding completed while offline)…
   assert.deepEqual(
     resolveSessionBinding(
       session({ uid: "user-A", role: null, wilayaCode: null }),
-      storedProfile({ uid: "user-A", role: "farmer", wilayaCode: "16" }),
+      storedProfile({
+        uid: "user-A",
+        role: "farmer",
+        wilayaCode: "16",
+        preferredCrop: "olive",
+        landSizeHa: 2.5,
+      }),
       devicePrefs,
     ),
-    { role: "farmer", wilayaCode: "16", uidChanged: false },
+    { role: "farmer", wilayaCode: "16", preferredCrop: "olive", landSizeHa: 2.5, uidChanged: false },
   );
   // …then the device prefs.
   assert.deepEqual(
@@ -165,7 +189,7 @@ test("resolveSessionBinding: same user merges session > cached > device", () => 
       null,
       devicePrefs,
     ),
-    { role: "investor", wilayaCode: "31", uidChanged: false },
+    { role: "investor", wilayaCode: "31", preferredCrop: null, landSizeHa: null, uidChanged: false },
   );
 });
 

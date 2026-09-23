@@ -7,6 +7,7 @@ import {
   Check,
   CloudRain,
   Droplets,
+  LocateFixed,
   MapPin,
   Mountain,
   Search,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { interpolate } from "@/lib/auth/copy";
+import { findNearestWilaya, getBrowserPosition } from "@/lib/auth/geolocation";
 import {
   CROPS,
   DEFAULT_WILAYA_CODE,
@@ -42,11 +44,36 @@ export default function WilayaStep({ flow }: { flow: FlowController }) {
   const selectedCode = flow.wilayaCode ?? DEFAULT_WILAYA_CODE;
   const selected = getWilaya(selectedCode);
   const selectedRef = useRef<HTMLLIElement | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [geoMessage, setGeoMessage] = useState<string | null>(null);
 
   // Park the highlighted row in view when the step opens.
   useEffect(() => {
     selectedRef.current?.scrollIntoView({ block: "nearest" });
   }, []);
+
+  /**
+   * "Use my current location": resolves the nearest wilaya from a one-shot
+   * GPS fix and pre-selects it. Every failure path (denied permission,
+   * unavailable, timeout, no API) lands on the same gentle fallback copy —
+   * the manual search below always stays available, nothing hard-blocks.
+   */
+  const handleLocate = async () => {
+    if (locating) return;
+    setLocating(true);
+    setGeoMessage(t.location.locating);
+    try {
+      const fix = await getBrowserPosition();
+      const nearest = findNearestWilaya(fix.lat, fix.lon);
+      flow.handleWilayaSelect(nearest.code);
+      setQuery("");
+      setGeoMessage(interpolate(t.location.geoDetected, { name: wilayaName(getWilaya(nearest.code), lang) }));
+    } catch {
+      setGeoMessage(t.location.geoDenied);
+    } finally {
+      setLocating(false);
+    }
+  };
 
   return (
     <section aria-labelledby="wilaya-title" className="flex flex-col gap-3.5">
@@ -94,6 +121,21 @@ export default function WilayaStep({ flow }: { flow: FlowController }) {
         </div>
         <p aria-live="polite" className="text-[11px] font-bold text-emerald-800/70">
           {interpolate(t.location.results, { n: results.length })}
+        </p>
+      </div>
+
+      {/* Automatic detection: optional shortcut, manual search stays available. */}
+      <div className="flex flex-col gap-1">
+        <GhostButton
+          onClick={() => void handleLocate()}
+          loading={locating}
+          loadingLabel={t.location.locating}
+          icon={<LocateFixed size={16} strokeWidth={2.6} aria-hidden />}
+        >
+          {t.location.useMyLocation}
+        </GhostButton>
+        <p aria-live="polite" className="min-h-[1rem] text-center text-[11px] font-bold text-emerald-800">
+          {geoMessage ?? ""}
         </p>
       </div>
 

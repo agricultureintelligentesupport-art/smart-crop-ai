@@ -33,6 +33,7 @@ export interface UserDocPatch {
   role?: AuthRole | null;
   wilayaCode?: string | null;
   preferredCrop?: string | null;
+  landSizeHa?: number | null;
   createdAt?: string;
   lastLoginAt?: string;
 }
@@ -46,6 +47,7 @@ export interface UserDocData {
   wilaya?: string | null;
   wilayaCode?: string | null;
   preferredCrop?: string | null;
+  landSizeHa?: number | null;
   createdAt?: string;
   lastLoginAt?: string;
   updatedAt?: string;
@@ -124,6 +126,7 @@ async function readAndMerge(
     wilaya: wilayaCode,
     wilayaCode,
     preferredCrop,
+    landSizeHa: patch.landSizeHa !== undefined ? (patch.landSizeHa ?? null) : (existing.landSizeHa ?? null),
     updatedAt: new Date().toISOString(),
   };
   const createdAt = existing.createdAt ?? patch.createdAt;

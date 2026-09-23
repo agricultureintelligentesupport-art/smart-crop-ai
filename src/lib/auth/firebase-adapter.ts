@@ -48,6 +48,7 @@ async function loadProfile(uid: string) {
       wilayaCode?: string;
       wilaya?: string;
       preferredCrop?: string;
+      landSizeHa?: number;
       displayName?: string;
     };
   } catch {
@@ -87,6 +88,8 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? data.email ?? undefined,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
+          preferredCrop: data.preferredCrop ?? null,
+          landSizeHa: data.landSizeHa ?? null,
         };
       } catch (error) {
         logAuthError("signInWithGoogle (gateway)", error);
@@ -132,6 +135,8 @@ export function createFirebaseAuthGateway(): AuthGateway {
           phone: cred.user.phoneNumber ?? challenge.phone,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
+          preferredCrop: data.preferredCrop ?? null,
+          landSizeHa: data.landSizeHa ?? null,
         };
       } catch (error) {
         throw toAdapterError(error, "firebase/verifyOtp");
@@ -149,6 +154,8 @@ export function createFirebaseAuthGateway(): AuthGateway {
           email: cred.user.email ?? email,
           role: data.role ?? null,
           wilayaCode: data.wilayaCode ?? data.wilaya ?? null,
+          preferredCrop: data.preferredCrop ?? null,
+          landSizeHa: data.landSizeHa ?? null,
         };
       } catch (error) {
         throw toAdapterError(error, "firebase/signInWithEmail");
@@ -199,7 +206,9 @@ export function createFirebaseAuthGateway(): AuthGateway {
       const user = auth.currentUser;
       if (!user || user.uid !== uid) throw new AuthError("user-not-found");
       const wilayaData = patch.wilayaCode ? getWilaya(patch.wilayaCode) : null;
-      const preferredCrop = wilayaData?.crops?.[0] ?? null;
+      // The farm step's explicit crop choice wins; the wilaya default only
+      // fills the gap when the user skipped that step.
+      const preferredCrop = patch.preferredCrop ?? wilayaData?.crops?.[0] ?? null;
 
       await setDoc(
         doc(db, "users", uid),
@@ -219,6 +228,8 @@ export function createFirebaseAuthGateway(): AuthGateway {
         email: user.email ?? undefined,
         role: patch.role ?? data.role ?? null,
         wilayaCode: patch.wilayaCode ?? data.wilayaCode ?? data.wilaya ?? null,
+        preferredCrop: patch.preferredCrop ?? data.preferredCrop ?? null,
+        landSizeHa: patch.landSizeHa ?? data.landSizeHa ?? null,
       };
     },
 

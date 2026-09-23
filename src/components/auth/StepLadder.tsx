@@ -5,7 +5,7 @@ import { Check } from "lucide-react";
 import { memo } from "react";
 import { FOCUS_RING, GPU, SPRING } from "./ui";
 
-export type StepId = "method" | "role" | "location" | "done";
+export type StepId = "method" | "role" | "location" | "farm" | "done";
 
 /**
  * Progress ladder for the onboarding steps. Completed steps stay clickable so

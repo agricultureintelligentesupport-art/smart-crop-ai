@@ -60,10 +60,11 @@ import {
   isValidDzMobile,
   isValidEmail,
   normalizeDzPhone,
+  parseLandSizeHa,
   passwordStrength,
   toE164,
 } from "@/lib/auth/validation";
-import { DEFAULT_WILAYA_CODE, getWilaya } from "@/lib/wilayas";
+import { CROPS, DEFAULT_WILAYA_CODE, getWilaya, type CropKey } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import type { StepId } from "./StepLadder";
 
@@ -116,6 +117,17 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const [prefs] = useState(() => readPrefs());
   const [role, setRole] = useState<AuthRole | null>(prefs.role);
   const [wilayaCode, setWilayaCode] = useState<string | null>(prefs.wilayaCode);
+  // Farm step (step 4): the user's explicit crop choice (null = skipped) and
+  // the raw land-size input. Both are optional and seeded from the device
+  // preferences when a previous visit already provided them.
+  const [crop, setCrop] = useState<CropKey | null>(() => {
+    const saved = prefs.preferredCrop;
+    return saved && saved in CROPS ? (saved as CropKey) : null;
+  });
+  const [landInput, setLandInput] = useState(() =>
+    prefs.landSizeHa != null ? String(prefs.landSizeHa) : "",
+  );
+  const [landError, setLandError] = useState<string | null>(null);
 
   const [user, setUser] = useState<SessionUser | null>(null);
   const [busy, setBusy] = useState<BusyState>(null);
@@ -245,9 +257,12 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
   const knownWilaya = stored.profile?.wilayaCode ?? prefs.wilayaCode;
   const runsSetup = needsSetup || !(knownRole && knownWilaya);
   const plan = useMemo<StepId[]>(
-    () => (runsSetup ? ["method", "role", "location"] : ["method"]),
+    () => (runsSetup ? ["method", "role", "location", "farm"] : ["method"]),
     [runsSetup],
   );
+
+  /** Parsed land size in hectares (null when the field is empty or invalid). */
+  const landSizeHa = useMemo(() => parseLandSizeHa(landInput), [landInput]);
 
   const goToStep = useCallback(
     (next: StepId) => {
@@ -280,16 +295,42 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       const binding = resolveSessionBinding(session, previous, device);
       const resolvedRole = binding.role;
       const resolvedWilaya = binding.wilayaCode;
+      const resolvedCrop = binding.preferredCrop ?? null;
+      const resolvedLand = binding.landSizeHa ?? null;
 
       writeProfile(
-        profileFromUser({ ...session, role: resolvedRole, wilayaCode: resolvedWilaya }, { lang }),
+        profileFromUser(
+          {
+            ...session,
+            role: resolvedRole,
+            wilayaCode: resolvedWilaya,
+            preferredCrop: resolvedCrop,
+            landSizeHa: resolvedLand,
+          },
+          { lang },
+        ),
       );
-      writePrefs({ role: resolvedRole, wilayaCode: resolvedWilaya, lang });
+      writePrefs({
+        role: resolvedRole,
+        wilayaCode: resolvedWilaya,
+        preferredCrop: resolvedCrop,
+        landSizeHa: resolvedLand,
+        lang,
+      });
       // Complete overwrite of the wizard's in-memory user state: nothing of
       // a previously signed-in account survives next to the new session.
-      setUser({ ...session, role: resolvedRole, wilayaCode: resolvedWilaya });
+      setUser({
+        ...session,
+        role: resolvedRole,
+        wilayaCode: resolvedWilaya,
+        preferredCrop: resolvedCrop,
+        landSizeHa: resolvedLand,
+      });
       setRole(resolvedRole);
       setWilayaCode(resolvedWilaya);
+      setCrop(resolvedCrop && resolvedCrop in CROPS ? (resolvedCrop as CropKey) : null);
+      setLandInput(resolvedLand != null ? String(resolvedLand) : "");
+      setLandError(null);
 
       // Bind the wizard to the Firebase session when the SDK actually holds
       // this uid. Gateway-only sessions (demo, device OTP) never bind, so
@@ -361,6 +402,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       if (!switching) {
         if (role) patch.role = role;
         if (wilayaCode) patch.wilayaCode = wilayaCode;
+        if (crop) patch.preferredCrop = crop;
+        if (landSizeHa != null) patch.landSizeHa = landSizeHa;
       }
       const { ok, data, error } = await syncUserDoc(
         {
@@ -387,9 +430,11 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         photoURL: fbUser.photoURL ?? (data.photoURL as string | null | undefined) ?? null,
         role: resolvedRole,
         wilayaCode: resolvedWilaya,
+        preferredCrop: (data.preferredCrop ?? null) as string | null,
+        landSizeHa: (data.landSizeHa ?? null) as number | null,
       };
     },
-    [role, t, wilayaCode],
+    [crop, landSizeHa, role, t, wilayaCode],
   );
 
   /** Fill what Google already knows into the e-mail form (never passwords). */
@@ -539,6 +584,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       setUser(null);
       setRole(null);
       setWilayaCode(null);
+      setCrop(null);
+      setLandInput("");
+      setLandError(null);
       setChallenge(null);
       setOtpCode("");
       setOtpAttempts(0);
@@ -721,8 +769,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
           const switched = priorUid !== null || isSwitchingAccounts(readProfile(), fbUser.uid);
           const targetRole = switched ? null : (role ?? null);
           const targetWilaya = switched ? null : (wilayaCode ?? null);
+          const targetCrop = switched ? null : crop;
+          const targetLand = switched ? null : landSizeHa;
           const wilayaData = targetWilaya ? getWilaya(targetWilaya) : null;
-          const preferredCrop = wilayaData?.crops?.[0] ?? null;
+          const preferredCrop = targetCrop ?? wilayaData?.crops?.[0] ?? null;
 
           await setDoc(
             doc(db, "users", fbUser.uid),
@@ -734,6 +784,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
               wilaya: targetWilaya,
               wilayaCode: targetWilaya,
               preferredCrop,
+              landSizeHa: targetLand,
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             },
@@ -747,6 +798,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
             email: fbUser.email ?? email.email.trim(),
             role: targetRole,
             wilayaCode: targetWilaya,
+            preferredCrop,
+            landSizeHa: targetLand,
           };
         } catch (fbErr: unknown) {
           const errCode = (fbErr as { code?: string })?.code;
@@ -780,6 +833,12 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
           const resolvedWilaya = (
             switched ? (data.wilayaCode ?? data.wilaya ?? null) : (data.wilayaCode ?? data.wilaya ?? wilayaCode)
           ) as string | null;
+          const resolvedCrop = (
+            switched ? (data.preferredCrop ?? null) : ((data.preferredCrop as string | null) ?? crop)
+          ) as string | null;
+          const resolvedLand = (
+            switched ? (data.landSizeHa ?? null) : ((data.landSizeHa as number | null) ?? landSizeHa)
+          ) as number | null;
 
           session = {
             uid: fbUser.uid,
@@ -788,6 +847,8 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
             email: fbUser.email ?? email.email.trim(),
             role: resolvedRole,
             wilayaCode: resolvedWilaya,
+            preferredCrop: resolvedCrop,
+            landSizeHa: resolvedLand,
           };
         } catch (fbErr: unknown) {
           const errCode = (fbErr as { code?: string })?.code;
@@ -820,7 +881,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
       manualSignIn.current = false;
       if (mounted.current) setBusy(null);
     }
-  }, [afterAuth, copyFor, email, gateway, mode, role, t, validateEmailForm, wilayaCode]);
+  }, [afterAuth, copyFor, crop, email, gateway, landSizeHa, mode, role, t, validateEmailForm, wilayaCode]);
 
   const handleForgotPassword = useCallback(async () => {
     clearErrors();
@@ -864,13 +925,14 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     [clearErrors],
   );
 
-  const handleWilayaConfirm = useCallback(async () => {
-    const code = wilayaCode ?? DEFAULT_WILAYA_CODE;
-    setBusy("email");
-    try {
-      const wilayaData = getWilaya(code);
-      const preferredCrop = wilayaData?.crops?.[0] ?? null;
-
+  /**
+   * Shared profile persistence for the wilaya + farm confirms: Firestore
+   * (`users/{uid}`, best-effort), the gateway record, the on-device profile
+   * and the device prefs. Throws on gateway failures so the caller can
+   * surface them; Firestore hiccups stay silent (offline/demo safe).
+   */
+  const persistProfile = useCallback(
+    async (code: string, preferredCrop: string | null, landSize: number | null) => {
       const currentFbUser = auth.currentUser;
       if (currentFbUser) {
         try {
@@ -881,6 +943,7 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
               wilaya: code,
               wilayaCode: code,
               preferredCrop,
+              landSizeHa: landSize,
               updatedAt: new Date().toISOString(),
             },
             { merge: true },
@@ -895,32 +958,98 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
         session = await gateway.saveProfile(user.uid, {
           role: role ?? undefined,
           wilayaCode: code,
+          preferredCrop,
+          landSizeHa: landSize,
         });
       }
-      if (mounted.current) {
-        setWilayaCode(code);
-        setUser(session ? { ...session, role: role ?? session.role, wilayaCode: code } : session);
-        writeProfile(
-          profileFromUser(
-            session ?? {
-              uid: currentFbUser?.uid ?? "local",
-              method: "email",
-              displayName: currentFbUser?.displayName ?? "",
-              role,
-              wilayaCode: code,
-            },
-            { role, wilayaCode: code, lang },
-          ),
-        );
-        writePrefs({ role, wilayaCode: code, lang });
-        setStep("done");
-      }
+      if (!mounted.current) return;
+      setWilayaCode(code);
+      setUser(
+        session
+          ? { ...session, role: role ?? session.role, wilayaCode: code, preferredCrop, landSizeHa: landSize }
+          : session,
+      );
+      writeProfile(
+        profileFromUser(
+          session ?? {
+            uid: currentFbUser?.uid ?? "local",
+            method: "email",
+            displayName: currentFbUser?.displayName ?? "",
+            role,
+            wilayaCode: code,
+            preferredCrop,
+            landSizeHa: landSize,
+          },
+          { role, wilayaCode: code, preferredCrop, landSizeHa: landSize, lang },
+        ),
+      );
+      writePrefs({ role, wilayaCode: code, preferredCrop, landSizeHa: landSize, lang });
+    },
+    [gateway, lang, role, user],
+  );
+
+  const handleWilayaConfirm = useCallback(async () => {
+    const code = wilayaCode ?? DEFAULT_WILAYA_CODE;
+    setBusy("email");
+    try {
+      // A crop carried over from a previous visit wins over the wilaya
+      // default; the farm step (next) lets the user change it explicitly.
+      const preferredCrop = crop ?? getWilaya(code)?.crops?.[0] ?? null;
+      await persistProfile(code, preferredCrop, landSizeHa);
+      if (mounted.current) setStep("farm");
     } catch (error) {
       if (mounted.current) setErrorCode(toAuthErrorCode(error));
     } finally {
       if (mounted.current) setBusy(null);
     }
-  }, [gateway, lang, role, user, wilayaCode]);
+  }, [crop, landSizeHa, persistProfile, wilayaCode]);
+
+  /* ---------------- Step 4 · Farm (crop + land size, optional) ---------------- */
+
+  const handleCropSelect = useCallback(
+    (next: CropKey) => {
+      setCrop(next);
+      clearErrors();
+    },
+    [clearErrors],
+  );
+
+  const handleLandInput = useCallback((value: string) => {
+    setLandInput(value);
+    setLandError(null);
+    setErrorCode(null);
+  }, []);
+
+  /**
+   * Final persistence before the success screen. `skip` bypasses the
+   * land-size validation (an invalid value is simply dropped to null);
+   * the explicit confirm blocks on it while still allowing an empty field —
+   * the whole step stays optional either way.
+   */
+  const handleFarmConfirm = useCallback(
+    async (skip = false) => {
+      const code = wilayaCode ?? DEFAULT_WILAYA_CODE;
+      const parsed = parseLandSizeHa(landInput);
+      if (!skip && landInput.trim() !== "" && parsed == null) {
+        setLandError(t.farm.landError);
+        return;
+      }
+      setLandError(null);
+      setBusy("email");
+      try {
+        // Skipping the crop keeps the old behaviour exactly: the wilaya's
+        // first crop becomes the stored preferred crop.
+        const preferredCrop = crop ?? getWilaya(code)?.crops?.[0] ?? null;
+        await persistProfile(code, preferredCrop, parsed);
+        if (mounted.current) setStep("done");
+      } catch (error) {
+        if (mounted.current) setErrorCode(toAuthErrorCode(error));
+      } finally {
+        if (mounted.current) setBusy(null);
+      }
+    },
+    [crop, landInput, persistProfile, t, wilayaCode],
+  );
 
   /* ---------------- Dashboard ---------------- */
 
@@ -961,6 +1090,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     setUser(null);
     setRole(null);
     setWilayaCode(null);
+    setCrop(null);
+    setLandInput("");
+    setLandError(null);
     setChallenge(null);
     setOtpCode("");
     setOtpAttempts(0);
@@ -1022,6 +1154,10 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     minLeft,
     role,
     wilayaCode,
+    crop,
+    landInput,
+    landSizeHa,
+    landError,
     user,
     // ui state
     busy,
@@ -1046,6 +1182,9 @@ export function useAuthFlow({ initialMode = "signin" }: { initialMode?: EmailInt
     handleRoleConfirm,
     handleWilayaSelect,
     handleWilayaConfirm,
+    handleCropSelect,
+    handleLandInput,
+    handleFarmConfirm,
     handleGoToDashboard,
     handleSignOut,
     clearErrors,

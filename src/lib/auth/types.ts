@@ -24,6 +24,13 @@ export interface SessionUser {
   role: AuthRole | null;
   /** Wilaya code filled in during step 3 (null until then). */
   wilayaCode: string | null;
+  /**
+   * Preferred crop key (see `CROPS` in `@/lib/wilayas`) picked during the
+   * farm step; falls back to the wilaya's first crop when skipped.
+   */
+  preferredCrop?: string | null;
+  /** Farm/plot size in hectares, collected during the farm step. */
+  landSizeHa?: number | null;
 }
 
 /** Phone challenge returned by `sendOtp` and consumed by `verifyOtp`. */
@@ -132,6 +139,8 @@ export interface ProfilePatch {
   role?: AuthRole;
   wilayaCode?: string;
   displayName?: string;
+  preferredCrop?: string | null;
+  landSizeHa?: number | null;
 }
 
 /**

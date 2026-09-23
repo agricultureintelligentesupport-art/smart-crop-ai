@@ -178,7 +178,14 @@ export default function AssistantView() {
 
   const wilayaCode = profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? null;
   const wilaya = wilayaCode ? getWilaya(wilayaCode) : null;
-  const preferredCropKey = (authProfile?.preferredCrop as CropKey | undefined) ?? wilaya?.crops[0];
+  // The onboarding farm step stores the explicit crop choice on the local
+  // profile (gateway sessions) and in Firestore (Firebase sessions); the
+  // wilaya default only fills the gap when the step was skipped.
+  const preferredCropKey =
+    (profile?.preferredCrop as CropKey | undefined) ??
+    (authProfile?.preferredCrop as CropKey | undefined) ??
+    wilaya?.crops[0];
+  const landSizeHa = profile?.landSizeHa ?? authProfile?.landSizeHa ?? null;
   const role = profile?.role ?? (authProfile?.role as string | null) ?? null;
 
   const buildContext = useCallback(
@@ -189,6 +196,7 @@ export default function AssistantView() {
         preferredCropKey && preferredCropKey in CROPS
           ? CROPS[preferredCropKey as CropKey][lang]
           : null,
+      landSizeHa,
       role,
       lang,
       displayName: guestActive
@@ -199,6 +207,7 @@ export default function AssistantView() {
       wilayaCode,
       wilaya,
       preferredCropKey,
+      landSizeHa,
       role,
       lang,
       guestActive,

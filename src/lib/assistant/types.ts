@@ -16,6 +16,8 @@ export interface AssistantContext {
   wilayaName?: string | null;
   /** Preferred crop label (Arabic) resolved on the client. */
   crop?: string | null;
+  /** Farm/plot size in hectares, collected during the onboarding farm step. */
+  landSizeHa?: number | null;
   /** Profile role: farmer | agronomist | investor. */
   role?: string | null;
   /** UI language, drives the answer language (ar default). */

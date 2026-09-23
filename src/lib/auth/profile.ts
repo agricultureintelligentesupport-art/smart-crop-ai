@@ -27,6 +27,10 @@ export interface StoredProfile {
   phone?: string;
   role: AuthRole | null;
   wilayaCode: string | null;
+  /** Preferred crop key from the farm step (optional — null when skipped). */
+  preferredCrop?: string | null;
+  /** Farm/plot size in hectares from the farm step (null when skipped). */
+  landSizeHa?: number | null;
   lang?: Lang;
   /** Provider avatar (Google) so the app can greet the real person. */
   photoURL?: string | null;
@@ -95,6 +99,8 @@ export function profileFromUser(user: SessionUser, extra: Partial<StoredProfile>
     phone: user.phone,
     role: user.role,
     wilayaCode: user.wilayaCode,
+    preferredCrop: user.preferredCrop ?? null,
+    landSizeHa: user.landSizeHa ?? null,
     photoURL: user.photoURL ?? null,
     updatedAt: Date.now(),
     ...extra,
@@ -108,6 +114,8 @@ export function profileFromUser(user: SessionUser, extra: Partial<StoredProfile>
 export interface DevicePrefs {
   role: AuthRole | null;
   wilayaCode: string | null;
+  preferredCrop?: string | null;
+  landSizeHa?: number | null;
   lang?: Lang;
 }
 
@@ -122,6 +130,8 @@ export function readPrefs(): DevicePrefs {
     return {
       role: (parsed.role as AuthRole | null) ?? null,
       wilayaCode: typeof parsed.wilayaCode === "string" ? parsed.wilayaCode : null,
+      preferredCrop: typeof parsed.preferredCrop === "string" ? parsed.preferredCrop : null,
+      landSizeHa: typeof parsed.landSizeHa === "number" ? parsed.landSizeHa : null,
       lang: parsed.lang,
     };
   } catch {

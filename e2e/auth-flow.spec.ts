@@ -39,7 +39,7 @@ async function openEmailChannel(page: Page) {
   await page.getByRole("tab", { name: "البريد الإلكتروني" }).click();
 }
 
-/** Walks method → role → wilaya → success and returns on the success panel. */
+/** Walks method → role → wilaya → farm (skipped) → success and returns on the success panel. */
 async function completeSetup(page: Page, wilaya = "بسكرة") {
   await page.getByRole("heading", { name: "تحديد صفة المستخدم" }).waitFor();
   await page.getByRole("radio", { name: /صاحب مزرعة/ }).click();
@@ -48,6 +48,9 @@ async function completeSetup(page: Page, wilaya = "بسكرة") {
   await page.getByRole("searchbox", { name: "البحث عن ولاية" }).fill(wilaya);
   await page.getByRole("button", { name: new RegExp(wilaya) }).first().click();
   await page.getByRole("button", { name: "تأكيد الولاية" }).click();
+  // The farm step is optional: existing flows skip it.
+  await page.getByRole("heading", { name: "مزرعتك" }).waitFor();
+  await page.getByRole("button", { name: "تخطي", exact: true }).click();
   await page.getByRole("heading", { name: /أهلاً بك/ }).waitFor();
 }
 

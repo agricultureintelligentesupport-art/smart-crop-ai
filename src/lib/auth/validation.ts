@@ -102,3 +102,28 @@ export function isCompleteOtp(code: string): boolean {
 export function otpDigits(raw: string): string[] {
   return raw.replace(/\D/g, "").slice(0, OTP_LENGTH).split("");
 }
+
+/* ------------------------------------------------------------------ */
+/*  Farm profile (onboarding step 4)                                   */
+/* ------------------------------------------------------------------ */
+
+/** Sanity ceiling for a parcel size, in hectares. */
+export const MAX_LAND_HA = 1_000_000;
+
+/**
+ * Parses a farm-size input into hectares. Accepts latin + Arabic-Indic digits
+ * (`٢.٥`), comma or Arabic decimal separators (`2,5` / `٢٫٥`). Returns the
+ * positive number, or `null` when the input is empty or invalid (zero,
+ * negative, non-numeric or absurdly large).
+ */
+export function parseLandSizeHa(raw: string): number | null {
+  const normalized = raw
+    .replace(/[٠-٩]/g, (d) => String("٠١٢٣٤٥٦٧٨٩".indexOf(d)))
+    .replace(/[٫,]/g, ".")
+    .trim();
+  if (!normalized) return null;
+  if (!/^\d*\.?\d+$/.test(normalized)) return null;
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_LAND_HA) return null;
+  return value;
+}

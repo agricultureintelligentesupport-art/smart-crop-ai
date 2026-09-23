@@ -25,6 +25,7 @@ export interface UserProfile {
   wilaya?: string | null;
   wilayaCode?: string | null;
   preferredCrop?: string | null;
+  landSizeHa?: number | null;
   [key: string]: unknown;
 }
 
@@ -35,6 +36,7 @@ export interface AuthContextType {
   role: string | null;
   wilaya: string | null;
   preferredCrop: string | null;
+  landSizeHa: number | null;
   signOut: () => Promise<void>;
   updateProfile: (data: Partial<UserProfile>) => Promise<void>;
 }
@@ -46,6 +48,7 @@ export const AuthContext = createContext<AuthContextType>({
   role: null,
   wilaya: null,
   preferredCrop: null,
+  landSizeHa: null,
   signOut: async () => {},
   updateProfile: async () => {},
 });
@@ -129,6 +132,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     email: currentUser.email ?? undefined,
                     role,
                     wilayaCode: wilaya,
+                    preferredCrop: (data.preferredCrop as string | null) ?? null,
+                    landSizeHa: (data.landSizeHa as number | null) ?? null,
                     updatedAt: Date.now(),
                   };
                   writeProfile(stored);
@@ -193,6 +198,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const wilaya = profile?.wilaya ?? profile?.wilayaCode ?? null;
   const preferredCrop =
     profile?.preferredCrop ?? (profile?.crop as string | null) ?? (profile?.preferred_crop as string | null) ?? null;
+  const landSizeHa = profile?.landSizeHa ?? null;
 
   return (
     <AuthContext.Provider
@@ -203,6 +209,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         role,
         wilaya,
         preferredCrop,
+        landSizeHa,
         signOut,
         updateProfile,
       }}
