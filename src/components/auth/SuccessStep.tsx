@@ -1,8 +1,9 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Gauge, MapPin, ShieldCheck, Sparkles, UserRound } from "lucide-react";
-import { DEFAULT_WILAYA_CODE, getWilaya, wilayaName } from "@/lib/wilayas";
+import { ArrowLeft, ArrowRight, Check, Gauge, MapPin, Ruler, ShieldCheck, Sparkles, UserRound, Wheat } from "lucide-react";
+import { CROPS, DEFAULT_WILAYA_CODE, getWilaya, wilayaName } from "@/lib/wilayas";
+import { interpolate } from "@/lib/auth/copy";
 import type { FlowController } from "./useAuthFlow";
 import { EASE_OUT, GPU, GhostButton, PrimaryButton, SPRING } from "./ui";
 
@@ -23,10 +24,16 @@ export default function SuccessStep({ flow }: { flow: FlowController }) {
         ? t.method.channelPhone
         : t.method.channelEmail;
 
+  const cropLabel = flow.crop ? CROPS[flow.crop][lang] : t.success.skipped;
+  const landLabel =
+    flow.landSizeHa != null ? interpolate(t.success.landValue, { n: flow.landSizeHa }) : t.success.skipped;
+
   const rows = [
     { icon: ShieldCheck, label: t.success.summaryMethod, value: methodLabel },
     { icon: UserRound, label: t.success.summaryRole, value: roleLabel },
     { icon: MapPin, label: t.success.summaryWilaya, value: `${wilayaName(wilaya, lang)} (${wilaya.code})` },
+    { icon: Wheat, label: t.success.summaryCrop, value: cropLabel },
+    { icon: Ruler, label: t.success.summaryLand, value: landLabel },
   ];
 
   return (

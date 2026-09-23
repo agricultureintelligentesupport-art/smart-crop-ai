@@ -55,6 +55,8 @@ interface DemoUser {
   passwordHash?: string;
   role: SessionUser["role"];
   wilayaCode: string | null;
+  preferredCrop?: string | null;
+  landSizeHa?: number | null;
 }
 
 function delay<T>(value: T, ms = LATENCY_MS): Promise<T> {
@@ -111,6 +113,8 @@ function toSession(user: DemoUser, method: SessionUser["method"]): SessionUser {
     phone: user.phone,
     role: user.role,
     wilayaCode: user.wilayaCode,
+    preferredCrop: user.preferredCrop ?? null,
+    landSizeHa: user.landSizeHa ?? null,
   };
 }
 
@@ -247,6 +251,8 @@ export function createDemoGateway(): AuthGateway {
       if (patch.wilayaCode !== undefined && getWilaya(patch.wilayaCode)) {
         entry.wilayaCode = patch.wilayaCode;
       }
+      if (patch.preferredCrop !== undefined) entry.preferredCrop = patch.preferredCrop;
+      if (patch.landSizeHa !== undefined) entry.landSizeHa = patch.landSizeHa;
       writeUsers(users);
       return delay(toSession(entry, "email"), 420);
     },

@@ -89,6 +89,8 @@ export function isSwitchingAccounts(
 export interface SessionBinding {
   role: SessionUser["role"];
   wilayaCode: SessionUser["wilayaCode"];
+  preferredCrop: SessionUser["preferredCrop"];
+  landSizeHa: SessionUser["landSizeHa"];
   /** True when the cached identity was discarded (account switch). */
   uidChanged: boolean;
 }
@@ -106,7 +108,7 @@ export interface SessionBinding {
  * silently inheriting the previous account's role + wilaya.
  */
 export function resolveSessionBinding(
-  session: Pick<SessionUser, "uid" | "role" | "wilayaCode">,
+  session: Pick<SessionUser, "uid" | "role" | "wilayaCode" | "preferredCrop" | "landSizeHa">,
   previous: StoredProfile | null,
   device: DevicePrefs | null,
 ): SessionBinding {
@@ -114,12 +116,16 @@ export function resolveSessionBinding(
     return {
       role: session.role ?? null,
       wilayaCode: session.wilayaCode ?? null,
+      preferredCrop: session.preferredCrop ?? null,
+      landSizeHa: session.landSizeHa ?? null,
       uidChanged: true,
     };
   }
   return {
     role: session.role ?? previous?.role ?? device?.role ?? null,
     wilayaCode: session.wilayaCode ?? previous?.wilayaCode ?? device?.wilayaCode ?? null,
+    preferredCrop: session.preferredCrop ?? previous?.preferredCrop ?? device?.preferredCrop ?? null,
+    landSizeHa: session.landSizeHa ?? previous?.landSizeHa ?? device?.landSizeHa ?? null,
     uidChanged: false,
   };
 }

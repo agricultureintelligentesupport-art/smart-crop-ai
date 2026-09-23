@@ -72,7 +72,7 @@ export default function AuthShell({
             <StepLadder
               plan={plan}
               current={current}
-              labels={{ method: t.steps.method, role: t.steps.role, location: t.steps.location }}
+              labels={{ method: t.steps.method, role: t.steps.role, location: t.steps.location, farm: t.steps.farm }}
               ariaLabel={t.steps.aria}
               stepWord={t.steps.stepWord}
               ofWord={t.steps.ofWord}
