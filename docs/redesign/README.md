@@ -41,9 +41,16 @@ src/components/app/
 └── Sheet.tsx      # bottom sheet: drag-to-dismiss, focus trap, Escape handling
 src/components/dashboard/
 ├── HeroCard.tsx     # today's decision (water volume, window, advice)
-├── QuickActions.tsx # thumb-zone section jumps
-└── AccountSheet.tsx # identity + personalisation + intro entry point
+└── AccountSheet.tsx # identity + personalisation + language + sign-out + intro
 ```
+
+## Update — settings live only in the account sheet
+
+Language switch, sign-out and the wilaya "تعديل" entry were removed from the
+top bar / dashboard card and relocated into the account sheet ("حسابي" tab):
+same components, same handlers, new home. The "وصول سريع" quick-action row was
+removed outright — its tiles were in-page scroll shortcuts, and every target
+section (tasks, calculator, scan) is still on the dashboard itself.
 
 Surfaces, sliders, safe-area and scroll-padding contracts live in
 `src/app/globals.css` under "App shell". All new surfaces inherit the existing

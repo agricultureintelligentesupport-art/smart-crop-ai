@@ -187,6 +187,9 @@ const flows = {
       await registerFresh(page);
       log("seeded account, signing out");
 
+      // Sign-out lives in the account sheet ("حسابي" tab) since the header
+      // relocation.
+      await page.getByRole("button", { name: "حسابي" }).click();
       await page.getByRole("button", { name: "تسجيل الخروج" }).click();
       await page.waitForURL(/\/auth/, { timeout: 20000 });
       await shot(page, "15a-signed-out");

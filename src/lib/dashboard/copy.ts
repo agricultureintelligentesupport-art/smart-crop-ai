@@ -21,7 +21,7 @@ export interface DashboardCopy {
     langAr: string;
     langFr: string;
   };
-  /** Native app-shell vocabulary: hero decision card, quick actions, sections. */
+  /** Native app-shell vocabulary: hero decision card, sections. */
   hero: {
     eyebrow: string;
     needLabel: string;
@@ -29,14 +29,6 @@ export interface DashboardCopy {
     window: string;
     /** Time range of the day's best irrigation window (LTR-pinned in the UI). */
     windowValue: string;
-  };
-  quick: {
-    title: string;
-    scan: string;
-    irrigation: string;
-    tasks: string;
-    /** Accessible label for a quick action: "انتقل إلى {target}". */
-    goTo: string;
   };
   sections: {
     weather: string;
@@ -46,6 +38,7 @@ export interface DashboardCopy {
     title: string;
     subtitle: string;
     personalization: string;
+    language: string;
     intro: string;
     introHint: string;
     about: string;
@@ -60,8 +53,6 @@ export interface DashboardCopy {
     wilaya: string;
     role: string;
     savedNote: string;
-    edit: string;
-    close: string;
     search: string;
     searchPlaceholder: string;
     noResults: string;
@@ -171,13 +162,6 @@ const AR: DashboardCopy = {
     window: "نافذة السقي",
     windowValue: "05:30 — 08:30",
   },
-  quick: {
-    title: "وصول سريع",
-    scan: "تشخيص ورقة",
-    irrigation: "حاسبة السقي",
-    tasks: "مهام اليوم",
-    goTo: "انتقل إلى {target}",
-  },
   sections: {
     weather: "الطقس والسقي",
     field: "صحة النبات",
@@ -186,6 +170,7 @@ const AR: DashboardCopy = {
     title: "حسابي",
     subtitle: "خصّص الولاية والصفة؛ تتحدّث كل أرقام اللوحة فوراً.",
     personalization: "التخصيص",
+    language: "اللغة",
     intro: "الشاشة التعريفية",
     introHint: "أعد مشاهدة الجولة التعريفية بميزات التطبيق.",
     about: "حول التطبيق",
@@ -200,8 +185,6 @@ const AR: DashboardCopy = {
     wilaya: "الولاية",
     role: "الصفة",
     savedNote: "حُفظت اختياراتك على هذا الجهاز.",
-    edit: "تعديل",
-    close: "إغلاق",
     search: "بحث",
     searchPlaceholder: "اسم الولاية أو رقمها…",
     noResults: "لا نتائج",
@@ -342,13 +325,6 @@ const FR: DashboardCopy = {
     window: "Fenêtre d'irrigation",
     windowValue: "05:30 — 08:30",
   },
-  quick: {
-    title: "Accès rapide",
-    scan: "Scanner une feuille",
-    irrigation: "Calculateur d'irrigation",
-    tasks: "Tâches du jour",
-    goTo: "Aller à {target}",
-  },
   sections: {
     weather: "Météo et eau",
     field: "Santé des cultures",
@@ -357,6 +333,7 @@ const FR: DashboardCopy = {
     title: "Mon profil",
     subtitle: "Choisissez wilaya et profil : tous les chiffres suivent aussitôt.",
     personalization: "Personnalisation",
+    language: "Langue",
     intro: "Écran de présentation",
     introHint: "Revoir la visite guidée des fonctionnalités.",
     about: "À propos",
@@ -371,8 +348,6 @@ const FR: DashboardCopy = {
     wilaya: "Wilaya",
     role: "Profil",
     savedNote: "Vos choix sont enregistrés sur cet appareil.",
-    edit: "Modifier",
-    close: "Fermer",
     search: "Recherche",
     searchPlaceholder: "Nom ou numéro de wilaya…",
     noResults: "Aucun résultat",

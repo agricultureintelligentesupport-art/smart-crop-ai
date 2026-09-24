@@ -1,14 +1,12 @@
 "use client";
 
 import { useMotionValueEvent, useScroll } from "framer-motion";
-import { Leaf, LogOut, MapPin, Settings2, Sprout } from "lucide-react";
+import { Leaf, MapPin, Sprout } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import AppBar, { AppBarAction, AppBarBrand } from "@/components/app/AppBar";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
-import LanguageSwitch from "@/components/auth/LanguageSwitch";
-import { FOCUS_RING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
 import { APP_SHELL } from "@/lib/app/copy";
@@ -23,7 +21,6 @@ import AccountSheet from "./AccountSheet";
 import FieldTasksCard from "./FieldTasksCard";
 import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
-import QuickActions, { type QuickTarget } from "./QuickActions";
 import SatelliteCard from "./SatelliteCard";
 import ScanCard from "./ScanCard";
 import WeatherCard, { fmt } from "./WeatherCard";
@@ -31,18 +28,17 @@ import { SectionHeader } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
 
-/** How long a jump target keeps its focus ring after a quick action. */
-const HIGHLIGHT_MS = 1400;
-
 /**
  * The live member dashboard, rendered by `/dashboard`. Every number reacts to
  * the wilaya + crop + parcel inputs, so the page is fully operational without
  * a backend: it is seeded, deterministic and clearly labelled as an estimate.
  *
  * Presentation is a native app shell: a translucent top bar, one scroll region
- * holding a large title, a hero decision card, thumb-zone quick actions and
- * grouped card sections, then a bottom tab bar. All state, derivations and
- * handlers below are unchanged — only what wraps them is.
+ * holding a large title, a hero decision card and grouped card sections, then
+ * a bottom tab bar. Language switching, sign-out and wilaya editing live in
+ * the account sheet ("حسابي" tab) — same handlers as before, relocated. All
+ * state, derivations and handlers below are unchanged — only what wraps them
+ * is.
  *
  * Session-gated with a guest escape hatch: an authenticated user (Google,
  * phone or e-mail — Firebase session or gateway-backed on-device session)
@@ -140,25 +136,6 @@ export default function DashboardView() {
   const { scrollY } = useScroll({ container: scrollRef });
   useMotionValueEvent(scrollY, "change", (value) => setElevated(value > 8));
 
-  /** Quick-action jump targets + the ring that answers "where did I land?". */
-  const tasksRef = useRef<HTMLDivElement | null>(null);
-  const irrigationRef = useRef<HTMLDivElement | null>(null);
-  const scanRef = useRef<HTMLDivElement | null>(null);
-  const [highlight, setHighlight] = useState<QuickTarget | null>(null);
-  const highlightTimer = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
-  }, []);
-
-  const jumpTo = useCallback((target: QuickTarget) => {
-    const node =
-      target === "scan" ? scanRef.current : target === "irrigation" ? irrigationRef.current : tasksRef.current;
-    node?.scrollIntoView({ behavior: "smooth", block: "start" });
-    setHighlight(target);
-    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
-    highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
-  }, []);
-
   // The "حسابي" tab deep-links to the dashboard with `#account` from other
   // screens. Read through the URL (hydration-safe, no state mirrored from an
   // effect) so the sheet can be opened, closed and re-opened by navigation.
@@ -179,9 +156,6 @@ export default function DashboardView() {
     }
     setOpenPersonalize(false);
   };
-
-  const ring = (target: QuickTarget) =>
-    highlight === target ? "rounded-[1.5rem] ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-[#f4f8f5]" : "";
 
   const advice = {
     line1: t.advice.line1
@@ -217,20 +191,6 @@ export default function DashboardView() {
               />
             }
           />
-        }
-        trailing={
-          <>
-            <LanguageSwitch
-              lang={lang}
-              onChange={setLang}
-              ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-              labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-              layoutId="dashboard-lang-thumb"
-            />
-            <AppBarAction label={t.header.signOut} onClick={() => void signOut()}>
-              <LogOut size={18} strokeWidth={2.4} aria-hidden />
-            </AppBarAction>
-          </>
         }
       />
 
@@ -268,44 +228,26 @@ export default function DashboardView() {
                   )}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => (accountOpen ? closeAccount() : setOpenPersonalize(true))}
-                aria-expanded={accountOpen}
-                className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-3.5 text-[12px] font-black text-emerald-800 ring-1 ring-emerald-100 transition-colors hover:bg-emerald-100/80 ${FOCUS_RING}`}
-              >
-                <Settings2 size={14} strokeWidth={2.8} aria-hidden />
-                {accountOpen ? t.personalize.close : t.personalize.edit}
-              </button>
             </div>
           </header>
 
-          {/* Today's decision + thumb-zone shortcuts */}
+          {/* Today's decision card */}
           <HeroCard t={t} irrigation={irrigation} cropLabel={CROPS[crop][lang]} advice={advice} />
 
-          <QuickActions t={t} onJump={jumpTo} />
-
-          <div ref={tasksRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("tasks")}`}>
-            <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
-          </div>
+          <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
 
           {/* Weather + water calculator */}
           <section id="section-weather" aria-label={t.sections.weather} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.weather} />
             <div className="grid gap-3 lg:grid-cols-2">
               <WeatherCard t={t} lang={lang} weather={weather} />
-              <div
-                ref={irrigationRef}
-                className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("irrigation")}`}
-              >
-                <IrrigationCard
-                  t={t}
-                  lang={lang}
-                  wilayaCode={wilayaCode}
-                  areaHa={areaHa}
-                  onAreaChange={setAreaHa}
-                />
-              </div>
+              <IrrigationCard
+                t={t}
+                lang={lang}
+                wilayaCode={wilayaCode}
+                areaHa={areaHa}
+                onAreaChange={setAreaHa}
+              />
             </div>
           </section>
 
@@ -314,9 +256,7 @@ export default function DashboardView() {
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
               <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-              <div ref={scanRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("scan")}`}>
-                <ScanCard t={t} wilayaCode={wilayaCode} />
-              </div>
+              <ScanCard t={t} wilayaCode={wilayaCode} />
             </div>
           </section>
 
@@ -342,6 +282,8 @@ export default function DashboardView() {
         wilayaCode={wilayaCode}
         onWilayaChange={updateWilaya}
         onRoleChange={updateRole}
+        onLangChange={setLang}
+        onSignOut={() => void signOut()}
       />
     </div>
   );

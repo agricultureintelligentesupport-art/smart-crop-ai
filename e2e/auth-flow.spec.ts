@@ -288,6 +288,7 @@ test.describe("email sign-in", () => {
     await expect(page).toHaveURL(/\/dashboard/);
 
     // Sign out and come back with a bad password
+    await openAccountSheet(page);
     await page.getByRole("button", { name: "تسجيل الخروج" }).click();
     await expect(page).toHaveURL(/\/auth/);
     await openEmailChannel(page);
@@ -312,6 +313,7 @@ test.describe("email sign-in", () => {
     await page.getByRole("button", { name: "إنشاء الحساب" }).click();
     await completeSetup(page);
     await page.getByRole("button", { name: /الدخول إلى لوحة التحكم/ }).click();
+    await openAccountSheet(page);
     await page.getByRole("button", { name: "تسجيل الخروج" }).click();
 
     // Known device (role + wilaya remembered) → the ladder collapses to one step
@@ -340,6 +342,15 @@ async function openDashboard(page: Page, wilaya = "بسكرة") {
   await completeSetup(page, wilaya);
   await page.getByRole("button", { name: /الدخول إلى لوحة التحكم/ }).click();
   await expect(page).toHaveURL(/\/dashboard/);
+}
+
+/**
+ * Opens the account sheet from the "حسابي" tab — since the header
+ * relocation, the language switch, sign-out and wilaya picker all live there.
+ */
+async function openAccountSheet(page: Page) {
+  await page.getByRole("button", { name: "حسابي" }).click();
+  await expect(page.getByRole("dialog", { name: "حسابي" })).toBeVisible();
 }
 
 test.describe("dashboard session guard", () => {
@@ -371,6 +382,7 @@ test.describe("dashboard session guard", () => {
 
     // Signing out from the guest dashboard wipes the flag and returns to
     // the wizard — no guest session survives the wipe.
+    await openAccountSheet(page);
     await page.getByRole("button", { name: /تسجيل الخروج/ }).click();
     await expect(page).toHaveURL(/\/auth/);
     await page.goto("/dashboard");
@@ -427,7 +439,8 @@ test.describe("member dashboard", () => {
 
   test("personalising the wilaya updates the header and can be persisted", async ({ page }) => {
     await openDashboard(page);
-    await page.getByRole("button", { name: /تعديل/ }).click();
+    // The wilaya picker lives in the account sheet since the header relocation.
+    await openAccountSheet(page);
     const picker = page.getByRole("button", { name: /الولاية/ });
     await expect(picker).toBeVisible();
     await picker.click();
@@ -462,7 +475,10 @@ test.describe("bilingual chrome", () => {
 
   test("French dashboard copy is complete", async ({ page }) => {
     await openDashboard(page);
+    // The language switch lives in the account sheet since the header relocation.
+    await openAccountSheet(page);
     await page.getByRole("button", { name: "Français" }).click();
+    await page.keyboard.press("Escape"); // close the sheet, inspect the dashboard behind it
     await expect(page.getByRole("heading", { name: "Météo et besoin en eau" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Calculateur d'irrigation" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Diagnostic de la feuille" })).toBeVisible();

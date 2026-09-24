@@ -1,8 +1,9 @@
 "use client";
 
-import { ChevronLeft, Compass, Info, Leaf, Sprout, UserRound } from "lucide-react";
+import { ChevronLeft, Compass, Info, Languages, Leaf, LogOut, Sprout, UserRound } from "lucide-react";
 import Link from "next/link";
 import Sheet from "@/components/app/Sheet";
+import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { FOCUS_RING } from "@/components/auth/ui";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import type { AuthRole } from "@/lib/auth/types";
@@ -11,10 +12,10 @@ import WilayaSelect from "./WilayaSelect";
 import { Chip, Segmented } from "./parts";
 
 /**
- * Account & personalisation sheet, opened from the "حسابي" tab or the context
- * row's "تعديل" button. Holds the identity recap, the wilaya / role controls
- * (the same handlers as before — no logic lives here) and the way back to the
- * intro screen, which used to be a header icon.
+ * Account & personalisation sheet, opened from the "حسابي" tab. Holds the
+ * identity recap, the wilaya / role controls, the language switch and the
+ * sign-out action (all relocated here from the top bar — the same handlers as
+ * before, no logic lives here) and the way back to the intro screen.
  */
 export default function AccountSheet({
   open,
@@ -27,6 +28,8 @@ export default function AccountSheet({
   wilayaCode,
   onWilayaChange,
   onRoleChange,
+  onLangChange,
+  onSignOut,
 }: {
   open: boolean;
   onClose: () => void;
@@ -39,6 +42,10 @@ export default function AccountSheet({
   wilayaCode: string;
   onWilayaChange: (code: string) => void;
   onRoleChange: (role: AuthRole) => void;
+  /** Same setter the header switch used — relocation only. */
+  onLangChange: (lang: Lang) => void;
+  /** Same handler the header sign-out button used — relocation only. */
+  onSignOut: () => void;
 }) {
   const wilaya = getWilaya(wilayaCode);
 
@@ -90,6 +97,24 @@ export default function AccountSheet({
           </p>
         </section>
 
+        {/* Language — relocated from the top bar; same switch, same handler */}
+        <div className="app-tile flex items-center gap-3 p-3 ps-3.5">
+          <span
+            aria-hidden
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-[0.85rem] bg-white text-emerald-700 ring-1 ring-[rgba(6,78,59,0.08)]"
+          >
+            <Languages size={18} strokeWidth={2.4} />
+          </span>
+          <span className="min-w-0 flex-1 text-[13.5px] font-black text-emerald-950">{t.account.language}</span>
+          <LanguageSwitch
+            lang={lang}
+            onChange={onLangChange}
+            ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
+            labels={{ ar: t.header.langAr, fr: t.header.langFr }}
+            layoutId="dashboard-lang-thumb"
+          />
+        </div>
+
         {/* Intro screen — the entry point that used to sit in the header */}
         <Link
           href="/"
@@ -109,6 +134,21 @@ export default function AccountSheet({
           </span>
           <ChevronLeft size={18} strokeWidth={2.6} aria-hidden className="shrink-0 text-emerald-700/60 rtl:rotate-0 ltr:rotate-180" />
         </Link>
+
+        {/* Sign out — relocated from the top bar; same handler, new home */}
+        <button
+          type="button"
+          onClick={onSignOut}
+          className={`app-tile flex w-full items-center gap-3 p-3 ps-3.5 text-start transition-colors hover:border-emerald-300 ${FOCUS_RING}`}
+        >
+          <span
+            aria-hidden
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-[0.85rem] bg-white text-emerald-700 ring-1 ring-[rgba(6,78,59,0.08)]"
+          >
+            <LogOut size={18} strokeWidth={2.4} />
+          </span>
+          <span className="min-w-0 flex-1 text-[13.5px] font-black text-emerald-950">{t.header.signOut}</span>
+        </button>
 
         {/* About */}
         <div className="flex flex-col gap-2 rounded-[1.1rem] bg-[#f4f8f5] p-3.5">
