@@ -91,6 +91,8 @@ export interface DashboardCopy {
     sourceNote: string;
     /** Live-mode source note (Open-Meteo data). */
     sourceNoteLive: string;
+    /** Peak badge above the highest bar / point, e.g. "أعلى 33°". `{value}` is the formatted value. */
+    peakLabel: string;
   };
   quick: {
     title: string;
@@ -295,6 +297,7 @@ const AR: DashboardCopy = {
       "المدخلات: قيم مناخية مرجعية طويلة المدى للولاية محفوظة في التطبيق (تعذّر الوصول إلى المصدر الحيّ الآن)، ومعاملات ثابتة للمحصول والتربة والنظام.",
     sourceNoteLive:
       "المدخلات: قراءات حيّة من Open-Meteo (حرارة، رطوبة، رياح، احتمال مطر) محدّثة كل ساعة، ومعاملات ثابتة للمحصول والتربة والنظام. عند تعذّر المصدر تُعرض القيم المرجعية تلقائياً.",
+    peakLabel: "أعلى {value}",
   },
   quick: {
     title: "وصول سريع",
@@ -527,6 +530,7 @@ const FR: DashboardCopy = {
       "Données d'entrée : valeurs climatiques de référence à long terme de la wilaya, conservées dans l'application (source en direct indisponible pour l'instant), et coefficients fixes pour la culture, le sol et le système.",
     sourceNoteLive:
       "Données d'entrée : relevés en direct Open-Meteo (température, humidité, vent, risque de pluie), actualisés chaque heure, et coefficients fixes culture/sol/système. En cas d'indisponibilité, les valeurs de référence s'affichent automatiquement.",
+    peakLabel: "Max {value}",
   },
   quick: {
     title: "Accès rapide",
