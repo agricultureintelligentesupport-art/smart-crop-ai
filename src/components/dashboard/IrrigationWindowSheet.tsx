@@ -1,5 +1,6 @@
 "use client";
 
+import { motion, useReducedMotion } from "framer-motion";
 import {
   Check,
   Circle,
@@ -8,10 +9,12 @@ import {
   Droplets,
   Info,
   Thermometer,
+  TrendingDown,
+  TrendingUp,
   Waves,
   Wind,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import Sheet from "@/components/app/Sheet";
 import type {
   DayPoint,
@@ -30,7 +33,7 @@ import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, SOILS, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
 import type { WeatherSource } from "@/lib/weather/useLiveWeather";
 import { fmt } from "./WeatherCard";
-import { Chip, Metric } from "./parts";
+import { Chip } from "./parts";
 
 /**
  * Irrigation-window detail sheet, opened from the "نافذة السقي" tile in the
@@ -149,12 +152,24 @@ export default function IrrigationWindowSheet({
     { id: "calm", title: d.ruleCalmTitle, text: d.ruleCalmText },
   ] as const;
 
+  // Micro trend indicators: direction of the real hourly series (last vs first
+  // point of the same `hours` array the charts draw). Purely visual — no new numbers.
+  const trendOf = (pick: (h: WeatherSnapshot["hours"][number]) => number | null | undefined) => {
+    const series = hours.map(pick).filter((v): v is number => typeof v === "number");
+    if (series.length < 2) return 0;
+    return Math.sign(series[series.length - 1] - series[0]);
+  };
+  const tempTrend = trendOf((h) => h.tempC);
+  const humidityTrend = isLive ? trendOf((h) => h.humidity) : 0;
+  const windTrend = isLive ? trendOf((h) => h.windKph) : 0;
+  const peak = (value: string) => fill(d.peakLabel, { value });
+
   return (
     <Sheet open={open} onClose={onClose} title={d.title} subtitle={d.subtitle} lang={lang}>
       <div className="flex flex-col gap-5">
         {/* Decision recap — the two numbers the hero promotes, verbatim */}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="app-tile rounded-[1rem] px-3 py-2.5">
+        <Reveal index={0} className="grid grid-cols-2 gap-2">
+          <div className={GLASS_TILE}>
             <p className="flex items-center gap-1 text-[10.5px] font-bold tracking-wide text-emerald-800/65">
               <Clock size={11} strokeWidth={2.8} aria-hidden />
               {d.windowLabel}
@@ -163,7 +178,7 @@ export default function IrrigationWindowSheet({
               {t.hero.windowValue}
             </p>
           </div>
-          <div className="app-tile rounded-[1rem] px-3 py-2.5">
+          <div className={GLASS_TILE}>
             <p className="flex items-center gap-1 text-[10.5px] font-bold tracking-wide text-emerald-800/65">
               <Waves size={11} strokeWidth={2.8} aria-hidden />
               {d.volumeLabel}
@@ -175,10 +190,10 @@ export default function IrrigationWindowSheet({
               {d.perHaLabel} · <span dir="ltr" className="tabular-nums">{fmt(litresPerHaDay)} L</span>
             </p>
           </div>
-        </div>
+        </Reveal>
 
         {/* Why the early-morning window — the app's real advisory rules, evaluated live */}
-        <section aria-label={d.whyTitle} className="flex flex-col gap-2.5">
+        <Reveal as="section" index={1} aria-label={d.whyTitle} className="flex flex-col gap-2.5">
           <h3 className="px-1 text-[12px] font-black tracking-wide text-emerald-800/65">
             {d.whyTitle}
           </h3>
@@ -191,10 +206,10 @@ export default function IrrigationWindowSheet({
               return (
                 <div
                   key={rule.id}
-                  className={`flex items-start gap-2.5 rounded-[1rem] p-3 ring-1 ${
+                  className={`flex items-start gap-2.5 rounded-[1rem] p-3 ring-1 transition-all duration-300 ${
                     active
-                      ? "bg-emerald-50 ring-emerald-200"
-                      : "bg-[#f6faf7] ring-[rgba(6,78,59,0.07)] opacity-75"
+                      ? "bg-emerald-50 ring-emerald-200 shadow-[0_0_0_4px_rgba(16,185,129,0.08)]"
+                      : "bg-[#f6faf7] ring-[rgba(6,78,59,0.07)] opacity-75 hover:opacity-100"
                   }`}
                 >
                   <span className={`mt-[2px] shrink-0 ${active ? "text-emerald-600" : "text-emerald-900/30"}`}>
@@ -218,10 +233,10 @@ export default function IrrigationWindowSheet({
             })}
           </div>
           <p className="px-1 text-[10.5px] font-semibold leading-5 text-emerald-900/50">{d.rulesNote}</p>
-        </section>
+        </Reveal>
 
         {/* The real inputs — same series/values WeatherCard shows, with honest granularity */}
-        <section aria-label={d.dataTitle} className="flex flex-col gap-2.5">
+        <Reveal as="section" index={2} aria-label={d.dataTitle} className="flex flex-col gap-2.5">
           <h3 className="px-1 text-[12px] font-black tracking-wide text-emerald-800/65">
             {d.dataTitle}
           </h3>
@@ -231,6 +246,7 @@ export default function IrrigationWindowSheet({
 
           <div className="grid gap-2.5 sm:grid-cols-2">
             <ChartFigure
+              index={0}
               title={d.hoursTempTitle}
               icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
               note={isLive ? d.hoursLiveNote : d.hoursTempNote}
@@ -239,9 +255,11 @@ export default function IrrigationWindowSheet({
                 points={hours.map((h) => ({ label: h.label, value: h.tempC }))}
                 format={(v) => `${fmt(v, 0)}°`}
                 label={`${d.hoursTempTitle} (${wilayaName})`}
+                peakLabel={peak}
               />
             </ChartFigure>
             <ChartFigure
+              index={1}
               title={d.hoursRainTitle}
               icon={<CloudRain size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
               note={isLive ? d.hoursLiveNote : d.hoursRainNote}
@@ -250,11 +268,13 @@ export default function IrrigationWindowSheet({
                 points={hours.map((h) => ({ label: h.label, value: h.rainPct }))}
                 format={(v) => `${fmt(v)}%`}
                 label={`${d.hoursRainTitle} (${wilayaName})`}
+                peakLabel={peak}
               />
             </ChartFigure>
             {/* Live source only: real hourly humidity/wind forecasts exist then. */}
             {isLive && (
               <ChartFigure
+                index={2}
                 title={d.humidityChartTitle}
                 icon={<Droplets size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
                 note={d.hoursLiveNote}
@@ -264,11 +284,13 @@ export default function IrrigationWindowSheet({
                   format={(v) => `${fmt(v)}%`}
                   tone="amber"
                   label={`${d.humidityChartTitle} (${wilayaName})`}
+                  peakLabel={peak}
                 />
               </ChartFigure>
             )}
             {isLive && (
               <ChartFigure
+                index={3}
                 title={d.windChartTitle}
                 icon={<Wind size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
                 note={d.hoursLiveNote}
@@ -278,12 +300,14 @@ export default function IrrigationWindowSheet({
                   format={(v) => `${fmt(v)} km/h`}
                   tone="emerald"
                   label={`${d.windChartTitle} (${wilayaName})`}
+                  peakLabel={peak}
                 />
               </ChartFigure>
             )}
           </div>
 
           <ChartFigure
+            index={4}
             title={d.weekTempTitle}
             icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
             note={isLive ? d.weekTempNoteLive : d.weekTempNote}
@@ -292,6 +316,7 @@ export default function IrrigationWindowSheet({
               days={days}
               dayLabels={t.weather.dayLabels}
               label={`${d.weekTempTitle} (${wilayaName})`}
+              peakLabel={peak}
             />
           </ChartFigure>
 
@@ -301,33 +326,37 @@ export default function IrrigationWindowSheet({
               {isLive ? d.singleNoteLive : d.singleNote}
             </p>
             <div className="grid grid-cols-2 gap-2">
-              <Metric
+              <TrendMetric
                 label={d.tempRef}
                 value={`${fmt(tempC)}°C`}
+                trend={tempTrend}
                 icon={<Thermometer size={11} strokeWidth={2.8} aria-hidden />}
               />
-              <Metric
+              <TrendMetric
                 label={t.weather.humidity}
                 value={`${fmt(humidity)}%`}
+                trend={humidityTrend}
                 icon={<Droplets size={11} strokeWidth={2.8} aria-hidden />}
               />
-              <Metric
+              <TrendMetric
                 label={t.weather.wind}
                 value={`${fmt(windKph)} km/h`}
+                trend={windTrend}
                 tone={windy ? "warn" : "default"}
                 icon={<Wind size={11} strokeWidth={2.8} aria-hidden />}
               />
-              <Metric
+              <TrendMetric
                 label={t.weather.rain}
                 value={`${fmt(rainMmYear)} mm`}
+                trend={0}
                 icon={<CloudRain size={11} strokeWidth={2.8} aria-hidden />}
               />
             </div>
           </div>
-        </section>
+        </Reveal>
 
         {/* The calculation, step by step, with the exact numbers used */}
-        <section aria-label={d.breakdownTitle} className="flex flex-col gap-2">
+        <Reveal as="section" index={3} aria-label={d.breakdownTitle} className="flex flex-col gap-2">
           <h3 className="px-1 text-[12px] font-black tracking-wide text-emerald-800/65">
             {d.breakdownTitle}
           </h3>
@@ -361,13 +390,15 @@ export default function IrrigationWindowSheet({
             formula2={stepParcelFormula}
             note={stepVolumeNote}
           />
-        </section>
+        </Reveal>
 
         {/* Data-source note — says exactly which source is shown. */}
-        <p className="flex items-start gap-2 rounded-[1.1rem] bg-[#f4f8f5] p-3.5 text-[10.5px] font-semibold leading-[1.8] text-emerald-900/60">
-          <Info size={13} strokeWidth={2.6} aria-hidden className="mt-[3px] shrink-0 text-emerald-500" />
-          {isLive ? d.sourceNoteLive : d.sourceNote}
-        </p>
+        <Reveal index={4}>
+          <p className="flex items-start gap-2 rounded-[1.1rem] border border-emerald-500/10 bg-[#f4f8f5] p-3.5 text-[10.5px] font-semibold leading-[1.8] text-emerald-900/60">
+            <Info size={13} strokeWidth={2.6} aria-hidden className="mt-[3px] shrink-0 text-emerald-500" />
+            {isLive ? d.sourceNoteLive : d.sourceNote}
+          </p>
+        </Reveal>
       </div>
     </Sheet>
   );
@@ -393,11 +424,11 @@ function StepTile({
   result: string;
 }) {
   return (
-    <div className="app-tile rounded-[1rem] p-3">
+    <div className={`${GLASS_TILE} p-3`}>
       <div className="flex items-center gap-2.5">
         <span
           aria-hidden
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-green-600 text-[11px] font-black text-white"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-500 to-green-600 text-[11px] font-black text-white shadow-[0_4px_10px_-4px_rgba(16,185,129,0.8)]"
         >
           {n}
         </span>
@@ -424,7 +455,8 @@ function StepTile({
 /*  Charts — pure SVG, pinned LTR (time axis always reads left→right), */
 /*  fed exclusively from the WeatherSnapshot the app already renders.  */
 /*  `null` values (no data from the source) are drawn as gaps, never   */
-/*  invented.                                                          */
+/*  invented. Motion is presentational only: progressive path drawing, */
+/*  bottom-up bar growth, pulsing peak nodes and tap-to-inspect tips.  */
 /* ------------------------------------------------------------------ */
 
 const CHART_W = 300;
@@ -434,10 +466,97 @@ interface SeriesPoint {
   value: number | null;
 }
 
-const TONE_STROKE = { emerald: "#10b981", amber: "#f59e0b" } as const;
-const TONE_FILL = { emerald: "rgba(16,185,129,0.16)", amber: "rgba(245,158,11,0.16)" } as const;
-const TONE_BAR = { emerald: "rgba(16,185,129,0.55)", amber: "rgba(245,158,11,0.55)" } as const;
-const TONE_BAR_HOT = { emerald: "#10b981", amber: "#f59e0b" } as const;
+type Tone = "emerald" | "amber";
+
+const TONE_STROKE: Record<Tone, string> = { emerald: "#10b981", amber: "#f59e0b" };
+const TONE_STROKE_DEEP: Record<Tone, string> = { emerald: "#059669", amber: "#d97706" };
+const TONE_SOFT: Record<Tone, string> = { emerald: "#34d399", amber: "#fbbf24" };
+const TONE_GLOW: Record<Tone, string> = { emerald: "rgba(16,185,129,0.35)", amber: "rgba(245,158,11,0.35)" };
+
+/** Glass tile used by every container in the sheet: hairline emerald glow + soft blur. */
+const GLASS_TILE =
+  "rounded-[1rem] border border-emerald-500/15 bg-white/70 px-3 py-2.5 backdrop-blur-md transition-all duration-300 hover:border-emerald-500/30 hover:shadow-[0_8px_24px_-16px_rgba(16,185,129,0.55)]";
+
+const EASE_OUT = [0.22, 1, 0.36, 1] as const;
+
+/** Staggered fade-and-slide-up wrapper for the sheet's top-level sections. */
+function Reveal({
+  as = "div",
+  index,
+  className,
+  children,
+  ...rest
+}: {
+  as?: "div" | "section";
+  index: number;
+  className?: string;
+  children: ReactNode;
+  "aria-label"?: string;
+}) {
+  const reduce = useReducedMotion();
+  const Tag = as === "section" ? motion.section : motion.div;
+  return (
+    <Tag
+      {...rest}
+      className={className}
+      initial={reduce ? false : { opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.45, delay: 0.08 + index * 0.08, ease: EASE_OUT }}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+/** Metric tile with a micro trend arrow (↑ / ↓ / flat) next to the number. */
+function TrendMetric({
+  label,
+  value,
+  icon,
+  trend,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  icon?: ReactNode;
+  trend: number;
+  tone?: "default" | "warn";
+}) {
+  return (
+    <div
+      className={`min-w-0 ${
+        tone === "warn"
+          ? "rounded-[1rem] border border-amber-300/60 bg-amber-50/80 px-3 py-2.5 backdrop-blur-md transition-all duration-300 hover:border-amber-400/70"
+          : GLASS_TILE
+      }`}
+    >
+      <p className="flex items-center gap-1 text-[10.5px] font-bold tracking-wide text-emerald-800/65">
+        {icon}
+        {label}
+      </p>
+      <p className="mt-1 flex items-center gap-1.5 text-[15px] font-black tabular-nums text-emerald-950">
+        <span className="truncate">{value}</span>
+        {trend !== 0 && (
+          <motion.span
+            aria-hidden
+            initial={{ opacity: 0, y: trend > 0 ? 4 : -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.5, ease: EASE_OUT }}
+            className={`grid h-4 w-4 shrink-0 place-items-center rounded-full ${
+              trend > 0 ? "bg-emerald-100 text-emerald-700" : "bg-sky-100 text-sky-700"
+            }`}
+          >
+            {trend > 0 ? (
+              <TrendingUp size={10} strokeWidth={3} />
+            ) : (
+              <TrendingDown size={10} strokeWidth={3} />
+            )}
+          </motion.span>
+        )}
+      </p>
+    </div>
+  );
+}
 
 /** Tile shell shared by every chart: title row + svg + footnote. */
 function ChartFigure({
@@ -445,22 +564,164 @@ function ChartFigure({
   icon,
   note,
   children,
+  index = 0,
 }: {
   title: string;
   icon: ReactNode;
   note: string;
   children: ReactNode;
+  index?: number;
 }) {
+  const reduce = useReducedMotion();
   return (
-    <figure className="app-tile m-0 flex flex-col gap-1.5 rounded-[1rem] p-3">
+    <motion.figure
+      initial={reduce ? false : { opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: 0.15 + index * 0.07, ease: EASE_OUT }}
+      className={`${GLASS_TILE} m-0 flex flex-col gap-1.5 p-3`}
+    >
       <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
         {icon}
         {title}
       </figcaption>
       {children}
       <p className="text-[10px] font-bold leading-4 text-emerald-900/50">{note}</p>
-    </figure>
+    </motion.figure>
   );
+}
+
+/** Small tap-to-inspect tooltip inside the SVG coordinate space. */
+function SvgTooltip({
+  x,
+  y,
+  text,
+  tone,
+  chartW,
+}: {
+  x: number;
+  y: number;
+  text: string;
+  tone: Tone;
+  chartW: number;
+}) {
+  const w = Math.max(30, text.length * 6.2 + 14);
+  const h = 18;
+  const left = Math.min(Math.max(x - w / 2, 2), chartW - w - 2);
+  const top = Math.max(y - h - 10, 2);
+  return (
+    <motion.g
+      initial={{ opacity: 0, scale: 0.85 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.18, ease: EASE_OUT }}
+      style={{ transformOrigin: `${x}px ${y}px` }}
+      pointerEvents="none"
+    >
+      <rect x={left} y={top} width={w} height={h} rx={9} fill="#064e3b" opacity={0.94} />
+      <polygon
+        points={`${x - 4},${top + h} ${x + 4},${top + h} ${x},${top + h + 5}`}
+        fill="#064e3b"
+        opacity={0.94}
+      />
+      <text
+        x={left + w / 2}
+        y={top + h / 2 + 3.5}
+        textAnchor="middle"
+        fontSize="9.5"
+        fontWeight={800}
+        fill={tone === "amber" ? "#fde68a" : "#a7f3d0"}
+      >
+        {text}
+      </text>
+    </motion.g>
+  );
+}
+
+/** Pill badge drawn above the peak bar / point. */
+function PeakBadge({
+  x,
+  y,
+  text,
+  tone,
+  chartW,
+  delay,
+}: {
+  x: number;
+  y: number;
+  text: string;
+  tone: Tone;
+  chartW: number;
+  delay: number;
+}) {
+  const w = Math.max(34, text.length * 5.6 + 14);
+  const h = 14;
+  const left = Math.min(Math.max(x - w / 2, 2), chartW - w - 2);
+  const top = Math.max(y - h - 2, 1);
+  return (
+    <motion.g
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, delay, ease: EASE_OUT }}
+      pointerEvents="none"
+    >
+      <rect
+        x={left}
+        y={top}
+        width={w}
+        height={h}
+        rx={7}
+        fill={TONE_STROKE_DEEP[tone]}
+        style={{ filter: `drop-shadow(0 2px 4px ${TONE_GLOW[tone]})` }}
+      />
+      <text
+        x={left + w / 2}
+        y={top + h / 2 + 3}
+        textAnchor="middle"
+        fontSize="8.5"
+        fontWeight={800}
+        fill="#ffffff"
+      >
+        {text}
+      </text>
+    </motion.g>
+  );
+}
+
+/**
+ * Stable signature of a series. Used as a React `key` so the draw animation
+ * re-runs whenever the underlying data changes, and to scope the tapped point
+ * to the series it was tapped on (so a data refresh clears the tooltip).
+ */
+function seriesKey(values: readonly (number | null)[]) {
+  return values.map((v) => (v === null ? "x" : v.toFixed(2))).join("|");
+}
+
+/** Tap-to-inspect state, automatically reset when the series changes. */
+function useActivePoint(drawKey: string) {
+  const [active, setActive] = useState<{ key: string; idx: number } | null>(null);
+  const activeIdx = active && active.key === drawKey ? active.idx : null;
+  const toggle = (idx: number) =>
+    setActive((cur) => (cur && cur.key === drawKey && cur.idx === idx ? null : { key: drawKey, idx }));
+  const set = (idx: number) => setActive({ key: drawKey, idx });
+  const clear = () => setActive(null);
+  return { activeIdx, toggle, set, clear };
+}
+
+/** Smooth Catmull-Rom → cubic Bézier path through the given points. */
+function smoothPath(pts: { x: number; y: number }[]) {
+  if (pts.length < 2) return "";
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] ?? pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2] ?? p2;
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+  }
+  return d;
 }
 
 function HourLineChart({
@@ -468,26 +729,34 @@ function HourLineChart({
   format,
   label,
   tone = "emerald",
+  peakLabel,
 }: {
   points: SeriesPoint[];
   format: (value: number) => string;
   label: string;
-  tone?: "emerald" | "amber";
+  tone?: Tone;
+  peakLabel?: (value: string) => string;
 }) {
   const H = 96;
   const PX = 20;
   const PY_TOP = 18;
   const PY_BOTTOM = 20;
+  const reduce = useReducedMotion();
+  const gradId = useId();
   const values = points.map((p) => p.value);
+  const drawKey = seriesKey(values);
+  const { activeIdx, toggle, set, clear } = useActivePoint(drawKey);
   const present = values.filter((v): v is number => v !== null);
   const min = present.length ? Math.min(...present) : 0;
   const max = present.length ? Math.max(...present) : 1;
   const span = max - min || 1;
   const x = (i: number) => PX + (i / Math.max(points.length - 1, 1)) * (CHART_W - 2 * PX);
   const y = (v: number) => H - PY_BOTTOM - ((v - min) / span) * (H - PY_TOP - PY_BOTTOM);
-  const pts = values
-    .map((v, i) => (v === null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`))
-    .filter((p): p is string => p !== null);
+  const coords = values
+    .map((v, i) => (v === null ? null : { x: x(i), y: y(v) }))
+    .filter((p): p is { x: number; y: number } => p !== null);
+  const peakIdx = values.findIndex((v) => v === max);
+  const lastIdx = values.length - 1;
 
   if (present.length === 0) {
     return (
@@ -499,37 +768,176 @@ function HourLineChart({
     );
   }
 
+  const linePath = smoothPath(coords);
+  const areaPath =
+    coords.length > 1
+      ? `${linePath} L ${coords[coords.length - 1].x.toFixed(1)} ${H - PY_BOTTOM} L ${coords[0].x.toFixed(1)} ${H - PY_BOTTOM} Z`
+      : "";
+  const gradient = `line-${gradId}`;
+  const glow = `glow-${gradId}`;
+
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${H}`} role="img" aria-label={label} className="w-full">
-      {pts.length > 1 && (
-        <polygon
-          points={`${pts[0].split(",")[0]},${H - PY_BOTTOM} ${pts.join(" ")} ${pts[pts.length - 1].split(",")[0]},${H - PY_BOTTOM}`}
-          fill={TONE_FILL[tone]}
+    <svg
+      viewBox={`0 0 ${CHART_W} ${H}`}
+      role="img"
+      aria-label={label}
+      className="w-full touch-manipulation select-none"
+      onPointerLeave={clear}
+    >
+      <defs>
+        <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={TONE_STROKE[tone]} stopOpacity={0.38} />
+          <stop offset="60%" stopColor={TONE_STROKE[tone]} stopOpacity={0.1} />
+          <stop offset="100%" stopColor={TONE_STROKE[tone]} stopOpacity={0} />
+        </linearGradient>
+        <linearGradient id={`${gradient}-stroke`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor={TONE_SOFT[tone]} />
+          <stop offset="100%" stopColor={TONE_STROKE_DEEP[tone]} />
+        </linearGradient>
+        <filter id={glow} x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="1.6" result="b" />
+          <feMerge>
+            <feMergeNode in="b" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      {/* Baseline hairline */}
+      <line
+        x1={PX}
+        x2={CHART_W - PX}
+        y1={H - PY_BOTTOM}
+        y2={H - PY_BOTTOM}
+        stroke="rgba(6,78,59,0.08)"
+        strokeWidth={1}
+        strokeDasharray="2 3"
+      />
+
+      {/* Area gradient — fades in and gently pulses for depth */}
+      {areaPath && (
+        <motion.path
+          key={`area-${drawKey}`}
+          d={areaPath}
+          fill={`url(#${gradient})`}
+          initial={reduce ? false : { opacity: 0 }}
+          animate={reduce ? { opacity: 1 } : { opacity: [0, 1, 0.8, 1] }}
+          transition={
+            reduce
+              ? { duration: 0 }
+              : { duration: 2.6, times: [0, 0.3, 0.65, 1], delay: 0.25, ease: "easeInOut" }
+          }
         />
       )}
-      {pts.length > 1 && (
-        <polyline
-          points={pts.join(" ")}
+
+      {/* Progressive line drawing */}
+      {linePath && (
+        <motion.path
+          key={`line-${drawKey}`}
+          d={linePath}
           fill="none"
-          stroke={TONE_STROKE[tone]}
-          strokeWidth={2.4}
+          stroke={`url(#${gradient}-stroke)`}
+          strokeWidth={2.6}
           strokeLinecap="round"
           strokeLinejoin="round"
+          initial={reduce ? false : { pathLength: 0, opacity: 0.4 }}
+          animate={{ pathLength: 1, opacity: 1 }}
+          transition={reduce ? { duration: 0 } : { duration: 0.8, ease: EASE_OUT }}
+          style={{ filter: `drop-shadow(0 2px 3px ${TONE_GLOW[tone]})` }}
         />
       )}
-      {values.map((v, i) => (
-        <g key={points[i].label}>
-          {v !== null && <circle cx={x(i)} cy={y(v)} r={2.6} fill={TONE_STROKE[tone]} />}
-          {v !== null && (
-            <text x={x(i)} y={y(v) - 6} textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#064e3b">
-              {format(v)}
+
+      {values.map((v, i) => {
+        const isPeak = i === peakIdx;
+        const isCurrent = i === lastIdx;
+        const highlight = isPeak || isCurrent;
+        const isActive = activeIdx === i;
+        return (
+          <g key={points[i].label}>
+            {v !== null && highlight && !reduce && (
+              <circle
+                cx={x(i)}
+                cy={y(v)}
+                r={7}
+                fill={TONE_STROKE[tone]}
+                opacity={0.25}
+                className="animate-pulse"
+                pointerEvents="none"
+              />
+            )}
+            {v !== null && (
+              <motion.circle
+                key={`dot-${drawKey}-${i}`}
+                cx={x(i)}
+                cy={y(v)}
+                r={isActive ? 4.2 : highlight ? 3.4 : 2.6}
+                fill={isActive || highlight ? TONE_STROKE_DEEP[tone] : "#ffffff"}
+                stroke={TONE_STROKE[tone]}
+                strokeWidth={isActive || highlight ? 0 : 1.8}
+                filter={highlight ? `url(#${glow})` : undefined}
+                initial={reduce ? false : { scale: 0, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ duration: 0.3, delay: reduce ? 0 : 0.2 + (i / Math.max(values.length, 1)) * 0.7 }}
+                style={{ transformOrigin: `${x(i)}px ${y(v)}px`, transition: "r 160ms ease" }}
+              />
+            )}
+            {v !== null && (
+              <motion.text
+                x={x(i)}
+                y={y(v) - 7}
+                textAnchor="middle"
+                fontSize="9.5"
+                fontWeight={800}
+                fill="#064e3b"
+                initial={reduce ? false : { opacity: 0, y: y(v) - 3 }}
+                animate={{ opacity: isActive ? 0 : 1, y: y(v) - 7 }}
+                transition={{ duration: 0.3, delay: reduce ? 0 : 0.5 + (i / Math.max(values.length, 1)) * 0.5 }}
+              >
+                {format(v)}
+              </motion.text>
+            )}
+            <text x={x(i)} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
+              {points[i].label}
             </text>
-          )}
-          <text x={x(i)} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
-            {points[i].label}
-          </text>
-        </g>
-      ))}
+            {/* Hit target: whole slot column, so touch is forgiving. */}
+            {v !== null && (
+              <rect
+                x={x(i) - (CHART_W - 2 * PX) / Math.max(points.length - 1, 1) / 2}
+                y={0}
+                width={(CHART_W - 2 * PX) / Math.max(points.length - 1, 1)}
+                height={H - PY_BOTTOM}
+                fill="transparent"
+                className="cursor-pointer"
+                onPointerDown={() => toggle(i)}
+                onPointerEnter={(e) => {
+                  if (e.pointerType === "mouse") set(i);
+                }}
+              />
+            )}
+          </g>
+        );
+      })}
+
+      {peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
+        <PeakBadge
+          x={x(peakIdx)}
+          y={y(values[peakIdx] as number) - 15}
+          text={peakLabel(format(values[peakIdx] as number))}
+          tone={tone}
+          chartW={CHART_W}
+          delay={reduce ? 0 : 1}
+        />
+      )}
+
+      {activeIdx !== null && values[activeIdx] !== null && (
+        <SvgTooltip
+          x={x(activeIdx)}
+          y={y(values[activeIdx] as number)}
+          text={`${points[activeIdx].label} · ${format(values[activeIdx] as number)}`}
+          tone={tone}
+          chartW={CHART_W}
+        />
+      )}
     </svg>
   );
 }
@@ -539,23 +947,63 @@ function HourBarChart({
   format,
   label,
   tone = "amber",
+  peakLabel,
 }: {
   points: SeriesPoint[];
   format: (value: number) => string;
   label: string;
-  tone?: "emerald" | "amber";
+  tone?: Tone;
+  peakLabel?: (value: string) => string;
 }) {
   const H = 96;
   const PX = 16;
   const PY_TOP = 16;
   const PY_BOTTOM = 20;
-  const present = points.map((p) => p.value).filter((v): v is number => v !== null);
+  const reduce = useReducedMotion();
+  const gradId = useId();
+  const values = points.map((p) => p.value);
+  const drawKey = seriesKey(values);
+  const { activeIdx, toggle, set, clear } = useActivePoint(drawKey);
+  const present = values.filter((v): v is number => v !== null);
   const max = present.length ? Math.max(...present, 1) : 1;
   const slot = (CHART_W - 2 * PX) / points.length;
   const barW = Math.min(26, slot * 0.55);
+  const peakIdx = present.length ? values.findIndex((v) => v === Math.max(...present)) : -1;
+
+  const gradSoft = `bar-soft-${gradId}`;
+  const gradHot = `bar-hot-${gradId}`;
 
   return (
-    <svg viewBox={`0 0 ${CHART_W} ${H}`} role="img" aria-label={label} className="w-full">
+    <svg
+      viewBox={`0 0 ${CHART_W} ${H}`}
+      role="img"
+      aria-label={label}
+      className="w-full touch-manipulation select-none"
+      onPointerLeave={clear}
+    >
+      <defs>
+        {/* Soft capsule: transparent base → solid top */}
+        <linearGradient id={gradSoft} x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stopColor={TONE_STROKE[tone]} stopOpacity={0.2} />
+          <stop offset="100%" stopColor={TONE_STROKE[tone]} stopOpacity={0.85} />
+        </linearGradient>
+        {/* Hot capsule (peak / ≥50 % rain): teal → emerald / amber → yellow */}
+        <linearGradient id={gradHot} x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0%" stopColor={tone === "emerald" ? "#14b8a6" : "#f59e0b"} />
+          <stop offset="100%" stopColor={tone === "emerald" ? "#34d399" : "#fbbf24"} />
+        </linearGradient>
+      </defs>
+
+      <line
+        x1={PX}
+        x2={CHART_W - PX}
+        y1={H - PY_BOTTOM}
+        y2={H - PY_BOTTOM}
+        stroke="rgba(6,78,59,0.08)"
+        strokeWidth={1}
+        strokeDasharray="2 3"
+      />
+
       {points.map((p, i) => {
         const cx = PX + slot * i + slot / 2;
         if (p.value === null) {
@@ -573,25 +1021,97 @@ function HourBarChart({
         }
         const hBar = (p.value / max) * (H - PY_TOP - PY_BOTTOM);
         const yBar = H - PY_BOTTOM - hBar;
+        const hot = (p.value >= 50 && tone === "amber") || i === peakIdx;
+        const isActive = activeIdx === i;
+        const delay = reduce ? 0 : 0.1 + i * 0.1;
         return (
           <g key={p.label}>
-            <rect
+            <motion.rect
+              key={`bar-${drawKey}-${i}`}
               x={cx - barW / 2}
               y={yBar}
               width={barW}
               height={Math.max(hBar, 1.5)}
-              rx={3}
-              fill={p.value >= 50 && tone === "amber" ? TONE_BAR_HOT[tone] : TONE_BAR[tone]}
+              rx={Math.min(barW / 2, 8)}
+              fill={`url(#${hot ? gradHot : gradSoft})`}
+              initial={reduce ? false : { scaleY: 0, opacity: 0.4 }}
+              animate={{ scaleY: 1, opacity: isActive || activeIdx === null ? 1 : 0.55 }}
+              transition={{ duration: 0.6, delay, ease: EASE_OUT }}
+              style={{
+                transformOrigin: `${cx}px ${H - PY_BOTTOM}px`,
+                filter: hot ? `drop-shadow(0 3px 6px ${TONE_GLOW[tone]})` : undefined,
+              }}
             />
-            <text x={cx} y={yBar - 5} textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#064e3b">
+            {/* Glossy cap highlight on the top of the capsule */}
+            {hBar > 8 && (
+              <motion.rect
+                key={`cap-${drawKey}-${i}`}
+                x={cx - barW / 2 + 3}
+                y={yBar + 2.5}
+                width={barW - 6}
+                height={2}
+                rx={1}
+                fill="#ffffff"
+                opacity={0.5}
+                initial={reduce ? false : { opacity: 0 }}
+                animate={{ opacity: 0.5 }}
+                transition={{ duration: 0.3, delay: delay + 0.45 }}
+                pointerEvents="none"
+              />
+            )}
+            <motion.text
+              key={`val-${drawKey}-${i}`}
+              x={cx}
+              y={yBar - 5}
+              textAnchor="middle"
+              fontSize="9.5"
+              fontWeight={800}
+              fill="#064e3b"
+              initial={reduce ? false : { opacity: 0 }}
+              animate={{ opacity: isActive ? 0 : 1 }}
+              transition={{ duration: 0.3, delay: delay + 0.35 }}
+            >
               {format(p.value)}
-            </text>
+            </motion.text>
             <text x={cx} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
               {p.label}
             </text>
+            <rect
+              x={PX + slot * i}
+              y={0}
+              width={slot}
+              height={H - PY_BOTTOM}
+              fill="transparent"
+              className="cursor-pointer"
+              onPointerDown={() => toggle(i)}
+              onPointerEnter={(e) => {
+                if (e.pointerType === "mouse") set(i);
+              }}
+            />
           </g>
         );
       })}
+
+      {peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
+        <PeakBadge
+          x={PX + slot * peakIdx + slot / 2}
+          y={H - PY_BOTTOM - ((values[peakIdx] as number) / max) * (H - PY_TOP - PY_BOTTOM) - 14}
+          text={peakLabel(format(values[peakIdx] as number))}
+          tone={tone}
+          chartW={CHART_W}
+          delay={reduce ? 0 : 0.2 + points.length * 0.1 + 0.4}
+        />
+      )}
+
+      {activeIdx !== null && values[activeIdx] !== null && (
+        <SvgTooltip
+          x={PX + slot * activeIdx + slot / 2}
+          y={H - PY_BOTTOM - ((values[activeIdx] as number) / max) * (H - PY_TOP - PY_BOTTOM)}
+          text={`${points[activeIdx].label} · ${format(values[activeIdx] as number)}`}
+          tone={tone}
+          chartW={CHART_W}
+        />
+      )}
     </svg>
   );
 }
@@ -600,53 +1120,182 @@ function WeekRangeChart({
   days,
   dayLabels,
   label,
+  peakLabel,
 }: {
   days: DayPoint[];
   dayLabels: readonly string[];
   label: string;
+  peakLabel?: (value: string) => string;
 }) {
   const H = 104;
   const PX = 12;
   const PY_TOP = 16;
   const PY_BOTTOM = 20;
+  const reduce = useReducedMotion();
+  const gradId = useId();
   const mins = days.map((d) => d.minC);
   const maxs = days.map((d) => d.maxC);
+  const drawKey = seriesKey([...mins, ...maxs]);
+  const { activeIdx, toggle, set, clear } = useActivePoint(drawKey);
   const lo = Math.min(...mins);
   const hi = Math.max(...maxs);
   const span = hi - lo || 1;
   const y = (v: number) => H - PY_BOTTOM - ((v - lo) / span) * (H - PY_TOP - PY_BOTTOM);
   const slot = (CHART_W - 2 * PX) / days.length;
   const barW = Math.min(14, slot * 0.42);
+  const peakIdx = maxs.indexOf(hi);
+  const grad = `range-${gradId}`;
 
   return (
     <svg
       viewBox={`0 0 ${CHART_W} ${H}`}
       role="img"
       aria-label={label}
-      className="w-full"
+      className="w-full touch-manipulation select-none"
+      onPointerLeave={clear}
     >
+      <defs>
+        <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#10b981" />
+          <stop offset="100%" stopColor="#a7f3d0" />
+        </linearGradient>
+        <linearGradient id={`${grad}-hot`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#059669" />
+          <stop offset="100%" stopColor="#6ee7b7" />
+        </linearGradient>
+      </defs>
+
       {days.map((day, i) => {
         const cx = PX + slot * i + slot / 2;
         const yTop = y(day.maxC);
         const yBottom = y(day.minC);
+        const isPeak = i === peakIdx;
+        const isActive = activeIdx === i;
+        const delay = reduce ? 0 : 0.1 + i * 0.09;
         return (
           <g key={day.labelKey}>
-            <line x1={cx} x2={cx} y1={yTop} y2={yBottom} stroke="#10b981" strokeWidth={barW} strokeLinecap="round" opacity={0.55} />
-            <circle cx={cx} cy={yTop} r={2.4} fill="#059669" />
-            <circle cx={cx} cy={yBottom} r={2.4} fill="#a7f3d0" />
-            <text x={cx} y={yTop - 5} textAnchor="middle" fontSize="9" fontWeight={800} fill="#064e3b">
+            {/* Track behind the capsule, so the range reads against the full scale */}
+            <line
+              x1={cx}
+              x2={cx}
+              y1={y(hi)}
+              y2={y(lo)}
+              stroke="rgba(6,78,59,0.06)"
+              strokeWidth={barW}
+              strokeLinecap="round"
+            />
+            <motion.line
+              key={`range-${drawKey}-${i}`}
+              x1={cx}
+              x2={cx}
+              y1={yTop}
+              y2={yBottom}
+              stroke={`url(#${isPeak ? `${grad}-hot` : grad})`}
+              strokeWidth={barW}
+              strokeLinecap="round"
+              initial={reduce ? false : { scaleY: 0, opacity: 0.3 }}
+              animate={{ scaleY: 1, opacity: activeIdx === null || isActive ? (isPeak ? 0.95 : 0.7) : 0.4 }}
+              transition={{ duration: 0.6, delay, ease: EASE_OUT }}
+              style={{
+                transformOrigin: `${cx}px ${yBottom}px`,
+                filter: isPeak ? "drop-shadow(0 3px 6px rgba(16,185,129,0.4))" : undefined,
+              }}
+            />
+            {isPeak && !reduce && (
+              <circle cx={cx} cy={yTop} r={6.5} fill="#10b981" opacity={0.25} className="animate-pulse" pointerEvents="none" />
+            )}
+            <motion.circle
+              key={`hi-${drawKey}-${i}`}
+              cx={cx}
+              cy={yTop}
+              r={isPeak ? 3 : 2.4}
+              fill="#059669"
+              initial={reduce ? false : { scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ duration: 0.3, delay: delay + 0.4 }}
+              style={{ transformOrigin: `${cx}px ${yTop}px` }}
+            />
+            <motion.circle
+              key={`lo-${drawKey}-${i}`}
+              cx={cx}
+              cy={yBottom}
+              r={2.4}
+              fill="#a7f3d0"
+              stroke="#ffffff"
+              strokeWidth={1}
+              initial={reduce ? false : { scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ duration: 0.3, delay: delay + 0.1 }}
+              style={{ transformOrigin: `${cx}px ${yBottom}px` }}
+            />
+            <motion.text
+              key={`max-${drawKey}-${i}`}
+              x={cx}
+              y={yTop - 5}
+              textAnchor="middle"
+              fontSize="9"
+              fontWeight={800}
+              fill="#064e3b"
+              initial={reduce ? false : { opacity: 0 }}
+              animate={{ opacity: isActive ? 0 : 1 }}
+              transition={{ duration: 0.3, delay: delay + 0.45 }}
+            >
               {fmt(day.maxC)}°
-            </text>
+            </motion.text>
             {/* Min sits beside the low dot so it never collides with the day label. */}
-            <text x={cx + barW / 2 + 3} y={yBottom + 3} textAnchor="start" fontSize="8.5" fontWeight={700} fill="rgba(6,78,59,0.6)">
+            <motion.text
+              key={`min-${drawKey}-${i}`}
+              x={cx + barW / 2 + 3}
+              y={yBottom + 3}
+              textAnchor="start"
+              fontSize="8.5"
+              fontWeight={700}
+              fill="rgba(6,78,59,0.6)"
+              initial={reduce ? false : { opacity: 0 }}
+              animate={{ opacity: isActive ? 0 : 1 }}
+              transition={{ duration: 0.3, delay: delay + 0.3 }}
+            >
               {fmt(day.minC)}°
-            </text>
+            </motion.text>
             <text x={cx} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
               {dayLabels[day.labelKey]}
             </text>
+            <rect
+              x={PX + slot * i}
+              y={0}
+              width={slot}
+              height={H - PY_BOTTOM}
+              fill="transparent"
+              className="cursor-pointer"
+              onPointerDown={() => toggle(i)}
+              onPointerEnter={(e) => {
+                if (e.pointerType === "mouse") set(i);
+              }}
+            />
           </g>
         );
       })}
+
+      {peakLabel && peakIdx >= 0 && activeIdx === null && (
+        <PeakBadge
+          x={PX + slot * peakIdx + slot / 2}
+          y={y(hi) - 14}
+          text={peakLabel(`${fmt(hi)}°`)}
+          tone="emerald"
+          chartW={CHART_W}
+          delay={reduce ? 0 : 0.2 + days.length * 0.09 + 0.4}
+        />
+      )}
+
+      {activeIdx !== null && (
+        <SvgTooltip
+          x={PX + slot * activeIdx + slot / 2}
+          y={y(days[activeIdx].maxC)}
+          text={`${dayLabels[days[activeIdx].labelKey]} · ${fmt(days[activeIdx].minC)}° – ${fmt(days[activeIdx].maxC)}°`}
+          tone="emerald"
+          chartW={CHART_W}
+        />
+      )}
     </svg>
   );
 }
