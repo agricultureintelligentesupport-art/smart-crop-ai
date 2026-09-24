@@ -3,7 +3,7 @@
 import { motion, useInView, useReducedMotion } from "framer-motion";
 import {
   Check,
-  Circle,
+  ChevronDown,
   CloudRain,
   Clock,
   Droplets,
@@ -33,7 +33,6 @@ import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, SOILS, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
 import type { WeatherSource } from "@/lib/weather/useLiveWeather";
 import { fmt } from "./WeatherCard";
-import { Chip } from "./parts";
 
 /**
  * Irrigation-window detail sheet, opened from the "نافذة السقي" tile in the
@@ -146,10 +145,25 @@ export default function IrrigationWindowSheet({
   const stepVolumeNote = fill(d.stepVolumeNote, { weekly: fmt(weeklyM3) });
 
   const rules = [
-    { id: "heat", title: d.ruleHeatTitle, text: fill(d.ruleHeatText, { temp: fmt(tempC) }) },
-    { id: "wind", title: d.ruleWindTitle, text: fill(d.ruleWindText, { wind: fmt(windKph) }) },
-    { id: "et0", title: d.ruleEt0Title, text: fill(d.ruleEt0Text, { et0: fmt(weather.et0, 1) }) },
-    { id: "calm", title: d.ruleCalmTitle, text: d.ruleCalmText },
+    {
+      id: "heat",
+      title: d.ruleHeatTitle,
+      text: fill(d.ruleHeatText, { temp: fmt(tempC) }),
+      condition: d.ruleHeatCondition,
+    },
+    {
+      id: "wind",
+      title: d.ruleWindTitle,
+      text: fill(d.ruleWindText, { wind: fmt(windKph) }),
+      condition: d.ruleWindCondition,
+    },
+    {
+      id: "et0",
+      title: d.ruleEt0Title,
+      text: fill(d.ruleEt0Text, { et0: fmt(weather.et0, 1) }),
+      condition: d.ruleEt0Condition,
+    },
+    { id: "calm", title: d.ruleCalmTitle, text: d.ruleCalmText, condition: d.ruleCalmCondition },
   ] as const;
 
   // Micro trend indicators: direction of the real hourly series (last vs first
@@ -194,45 +208,13 @@ export default function IrrigationWindowSheet({
 
         {/* Why the early-morning window — the app's real advisory rules, evaluated live */}
         <Reveal as="section" index={1} aria-label={d.whyTitle} className="flex flex-col gap-2.5">
-          <h3 className="px-1 text-[12px] font-black tracking-wide text-emerald-800/65">
+          <h3 className="px-1 text-[12px] font-black tracking-wide text-emerald-800/85">
             {d.whyTitle}
           </h3>
-          <p className="px-1 text-[11.5px] font-semibold leading-[1.7] text-emerald-900/65">
+          <p className="px-1 text-[11.5px] font-semibold leading-[1.7] text-emerald-900/80">
             {fill(d.windowFixed, { window: t.hero.windowValue })}
           </p>
-          <div className="flex flex-col gap-1.5">
-            {rules.map((rule) => {
-              const active = rule.id === activeRule;
-              return (
-                <div
-                  key={rule.id}
-                  className={`flex items-start gap-2.5 rounded-[1rem] p-3 ring-1 transition-all duration-300 ${
-                    active
-                      ? "bg-emerald-50 ring-emerald-200 shadow-[0_0_0_4px_rgba(16,185,129,0.08)]"
-                      : "bg-[#f6faf7] ring-[rgba(6,78,59,0.07)] opacity-75 hover:opacity-100"
-                  }`}
-                >
-                  <span className={`mt-[2px] shrink-0 ${active ? "text-emerald-600" : "text-emerald-900/30"}`}>
-                    {active ? (
-                      <Check size={16} strokeWidth={3} aria-hidden />
-                    ) : (
-                      <Circle size={14} strokeWidth={2.4} aria-hidden />
-                    )}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="flex flex-wrap items-center gap-2 text-[12.5px] font-black text-emerald-950">
-                      {rule.title}
-                      {active && <Chip tone="emerald">{d.activeRule}</Chip>}
-                    </span>
-                    <span className="mt-0.5 block text-[11.5px] font-semibold leading-[1.7] text-emerald-900/65">
-                      {rule.text}
-                    </span>
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          <p className="px-1 text-[10.5px] font-semibold leading-5 text-emerald-900/50">{d.rulesNote}</p>
+          <DecisionRules d={d} rules={rules} activeRule={activeRule} />
         </Reveal>
 
         {/* The real inputs — same series/values WeatherCard shows, with honest granularity */}
@@ -408,6 +390,77 @@ export default function IrrigationWindowSheet({
         </Reveal>
       </div>
     </Sheet>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Decision rules — one active summary; secondary conditions on demand */
+/* ------------------------------------------------------------------ */
+
+type DecisionRuleId = "heat" | "wind" | "et0" | "calm";
+type DecisionRule = { id: DecisionRuleId; title: string; text: string; condition: string };
+
+function DecisionRules({
+  d,
+  rules,
+  activeRule,
+}: {
+  d: DashboardCopy["windowDetail"];
+  rules: readonly DecisionRule[];
+  activeRule: DecisionRuleId;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const otherRulesId = useId();
+  // The same priority cascade as WeatherCard always picks one of these rules.
+  const selected = rules.find((rule) => rule.id === activeRule)!;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        role="group"
+        aria-label={d.activeRule}
+        className="rounded-[1rem] border border-emerald-200 bg-emerald-50 px-3.5 py-3"
+      >
+        <p className="text-[11px] font-bold text-emerald-800">{d.activeRule}</p>
+        <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[14px] font-black text-emerald-950">
+          {selected.title}
+          <Check size={16} strokeWidth={3} aria-hidden className="shrink-0 text-emerald-700" />
+        </p>
+        <p className="mt-1 text-[12px] font-semibold leading-[1.7] text-emerald-900">{selected.text}</p>
+      </div>
+
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={otherRulesId}
+        onClick={() => setExpanded((value) => !value)}
+        className="inline-flex min-h-11 items-center gap-1.5 self-start rounded-xl px-2.5 text-[12px] font-bold text-emerald-800 transition-colors hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 motion-reduce:transition-none"
+      >
+        {expanded ? d.otherRulesHide : d.otherRulesShow}
+        <ChevronDown
+          size={15}
+          strokeWidth={2.4}
+          aria-hidden
+          className={`shrink-0 transition-transform motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      <div id={otherRulesId} hidden={!expanded} className="w-full">
+        <ul className="divide-y divide-emerald-900/10 border-t border-emerald-900/10 px-1">
+          {rules
+            .filter((rule) => rule.id !== activeRule)
+            .map((rule) => (
+              <li key={rule.id} className="py-2.5">
+                <p className="text-[12px] font-bold text-emerald-950">{rule.title}</p>
+                <p className="mt-0.5 text-[11.5px] font-semibold leading-[1.7] text-emerald-900/75">
+                  {rule.condition}
+                </p>
+              </li>
+            ))}
+        </ul>
+        <p className="px-1 text-[10.5px] font-semibold leading-5 text-emerald-900/80">{d.rulesNote}</p>
+      </div>
+    </div>
   );
 }
 

@@ -44,13 +44,19 @@ export interface DashboardCopy {
     rulesNote: string;
     ruleHeatTitle: string;
     ruleHeatText: string;
+    ruleHeatCondition: string;
     ruleWindTitle: string;
     ruleWindText: string;
+    ruleWindCondition: string;
     ruleEt0Title: string;
     ruleEt0Text: string;
+    ruleEt0Condition: string;
     ruleCalmTitle: string;
     ruleCalmText: string;
+    ruleCalmCondition: string;
     activeRule: string;
+    otherRulesShow: string;
+    otherRulesHide: string;
     dataTitle: string;
     /** Reference-mode note (data = wilaya reference series). */
     dataNote: string;
@@ -247,17 +253,23 @@ const AR: DashboardCopy = {
     perHaLabel: "لكل هكتار",
     whyTitle: "لماذا النافذة الصباحية؟",
     windowFixed:
-      "في الإصدار الحالي، النافذة مقترحة صباحية ثابتة ({window}) قبل ذروة التبخر. لا توجد بعد معادلة تحسبها من بيانات بالساعة، لكن قواعد النصيحة أدناه — بنفس أرقام اللوحة — تفسّر تفضيل الصباح.",
+      "النافذة الصباحية ({window}) ثابتة حالياً ولم تُحسب من قراءات الساعة. نقترحها قبل ذروة التبخر، والقاعدة النشطة أدناه توضّح نصيحة الطقس اليوم.",
     rulesNote: "قواعد بطاقة الطقس تُطبَّق بالترتيب: الحرارة ثم الرياح ثم التبخر.",
     ruleHeatTitle: "حرارة 33° فأكثر",
-    ruleHeatText: "الحرارة المرجعية اليوم {temp}° → السقي قبل الثامنة صباحاً وتجنّب الرشّ ظهراً.",
+    ruleHeatText: "الحرارة اليوم {temp}° → اسقِ قبل الثامنة صباحاً وتجنّب الرشّ ظهراً.",
+    ruleHeatCondition: "إذا بلغت الحرارة هذه العتبة، اسقِ قبل الثامنة وتجنّب الرشّ ظهراً.",
     ruleWindTitle: "رياح 20 كم/س فأكثر",
-    ruleWindText: "الرياح المرجعية اليوم {wind} كم/س → إنزال ضغط الرشّ والرشّ صباحاً باكراً.",
+    ruleWindText: "الرياح اليوم {wind} كم/س → خفّض ضغط الرشّ واسقِ صباحاً باكراً.",
+    ruleWindCondition: "إذا بلغت الرياح هذه العتبة، خفّض ضغط الرشّ واسقِ صباحاً باكراً.",
     ruleEt0Title: "تبخر 5 مم/يوم فأكثر",
-    ruleEt0Text: "التبخر المرجعي اليوم {et0} مم/يوم → التزم بجدول السقي المعتاد.",
+    ruleEt0Text: "التبخر اليوم {et0} مم/يوم → التزم بجدول السقي المعتاد.",
+    ruleEt0Condition: "إذا بلغ التبخر هذه العتبة، التزم بجدول السقي المعتاد.",
     ruleCalmTitle: "ظروف معتدلة",
     ruleCalmText: "لا حرارة مرتفعة ولا رياح قوية ولا تبخر عالٍ → ظروف مناسبة للسقي اليوم.",
+    ruleCalmCondition: "إذا لم تتحقق أي من العتبات السابقة، تكون ظروف السقي مناسبة.",
     activeRule: "القاعدة النشطة اليوم",
+    otherRulesShow: "عرض قواعد القرار الأخرى",
+    otherRulesHide: "إخفاء قواعد القرار الأخرى",
     dataTitle: "المدخلات الفعلية للحساب",
     dataNote: "نفس السلاسل والقيم المرجعية التي تعرضها بطاقة الطقس لولاية {wilaya}.",
     dataNoteLive: "نفس القراءات الحيّة التي تعرضها بطاقة الطقس لولاية {wilaya}، من Open-Meteo.",
@@ -480,17 +492,23 @@ const FR: DashboardCopy = {
     perHaLabel: "Par hectare",
     whyTitle: "Pourquoi la fenêtre du matin ?",
     windowFixed:
-      "Dans la version actuelle, la fenêtre est une fenêtre matinale fixe ({window}) avant le pic d'évaporation. Aucune formule ne la calcule encore à partir de données horaires, mais les règles de conseil ci-dessous — avec les mêmes chiffres du tableau — expliquent le choix du matin.",
+      "La fenêtre du matin ({window}) est fixe pour l'instant, et non calculée à partir de données horaires. Elle précède le pic d'évaporation ; la règle active ci-dessous explique le conseil météo du jour.",
     rulesNote: "Les règles de la carte météo s'appliquent dans l'ordre : chaleur, puis vent, puis évapotranspiration.",
     ruleHeatTitle: "Chaleur ≥ 33 °",
-    ruleHeatText: "Température de référence aujourd'hui {temp}° → irriguez avant 8 h et évitez l'aspersion à midi.",
+    ruleHeatText: "Température du jour {temp}° → irriguez avant 8 h et évitez l'aspersion à midi.",
+    ruleHeatCondition: "Si ce seuil de chaleur est atteint, irriguez avant 8 h et évitez l'aspersion à midi.",
     ruleWindTitle: "Vent ≥ 20 km/h",
-    ruleWindText: "Vent de référence aujourd'hui {wind} km/h → baissez la pression d'aspersion et arrosez tôt le matin.",
+    ruleWindText: "Vent du jour {wind} km/h → baissez la pression d'aspersion et arrosez tôt le matin.",
+    ruleWindCondition: "Si ce seuil de vent est atteint, baissez la pression d'aspersion et arrosez tôt le matin.",
     ruleEt0Title: "Évapotranspiration ≥ 5 mm/jour",
-    ruleEt0Text: "Évapotranspiration de référence aujourd'hui {et0} mm/jour → gardez le planning d'irrigation du jour.",
+    ruleEt0Text: "Évapotranspiration du jour {et0} mm/jour → gardez le planning d'irrigation du jour.",
+    ruleEt0Condition: "Si ce seuil d'évapotranspiration est atteint, gardez le planning d'irrigation du jour.",
     ruleCalmTitle: "Conditions modérées",
     ruleCalmText: "Ni forte chaleur, ni vent fort, ni forte évaporation → conditions favorables à l'irrigation aujourd'hui.",
+    ruleCalmCondition: "Si aucun des seuils précédents n'est atteint, les conditions sont favorables à l'irrigation.",
     activeRule: "Règle active aujourd'hui",
+    otherRulesShow: "Voir les autres règles de décision",
+    otherRulesHide: "Masquer les autres règles de décision",
     dataTitle: "Données réellement utilisées",
     dataNote: "Les mêmes séries et valeurs de référence que la carte météo pour la wilaya {wilaya}.",
     dataNoteLive: "Les mêmes relevés en direct que la carte météo pour la wilaya {wilaya}, via Open-Meteo.",
