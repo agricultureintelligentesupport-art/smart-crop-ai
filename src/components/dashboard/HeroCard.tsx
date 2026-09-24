@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { Clock, Droplets, ShieldCheck, Sparkles, Waves } from "lucide-react";
+import { Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
 import type { IrrigationResult } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { GPU } from "@/components/auth/ui";
@@ -13,17 +13,22 @@ import { fmt } from "./WeatherCard";
  * Promotes the "quick reading" that used to be a plain strip in the middle of
  * the scroll into the screen's headline: today's water volume for the parcel,
  * the irrigation window, and the three advisory lines, all still fed by the
- * exact same `computeIrrigation` numbers as the calculator below.
+ * exact same `computeIrrigation` numbers as the calculator below. The wilaya
+ * name — formerly its own card — rides along as a quiet context label in the
+ * header row, next to the crop name.
  */
 export default function HeroCard({
   t,
   irrigation,
   cropLabel,
+  /** Wilaya name, shown as a small low-emphasis context label. */
+  wilayaLabel,
   advice,
 }: {
   t: DashboardCopy;
   irrigation: IrrigationResult;
   cropLabel: string;
+  wilayaLabel: string;
   /** Pre-composed advisory lines (same copy + values as before). */
   advice: { line1: string; line2: string; line3: string };
 }) {
@@ -43,7 +48,17 @@ export default function HeroCard({
             <Sparkles size={12} strokeWidth={2.8} aria-hidden />
             {t.hero.eyebrow}
           </span>
-          <span className="min-w-0 truncate text-[11.5px] font-bold text-emerald-50/90">{cropLabel}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <span
+              className="flex min-w-0 items-center gap-1 text-[10.5px] font-medium tracking-wide text-emerald-50/70"
+              title={wilayaLabel}
+            >
+              <MapPin size={10} strokeWidth={2.2} aria-hidden className="shrink-0 text-emerald-50/70" />
+              <span className="truncate">{wilayaLabel}</span>
+            </span>
+            <span aria-hidden className="h-2.5 w-px shrink-0 bg-white/20" />
+            <span className="shrink-0 text-[11.5px] font-bold text-emerald-50/90">{cropLabel}</span>
+          </span>
         </div>
 
         <div className="mt-4 flex items-end justify-between gap-3">
