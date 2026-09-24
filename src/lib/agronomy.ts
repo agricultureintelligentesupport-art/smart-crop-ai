@@ -48,15 +48,20 @@ export function seededSeries(key: string, count: number, min: number, max: numbe
 export interface HourPoint {
   label: string;
   tempC: number;
-  /** Chance of rain, %. */
-  rainPct: number;
+  /** Chance of rain, %. `null` = not available from the current source. */
+  rainPct: number | null;
+  /** Relative humidity, % — present only for live hourly data. */
+  humidity?: number | null;
+  /** Wind speed km/h — present only for live hourly data. */
+  windKph?: number | null;
 }
 
 export interface DayPoint {
   labelKey: number;
   minC: number;
   maxC: number;
-  rainPct: number;
+  /** Chance of rain, %. `null` = not available from the current source. */
+  rainPct: number | null;
 }
 
 export interface WeatherSnapshot {
@@ -228,6 +233,12 @@ export interface IrrigationInput {
   areaHa: number;
   soil: SoilKey;
   system: IrrigationSystem;
+  /**
+   * Optional weather snapshot (e.g. live Open-Meteo data) whose climate values
+   * feed the ET0 step. When omitted, the static reference values for the
+   * wilaya are used. The formula itself is identical either way.
+   */
+  weather?: WeatherSnapshot;
 }
 
 export interface IrrigationResult {
@@ -261,8 +272,11 @@ export function computeIrrigation({
   areaHa,
   soil,
   system,
+  weather: weatherOverride,
 }: IrrigationInput): IrrigationResult {
-  const weather = weatherFor(wilayaCode);
+  // Only the climate INPUT may differ (live snapshot vs static reference);
+  // every formula below is identical either way.
+  const weather = weatherOverride ?? weatherFor(wilayaCode);
   const kc = KC[crop];
   const soilFactor = SOIL_FACTOR[soil];
   const netMmDay = weather.et0 * kc * soilFactor;

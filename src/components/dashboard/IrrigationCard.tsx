@@ -2,7 +2,7 @@
 
 import { Droplet, Droplets, Minus, Plus, Ruler, Sprout, Waves } from "lucide-react";
 import { useMemo, useState, type CSSProperties } from "react";
-import { computeIrrigation, type IrrigationSystem } from "@/lib/agronomy";
+import { computeIrrigation, weatherFor, type IrrigationSystem, type WeatherSnapshot } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, SOILS, WILAYA_BY_CODE, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
 import { FOCUS_RING } from "@/components/auth/ui";
@@ -18,6 +18,7 @@ export default function IrrigationCard({
   wilayaCode,
   areaHa,
   onAreaChange,
+  weather,
 }: {
   t: DashboardCopy;
   lang: Lang;
@@ -25,6 +26,9 @@ export default function IrrigationCard({
   /** Parcel size lives in the dashboard so every card and the advice line agree. */
   areaHa: number;
   onAreaChange: (area: number) => void;
+  /** Live (or reference) snapshot shared by the dashboard; falls back to the
+      static reference values when not provided. */
+  weather?: WeatherSnapshot;
 }) {
   const wilaya = getWilaya(wilayaCode);
   const [crop, setCrop] = useState<CropKey>(wilaya.crops[0]);
@@ -40,8 +44,8 @@ export default function IrrigationCard({
   }
 
   const result = useMemo(
-    () => computeIrrigation({ wilayaCode, crop, areaHa, soil, system }),
-    [wilayaCode, crop, areaHa, soil, system],
+    () => computeIrrigation({ wilayaCode, crop, areaHa, soil, system, weather: weather ?? weatherFor(wilayaCode) }),
+    [wilayaCode, crop, areaHa, soil, system, weather],
   );
 
   const cropOptions = useMemo(() => {

@@ -52,15 +52,26 @@ export interface DashboardCopy {
     ruleCalmText: string;
     activeRule: string;
     dataTitle: string;
+    /** Reference-mode note (data = wilaya reference series). */
     dataNote: string;
+    /** Live-mode note (data = Open-Meteo forecast). */
+    dataNoteLive: string;
     hoursTempTitle: string;
     hoursTempNote: string;
     weekTempTitle: string;
     weekTempNote: string;
+    /** Live-mode note for the 7-day range chart. */
+    weekTempNoteLive: string;
     hoursRainTitle: string;
     hoursRainNote: string;
+    /** Shared note for the four hourly charts in live mode. */
+    hoursLiveNote: string;
+    humidityChartTitle: string;
+    windChartTitle: string;
     singleTitle: string;
     singleNote: string;
+    singleTitleLive: string;
+    singleNoteLive: string;
     tempRef: string;
     breakdownTitle: string;
     stepEt0Label: string;
@@ -76,7 +87,10 @@ export interface DashboardCopy {
     stepVolumeFormula: string;
     stepParcelFormula: string;
     stepVolumeNote: string;
+    /** Reference-mode source note (live fetch failed/unavailable). */
     sourceNote: string;
+    /** Live-mode source note (Open-Meteo data). */
+    sourceNoteLive: string;
   };
   quick: {
     title: string;
@@ -132,7 +146,10 @@ export interface DashboardCopy {
     adviceIrrigate: string;
     adviceWind: string;
     adviceCalm: string;
+    /** Shown only when the live fetch failed — reference values are displayed. */
     baselineNote: string;
+    /** Shown when live Open-Meteo data is displayed ({time} = last update). */
+    liveNote: string;
   };
   irrigation: {
     title: string;
@@ -241,15 +258,23 @@ const AR: DashboardCopy = {
     activeRule: "القاعدة النشطة اليوم",
     dataTitle: "المدخلات الفعلية للحساب",
     dataNote: "نفس السلاسل والقيم المرجعية التي تعرضها بطاقة الطقس لولاية {wilaya}.",
+    dataNoteLive: "نفس القراءات الحيّة التي تعرضها بطاقة الطقس لولاية {wilaya}، من Open-Meteo.",
     hoursTempTitle: "درجة الحرارة — ساعات اليوم",
     hoursTempNote: "6 قراءات مرجعية من 06:00 إلى 21:00.",
     weekTempTitle: "المدى اليومي — 7 أيام",
     weekTempNote: "أدنى وأعلى درجة لكل يوم من السلسلة الأسبوعية المرجعية.",
+    weekTempNoteLive: "أدنى وأعلى درجة متوقعة لكل يوم من التوقع الحيّ (7 أيام).",
     hoursRainTitle: "احتمال المطر — ساعات اليوم",
     hoursRainNote: "نسبة مرجعية لكل قراءة من قراءات الساعات.",
+    hoursLiveNote: "6 قراءات ساعتية تالية من التوقع الحيّ (Open-Meteo).",
+    humidityChartTitle: "الرطوبة — ساعات اليوم",
+    windChartTitle: "الرياح — ساعات اليوم",
     singleTitle: "قيم مفردة — بلا سلسلة زمنية",
     singleNote:
       "المصدر الحالي يوفر الرطوبة والرياح كقيمة مرجعية واحدة للولاية فقط. لا توجد لهما قراءات بساعة أو تاريخية، لذلك لا نرسم لهما منحنيات.",
+    singleTitleLive: "قياسات اللحظة الحالية",
+    singleNoteLive:
+      "قراءات اللحظة عند آخر تحديث من المصدر الحيّ؛ «أمطار سنوية» تبقى قيمة مناخية مرجعية طويلة المدى.",
     tempRef: "الحرارة المرجعية",
     breakdownTitle: "كيف حُسبت كمية اليوم",
     stepEt0Label: "التبخر المرجعي ET₀",
@@ -267,7 +292,9 @@ const AR: DashboardCopy = {
     stepParcelFormula: "{gross} مم × {area} هكتار × 10 م³/هكتار/مم = {daily} م³/يوم",
     stepVolumeNote: "الأسبوع: {weekly} م³. (1 مم فوق هكتار = 10 م³ = 10 000 لتر.)",
     sourceNote:
-      "المدخلات: قيم مناخية مرجعية طويلة المدى للولاية محفوظة في التطبيق، ومعاملات ثابتة للمحصول والتربة والنظام. لا يوجد بعد مصدر طقس حي أو قراءات بساعة؛ وعند ربطه تتحدّث هذه الأرقام.",
+      "المدخلات: قيم مناخية مرجعية طويلة المدى للولاية محفوظة في التطبيق (تعذّر الوصول إلى المصدر الحيّ الآن)، ومعاملات ثابتة للمحصول والتربة والنظام.",
+    sourceNoteLive:
+      "المدخلات: قراءات حيّة من Open-Meteo (حرارة، رطوبة، رياح، احتمال مطر) محدّثة كل ساعة، ومعاملات ثابتة للمحصول والتربة والنظام. عند تعذّر المصدر تُعرض القيم المرجعية تلقائياً.",
   },
   quick: {
     title: "وصول سريع",
@@ -322,7 +349,8 @@ const AR: DashboardCopy = {
     adviceIrrigate: "التبخر معتدل: التزم بجدول السقي المعتاد اليوم.",
     adviceWind: "رياح قوية نسبياً: نزّل ضغط الرشّ وارشّ في الصباح الباكر.",
     adviceCalm: "ظروف مناسبة للعمل الميداني والرشّ اليوم.",
-    baselineNote: "قيم إحصائية طويلة المدى، تُحدَّث عند ربط خدمة الطقس الحيّة.",
+    baselineNote: "تعذّر الوصول إلى الطقس الحيّ — تُعرض القيم المرجعية طويلة المدى للولاية.",
+    liveNote: "بيانات حيّة من Open-Meteo · آخر تحديث {time} · تتحدّث كل ساعة.",
   },
   irrigation: {
     title: "حاسبة السقي",
@@ -462,15 +490,23 @@ const FR: DashboardCopy = {
     activeRule: "Règle active aujourd'hui",
     dataTitle: "Données réellement utilisées",
     dataNote: "Les mêmes séries et valeurs de référence que la carte météo pour la wilaya {wilaya}.",
+    dataNoteLive: "Les mêmes relevés en direct que la carte météo pour la wilaya {wilaya}, via Open-Meteo.",
     hoursTempTitle: "Température — heures de la journée",
     hoursTempNote: "6 lectures de référence, de 06:00 à 21:00.",
     weekTempTitle: "Amplitude quotidienne — 7 jours",
     weekTempNote: "Minimum et maximum de chaque jour de la série hebdomadaire de référence.",
+    weekTempNoteLive: "Minimum et maximum prévus pour chacun des 7 prochains jours (en direct).",
     hoursRainTitle: "Risque de pluie — heures de la journée",
     hoursRainNote: "Pourcentage de référence pour chaque lecture horaire.",
+    hoursLiveNote: "6 prochaines heures issues des prévisions en direct (Open-Meteo).",
+    humidityChartTitle: "Humidité — heures de la journée",
+    windChartTitle: "Vent — heures de la journée",
     singleTitle: "Valeurs uniques — sans série temporelle",
     singleNote:
       "La source actuelle ne fournit l'humidité et le vent qu'en valeur de référence unique par wilaya. Aucune lecture horaire ou historique n'existe pour l'instant ; nous ne dessinons donc pas de courbes pour elles.",
+    singleTitleLive: "Relevés de l'instant",
+    singleNoteLive:
+      "Relevés de l'instant au dernier MAJ de la source en direct ; «pluie annuelle» reste une valeur climatique de référence.",
     tempRef: "Température de référence",
     breakdownTitle: "Comment le volume du jour est calculé",
     stepEt0Label: "Évapotranspiration de référence ET₀",
@@ -488,7 +524,9 @@ const FR: DashboardCopy = {
     stepParcelFormula: "{gross} mm × {area} ha × 10 m³/ha/mm = {daily} m³/jour",
     stepVolumeNote: "Par semaine : {weekly} m³. (1 mm sur un hectare = 10 m³ = 10 000 L.)",
     sourceNote:
-      "Données d'entrée : valeurs climatiques de référence à long terme de la wilaya, conservées dans l'application, et coefficients fixes pour la culture, le sol et le système. Aucune source météo en direct ni lecture horaire n'est branchée pour l'instant ; ces chiffres suivront son arrivée.",
+      "Données d'entrée : valeurs climatiques de référence à long terme de la wilaya, conservées dans l'application (source en direct indisponible pour l'instant), et coefficients fixes pour la culture, le sol et le système.",
+    sourceNoteLive:
+      "Données d'entrée : relevés en direct Open-Meteo (température, humidité, vent, risque de pluie), actualisés chaque heure, et coefficients fixes culture/sol/système. En cas d'indisponibilité, les valeurs de référence s'affichent automatiquement.",
   },
   quick: {
     title: "Accès rapide",
@@ -543,7 +581,8 @@ const FR: DashboardCopy = {
     adviceIrrigate: "Évaporation modérée : gardez le planning d'irrigation du jour.",
     adviceWind: "Vent soutenu : baissez la pression d'aspersion et arrosez tôt le matin.",
     adviceCalm: "Conditions favorables au travail de parcelle et au traitement aujourd'hui.",
-    baselineNote: "Valeurs statistiques long terme, remplacées dès que le service météo est connecté.",
+    baselineNote: "Service météo live indisponible — valeurs de référence long terme affichées.",
+    liveNote: "Données en direct Open-Meteo · MAJ {time} · actualisées chaque heure.",
   },
   irrigation: {
     title: "Calculateur d'irrigation",

@@ -130,14 +130,15 @@ test("weatherFor is deterministic and exposes 6 hourly + 7 daily points", () => 
   assert.deepEqual(a.hours.map((h) => h.label), [...HOUR_LABELS]);
   for (const h of a.hours) {
     assert.ok(Number.isFinite(h.tempC) && h.tempC > -50 && h.tempC < 80);
-    assert.ok(h.rainPct >= 0 && h.rainPct <= 100);
+    // The reference series always carries a rain probability.
+    assert.ok(typeof h.rainPct === "number" && h.rainPct >= 0 && h.rainPct <= 100);
   }
 
   assert.equal(a.days.length, DAY_KEYS.length); // 7-day series
   assert.deepEqual(a.days.map((d) => d.labelKey), [...DAY_KEYS]);
   for (const d of a.days) {
     assert.ok(d.minC < d.maxC);
-    assert.ok(d.rainPct >= 0 && d.rainPct <= 100);
+    assert.ok(typeof d.rainPct === "number" && d.rainPct >= 0 && d.rainPct <= 100);
   }
 });
 

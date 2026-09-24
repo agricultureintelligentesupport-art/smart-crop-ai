@@ -11,11 +11,11 @@ import {
   Waves,
   Wind,
 } from "lucide-react";
+import type { ReactNode } from "react";
 import Sheet from "@/components/app/Sheet";
 import type {
   DayPoint,
   Et0Breakdown,
-  HourPoint,
   IrrigationResult,
   WeatherSnapshot,
 } from "@/lib/agronomy";
@@ -28,6 +28,7 @@ import {
 } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, SOILS, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
+import type { WeatherSource } from "@/lib/weather/useLiveWeather";
 import { fmt } from "./WeatherCard";
 import { Chip, Metric } from "./parts";
 
@@ -37,16 +38,18 @@ import { Chip, Metric } from "./parts";
  *
  * Real data only — everything shown here is derived from the exact same
  * sources the dashboard already uses:
- *   - `WeatherSnapshot` (wilaya baseline + deterministic hourly/7-day series,
- *     the same values WeatherCard renders), and
+ *   - `WeatherSnapshot` — live Open-Meteo forecast when the fetch succeeds
+ *     (6 hourly temp/rain/humidity/wind points + 7 daily ranges, the same
+ *     values WeatherCard renders), otherwise the deterministic wilaya
+ *     reference series as a clearly-labelled fallback; and
  *   - `IrrigationResult` + `referenceEt0Detail` (the actual intermediate
  *     values of the existing `computeIrrigation` formula — no re-derivation,
  *     no new numbers).
  *
- * Granularity honesty: temperature and rain probability have 6 hourly + 7
- * daily points in the current source; humidity and wind exist only as a
- * single wilaya baseline value, so they are shown as single values with an
- * explicit "no time series" note instead of a fabricated chart.
+ * Granularity honesty: in reference mode humidity/wind have no hourly series,
+ * so they are shown as single values with an explicit "no time series" note.
+ * In live mode the real hourly humidity/wind forecast is charted instead,
+ * and the notes say exactly which source is being shown.
  */
 export default function IrrigationWindowSheet({
   open,
@@ -59,6 +62,7 @@ export default function IrrigationWindowSheet({
   areaHa,
   weather,
   irrigation,
+  source,
 }: {
   open: boolean;
   onClose: () => void;
@@ -70,8 +74,11 @@ export default function IrrigationWindowSheet({
   areaHa: number;
   weather: WeatherSnapshot;
   irrigation: IrrigationResult;
+  /** Where `weather`'s numbers come from (drives copy + the live-only charts). */
+  source: WeatherSource;
 }) {
   const d = t.windowDetail;
+  const isLive = source === "live";
   const wilaya = getWilaya(wilayaCode);
   const wilayaName = lang === "ar" ? wilaya.nameAr : wilaya.nameFr;
   const cropName = CROPS[crop][lang];
@@ -219,42 +226,79 @@ export default function IrrigationWindowSheet({
             {d.dataTitle}
           </h3>
           <p className="px-1 text-[11.5px] font-semibold leading-[1.7] text-emerald-900/65">
-            {fill(d.dataNote, { wilaya: wilayaName })}
+            {isLive ? fill(d.dataNoteLive, { wilaya: wilayaName }) : fill(d.dataNote, { wilaya: wilayaName })}
           </p>
 
           <div className="grid gap-2.5 sm:grid-cols-2">
-            <figure className="app-tile m-0 flex flex-col gap-1.5 rounded-[1rem] p-3">
-              <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
-                <Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
-                {d.hoursTempTitle}
-              </figcaption>
-              <HourTempChart hours={hours} label={`${d.hoursTempTitle} (${wilayaName})`} />
-              <p className="text-[10px] font-bold leading-4 text-emerald-900/50">{d.hoursTempNote}</p>
-            </figure>
-
-            <figure className="app-tile m-0 flex flex-col gap-1.5 rounded-[1rem] p-3">
-              <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
-                <CloudRain size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
-                {d.hoursRainTitle}
-              </figcaption>
-              <HourRainChart hours={hours} label={`${d.hoursRainTitle} (${wilayaName})`} />
-              <p className="text-[10px] font-bold leading-4 text-emerald-900/50">{d.hoursRainNote}</p>
-            </figure>
+            <ChartFigure
+              title={d.hoursTempTitle}
+              icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+              note={isLive ? d.hoursLiveNote : d.hoursTempNote}
+            >
+              <HourLineChart
+                points={hours.map((h) => ({ label: h.label, value: h.tempC }))}
+                format={(v) => `${fmt(v, 0)}°`}
+                label={`${d.hoursTempTitle} (${wilayaName})`}
+              />
+            </ChartFigure>
+            <ChartFigure
+              title={d.hoursRainTitle}
+              icon={<CloudRain size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+              note={isLive ? d.hoursLiveNote : d.hoursRainNote}
+            >
+              <HourBarChart
+                points={hours.map((h) => ({ label: h.label, value: h.rainPct }))}
+                format={(v) => `${fmt(v)}%`}
+                label={`${d.hoursRainTitle} (${wilayaName})`}
+              />
+            </ChartFigure>
+            {/* Live source only: real hourly humidity/wind forecasts exist then. */}
+            {isLive && (
+              <ChartFigure
+                title={d.humidityChartTitle}
+                icon={<Droplets size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+                note={d.hoursLiveNote}
+              >
+                <HourLineChart
+                  points={hours.map((h) => ({ label: h.label, value: h.humidity ?? null }))}
+                  format={(v) => `${fmt(v)}%`}
+                  tone="amber"
+                  label={`${d.humidityChartTitle} (${wilayaName})`}
+                />
+              </ChartFigure>
+            )}
+            {isLive && (
+              <ChartFigure
+                title={d.windChartTitle}
+                icon={<Wind size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+                note={d.hoursLiveNote}
+              >
+                <HourBarChart
+                  points={hours.map((h) => ({ label: h.label, value: h.windKph ?? null }))}
+                  format={(v) => `${fmt(v)} km/h`}
+                  tone="emerald"
+                  label={`${d.windChartTitle} (${wilayaName})`}
+                />
+              </ChartFigure>
+            )}
           </div>
 
-          <figure className="app-tile m-0 flex flex-col gap-1.5 rounded-[1rem] p-3">
-            <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
-              <Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />
-              {d.weekTempTitle}
-            </figcaption>
-            <WeekRangeChart days={days} dayLabels={t.weather.dayLabels} label={`${d.weekTempTitle} (${wilayaName})`} />
-            <p className="text-[10px] font-bold leading-4 text-emerald-900/50">{d.weekTempNote}</p>
-          </figure>
+          <ChartFigure
+            title={d.weekTempTitle}
+            icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+            note={isLive ? d.weekTempNoteLive : d.weekTempNote}
+          >
+            <WeekRangeChart
+              days={days}
+              dayLabels={t.weather.dayLabels}
+              label={`${d.weekTempTitle} (${wilayaName})`}
+            />
+          </ChartFigure>
 
           <div className="flex flex-col gap-1.5">
-            <p className="px-1 text-[11.5px] font-black text-emerald-900">{d.singleTitle}</p>
+            <p className="px-1 text-[11.5px] font-black text-emerald-900">{isLive ? d.singleTitleLive : d.singleTitle}</p>
             <p className="px-1 text-[10.5px] font-semibold leading-[1.7] text-emerald-900/55">
-              {d.singleNote}
+              {isLive ? d.singleNoteLive : d.singleNote}
             </p>
             <div className="grid grid-cols-2 gap-2">
               <Metric
@@ -319,10 +363,10 @@ export default function IrrigationWindowSheet({
           />
         </section>
 
-        {/* Data-source honesty note */}
+        {/* Data-source note — says exactly which source is shown. */}
         <p className="flex items-start gap-2 rounded-[1.1rem] bg-[#f4f8f5] p-3.5 text-[10.5px] font-semibold leading-[1.8] text-emerald-900/60">
           <Info size={13} strokeWidth={2.6} aria-hidden className="mt-[3px] shrink-0 text-emerald-500" />
-          {d.sourceNote}
+          {isLive ? d.sourceNoteLive : d.sourceNote}
         </p>
       </div>
     </Sheet>
@@ -379,54 +423,110 @@ function StepTile({
 /* ------------------------------------------------------------------ */
 /*  Charts — pure SVG, pinned LTR (time axis always reads left→right), */
 /*  fed exclusively from the WeatherSnapshot the app already renders.  */
+/*  `null` values (no data from the source) are drawn as gaps, never   */
+/*  invented.                                                          */
 /* ------------------------------------------------------------------ */
 
 const CHART_W = 300;
 
-function HourTempChart({ hours, label }: { hours: HourPoint[]; label: string }) {
+interface SeriesPoint {
+  label: string;
+  value: number | null;
+}
+
+const TONE_STROKE = { emerald: "#10b981", amber: "#f59e0b" } as const;
+const TONE_FILL = { emerald: "rgba(16,185,129,0.16)", amber: "rgba(245,158,11,0.16)" } as const;
+const TONE_BAR = { emerald: "rgba(16,185,129,0.55)", amber: "rgba(245,158,11,0.55)" } as const;
+const TONE_BAR_HOT = { emerald: "#10b981", amber: "#f59e0b" } as const;
+
+/** Tile shell shared by every chart: title row + svg + footnote. */
+function ChartFigure({
+  title,
+  icon,
+  note,
+  children,
+}: {
+  title: string;
+  icon: ReactNode;
+  note: string;
+  children: ReactNode;
+}) {
+  return (
+    <figure className="app-tile m-0 flex flex-col gap-1.5 rounded-[1rem] p-3">
+      <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
+        {icon}
+        {title}
+      </figcaption>
+      {children}
+      <p className="text-[10px] font-bold leading-4 text-emerald-900/50">{note}</p>
+    </figure>
+  );
+}
+
+function HourLineChart({
+  points,
+  format,
+  label,
+  tone = "emerald",
+}: {
+  points: SeriesPoint[];
+  format: (value: number) => string;
+  label: string;
+  tone?: "emerald" | "amber";
+}) {
   const H = 96;
   const PX = 20;
   const PY_TOP = 18;
   const PY_BOTTOM = 20;
-  const values = hours.map((h) => h.tempC);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const values = points.map((p) => p.value);
+  const present = values.filter((v): v is number => v !== null);
+  const min = present.length ? Math.min(...present) : 0;
+  const max = present.length ? Math.max(...present) : 1;
   const span = max - min || 1;
-  const x = (i: number) => PX + (i / Math.max(hours.length - 1, 1)) * (CHART_W - 2 * PX);
+  const x = (i: number) => PX + (i / Math.max(points.length - 1, 1)) * (CHART_W - 2 * PX);
   const y = (v: number) => H - PY_BOTTOM - ((v - min) / span) * (H - PY_TOP - PY_BOTTOM);
-  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  const pts = values
+    .map((v, i) => (v === null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`))
+    .filter((p): p is string => p !== null);
+
+  if (present.length === 0) {
+    return (
+      <svg viewBox={`0 0 ${CHART_W} ${H}`} role="img" aria-label={`${label} — unavailable`} className="w-full">
+        <text x={CHART_W / 2} y={H / 2} textAnchor="middle" fontSize="11" fontWeight={700} fill="rgba(6,78,59,0.4)">
+          —
+        </text>
+      </svg>
+    );
+  }
 
   return (
-    <svg
-      viewBox={`0 0 ${CHART_W} ${H}`}
-      role="img"
-      aria-label={label}
-      className="w-full"
-    >
-      <polygon points={`0,${H - PY_BOTTOM} ${pts.join(" ")} ${CHART_W},${H - PY_BOTTOM}`} fill="rgba(16,185,129,0.16)" />
-      <polyline
-        points={pts.join(" ")}
-        fill="none"
-        stroke="#10b981"
-        strokeWidth={2.4}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg viewBox={`0 0 ${CHART_W} ${H}`} role="img" aria-label={label} className="w-full">
+      {pts.length > 1 && (
+        <polygon
+          points={`${pts[0].split(",")[0]},${H - PY_BOTTOM} ${pts.join(" ")} ${pts[pts.length - 1].split(",")[0]},${H - PY_BOTTOM}`}
+          fill={TONE_FILL[tone]}
+        />
+      )}
+      {pts.length > 1 && (
+        <polyline
+          points={pts.join(" ")}
+          fill="none"
+          stroke={TONE_STROKE[tone]}
+          strokeWidth={2.4}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
       {values.map((v, i) => (
-        <g key={hours[i].label}>
-          <circle cx={x(i)} cy={y(v)} r={2.6} fill="#10b981" />
-          <text
-            x={x(i)}
-            y={y(v) - 6}
-            textAnchor="middle"
-            fontSize="9.5"
-            fontWeight={800}
-            fill="#064e3b"
-          >
-            {fmt(v, 0)}°
-          </text>
+        <g key={points[i].label}>
+          {v !== null && <circle cx={x(i)} cy={y(v)} r={2.6} fill={TONE_STROKE[tone]} />}
+          {v !== null && (
+            <text x={x(i)} y={y(v) - 6} textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#064e3b">
+              {format(v)}
+            </text>
+          )}
           <text x={x(i)} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
-            {hours[i].label}
+            {points[i].label}
           </text>
         </g>
       ))}
@@ -434,42 +534,60 @@ function HourTempChart({ hours, label }: { hours: HourPoint[]; label: string }) 
   );
 }
 
-function HourRainChart({ hours, label }: { hours: HourPoint[]; label: string }) {
+function HourBarChart({
+  points,
+  format,
+  label,
+  tone = "amber",
+}: {
+  points: SeriesPoint[];
+  format: (value: number) => string;
+  label: string;
+  tone?: "emerald" | "amber";
+}) {
   const H = 96;
   const PX = 16;
   const PY_TOP = 16;
   const PY_BOTTOM = 20;
-  const values = hours.map((h) => h.rainPct);
-  const max = Math.max(...values, 1);
-  const slot = (CHART_W - 2 * PX) / hours.length;
+  const present = points.map((p) => p.value).filter((v): v is number => v !== null);
+  const max = present.length ? Math.max(...present, 1) : 1;
+  const slot = (CHART_W - 2 * PX) / points.length;
   const barW = Math.min(26, slot * 0.55);
 
   return (
-    <svg
-      viewBox={`0 0 ${CHART_W} ${H}`}
-      role="img"
-      aria-label={label}
-      className="w-full"
-    >
-      {values.map((v, i) => {
+    <svg viewBox={`0 0 ${CHART_W} ${H}`} role="img" aria-label={label} className="w-full">
+      {points.map((p, i) => {
         const cx = PX + slot * i + slot / 2;
-        const hBar = (v / max) * (H - PY_TOP - PY_BOTTOM);
+        if (p.value === null) {
+          return (
+            <g key={p.label}>
+              <rect x={cx - barW / 2} y={H - PY_BOTTOM - 2} width={barW} height={2} rx={1} fill="rgba(6,78,59,0.15)" />
+              <text x={cx} y={H - PY_BOTTOM - 7} textAnchor="middle" fontSize="9" fontWeight={700} fill="rgba(6,78,59,0.4)">
+                —
+              </text>
+              <text x={cx} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
+                {p.label}
+              </text>
+            </g>
+          );
+        }
+        const hBar = (p.value / max) * (H - PY_TOP - PY_BOTTOM);
         const yBar = H - PY_BOTTOM - hBar;
         return (
-          <g key={hours[i].label}>
+          <g key={p.label}>
             <rect
               x={cx - barW / 2}
               y={yBar}
               width={barW}
               height={Math.max(hBar, 1.5)}
               rx={3}
-              fill={v >= 50 ? "#f59e0b" : "rgba(245,158,11,0.55)"}
+              fill={p.value >= 50 && tone === "amber" ? TONE_BAR_HOT[tone] : TONE_BAR[tone]}
             />
             <text x={cx} y={yBar - 5} textAnchor="middle" fontSize="9.5" fontWeight={800} fill="#064e3b">
-              {fmt(v)}%
+              {format(p.value)}
             </text>
             <text x={cx} y={H - 6} textAnchor="middle" fontSize="9.5" fontWeight={700} fill="rgba(6,78,59,0.55)">
-              {hours[i].label}
+              {p.label}
             </text>
           </g>
         );

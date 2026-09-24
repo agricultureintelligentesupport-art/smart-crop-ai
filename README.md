@@ -84,11 +84,20 @@ top bar, a single scroll region, a bottom tab bar and bottom sheets — styled
 by the shared surfaces in `globals.css` ("App shell") over the
 `components/app/` primitives. See
 [`docs/redesign/README.md`](docs/redesign/README.md) for the design language
-and before/after screenshots. Every number is derived from the wilaya baseline (temperature,
-humidity, wind, rainfall, soil, crops) through `src/lib/agronomy.ts`, which is
-deterministic and offline — no hydration mismatch, no fake "live" data.
+and before/after screenshots.
 
-- **Weather + water need**: hourly and 7-day views, ET₀, agronomic advice line.
+**Weather data**: the dashboard's temperature/humidity/wind/rain readings are
+**live from [Open-Meteo](https://open-meteo.com)** (free, no API key, fetched
+client-side per wilaya with a 1-hour per-wilaya cache). If the fetch fails,
+the UI falls back to the deterministic, offline wilaya reference baseline in
+`src/lib/agronomy.ts` and clearly labels which source is showing — no fake
+"live" data, no hydration mismatch (the server always renders reference
+values). Soil and crops remain wilaya baselines; the irrigation formulas
+(`ET₀ × Kc × soil ÷ efficiency`) are unchanged — only their climate inputs
+can now be live.
+
+- **Weather + water need**: live hourly and 7-day views (fallback: reference
+  series), ET₀, agronomic advice line.
 - **Irrigation calculator**: crop × area × soil × system → L/ha, m³/day, m³/week
   and water saved versus furrow (FAO-56 style: `ET₀ × Kc × soil ÷ efficiency`).
 - **Leaf scan**: file picker / drag & drop / camera capture, local preview,
@@ -164,8 +173,9 @@ src/
 │                               # FieldTasksCard, WilayaSelect, parts
 ├── lib/
 │   ├── content.ts              # onboarding copy (AR/FR)
-│   ├── wilayas.ts              # 58 wilayas + climate/soil/crop baselines, fuzzy search
-│   ├── agronomy.ts             # weather, ET₀, irrigation, NDVI, demo diagnosis
+│   ├── wilayas.ts              # 58 wilayas + coords + climate/soil/crop baselines, fuzzy search
+│   ├── agronomy.ts             # reference weather, ET₀, irrigation, NDVI, demo diagnosis
+│   └── weather/                # live Open-Meteo layer: fetch + cache + useLiveWeather hook
 │   ├── use-lang.ts             # persisted AR/FR state, keeps <html lang/dir> in sync
 │   ├── auth/                   # types, gateway, validation, profile, copy
 │   └── dashboard/copy.ts       # dashboard copy (AR/FR)

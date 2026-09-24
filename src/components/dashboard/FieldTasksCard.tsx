@@ -2,7 +2,7 @@
 
 import { ClipboardList } from "lucide-react";
 import { useMemo, useState } from "react";
-import { computeIrrigation, weatherFor } from "@/lib/agronomy";
+import { computeIrrigation, weatherFor, type WeatherSnapshot } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { CROPS, type CropKey, type Lang } from "@/lib/wilayas";
 import { fmt } from "./WeatherCard";
@@ -21,20 +21,25 @@ export default function FieldTasksCard({
   wilayaCode,
   crop,
   areaHa = 2,
+  weather,
 }: {
   t: DashboardCopy;
   lang: Lang;
   wilayaCode: string;
   crop: CropKey;
   areaHa?: number;
+  /** Live (or reference) snapshot shared by the dashboard; falls back to the
+      static reference values when not provided. */
+  weather?: WeatherSnapshot;
 }) {
-  const weather = weatherFor(wilayaCode);
+  const snapshot = weather ?? weatherFor(wilayaCode);
   const irrigation = computeIrrigation({
     wilayaCode,
     crop,
     areaHa,
-    soil: weather.wilaya.soil,
+    soil: snapshot.wilaya.soil,
     system: "drip",
+    weather: snapshot,
   });
 
   const tasks = useMemo<Task[]>(
@@ -47,12 +52,12 @@ export default function FieldTasksCard({
       {
         id: "wind",
         title: t.tasks.wind,
-        detail: t.tasks.windDetail.replace("{value}", fmt(weather.windKph)),
+        detail: t.tasks.windDetail.replace("{value}", fmt(snapshot.windKph)),
       },
       {
         id: "heat",
         title: t.tasks.heat,
-        detail: t.tasks.heatDetail.replace("{value}", fmt(weather.tempC)),
+        detail: t.tasks.heatDetail.replace("{value}", fmt(snapshot.tempC)),
       },
       {
         id: "scan",
@@ -60,7 +65,7 @@ export default function FieldTasksCard({
         detail: t.tasks.scanDetail,
       },
     ],
-    [irrigation.dailyM3, t.tasks, weather.tempC, weather.windKph],
+    [irrigation.dailyM3, t.tasks, snapshot.tempC, snapshot.windKph],
   );
 
   const [done, setDone] = useState<Record<string, boolean>>({});

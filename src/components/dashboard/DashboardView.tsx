@@ -8,7 +8,7 @@ import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
 import { useAuth } from "@/context/AuthContext";
-import { computeIrrigation, weatherFor } from "@/lib/agronomy";
+import { computeIrrigation } from "@/lib/agronomy";
 import { APP_SHELL } from "@/lib/app/copy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
@@ -17,6 +17,7 @@ import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
 import { CROPS, DEFAULT_WILAYA_CODE, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
+import { useLiveWeather } from "@/lib/weather/useLiveWeather";
 import AccountSheet from "./AccountSheet";
 import FieldTasksCard from "./FieldTasksCard";
 import HeroCard from "./HeroCard";
@@ -84,7 +85,12 @@ export default function DashboardView() {
   }, [authenticated, ready, router]);
 
   const wilaya = getWilaya(wilayaCode);
-  const weather = weatherFor(wilayaCode);
+  // Live Open-Meteo weather for the wilaya (hourly cache, graceful fallback to
+  // the static reference values). One shared snapshot feeds every card, the
+  // irrigation calculation and the window detail sheet — same formulas as
+  // before, only the climate inputs can now be live.
+  const liveWeather = useLiveWeather(wilayaCode);
+  const weather = liveWeather.snapshot;
   const crop = wilaya.crops[0];
   const irrigation = computeIrrigation({
     wilayaCode,
@@ -92,6 +98,7 @@ export default function DashboardView() {
     areaHa,
     soil: wilaya.soil,
     system: "drip",
+    weather,
   });
 
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
@@ -240,19 +247,33 @@ export default function DashboardView() {
             onOpenWindowDetail={() => setOpenWindowDetail(true)}
           />
 
-          <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
+          <FieldTasksCard
+            t={t}
+            lang={lang}
+            wilayaCode={wilayaCode}
+            crop={crop}
+            areaHa={areaHa}
+            weather={weather}
+          />
 
           {/* Weather + water calculator */}
           <section id="section-weather" aria-label={t.sections.weather} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.weather} />
             <div className="grid gap-3 lg:grid-cols-2">
-              <WeatherCard t={t} lang={lang} weather={weather} />
+              <WeatherCard
+                t={t}
+                lang={lang}
+                weather={weather}
+                source={liveWeather.source}
+                fetchedAt={liveWeather.fetchedAt}
+              />
               <IrrigationCard
                 t={t}
                 lang={lang}
                 wilayaCode={wilayaCode}
                 areaHa={areaHa}
                 onAreaChange={setAreaHa}
+                weather={weather}
               />
             </div>
           </section>
@@ -297,6 +318,7 @@ export default function DashboardView() {
         areaHa={areaHa}
         weather={weather}
         irrigation={irrigation}
+        source={liveWeather.source}
       />
 
       <AccountSheet
