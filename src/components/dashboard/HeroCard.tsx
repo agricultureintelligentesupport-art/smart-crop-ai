@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { ChevronLeft, Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
+import { ChevronDown, ChevronLeft, Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
 import type { IrrigationResult } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { GPU } from "@/components/auth/ui";
@@ -25,6 +25,8 @@ export default function HeroCard({
   wilayaLabel,
   advice,
   onOpenWindowDetail,
+  onOpenPerHectareFlow,
+  flowOpen,
 }: {
   t: DashboardCopy;
   irrigation: IrrigationResult;
@@ -34,6 +36,10 @@ export default function HeroCard({
   advice: { line1: string; line2: string; line3: string };
   /** Opens the irrigation-window detail sheet (why this window + volume). */
   onOpenWindowDetail: () => void;
+  /** Opens the per-hectare calculation flow (the unit pill below). */
+  onOpenPerHectareFlow: () => void;
+  /** Whether that flow is currently on screen (drives the pill's arrow + glow). */
+  flowOpen: boolean;
 }) {
   const reduce = useReducedMotion();
 
@@ -105,12 +111,46 @@ export default function HeroCard({
               {t.hero.windowValue}
             </span>
           </button>
-          <div className="min-w-[7.5rem] flex-1 rounded-[1rem] bg-white/12 px-3 py-2 ring-1 ring-white/15">
-            <p className="text-[10.5px] font-bold text-emerald-50/90">{t.hero.perHa}</p>
-            <p dir="ltr" className="mt-0.5 text-[14px] font-black tabular-nums text-white">
-              {fmt(irrigation.litresPerHaDay)} L
-            </p>
-          </div>
+          {/* Unit pill: opens the step-by-step calculation flow. The arrow reads
+              ↓ while closed and → (the flow's own direction) once it is open. */}
+          <motion.button
+            type="button"
+            onClick={onOpenPerHectareFlow}
+            aria-label={t.hero.perHaOpen}
+            aria-haspopup="dialog"
+            aria-expanded={flowOpen}
+            whileTap={reduce ? undefined : { scale: 0.98 }}
+            className={`group relative min-w-[7.5rem] flex-1 overflow-hidden rounded-[1rem] bg-white/[0.14] px-3 py-2 text-start transition-colors hover:bg-white/[0.2] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/45 ${
+              flowOpen
+                ? "ring-2 ring-emerald-300/80 shadow-[0_0_0_1px_rgba(255,255,255,0.22),0_12px_30px_-14px_rgba(16,185,129,0.95)]"
+                : "ring-1 ring-emerald-200/35 shadow-[0_10px_26px_-18px_rgba(16,185,129,0.95)]"
+            }`}
+          >
+            <span className="flex items-center justify-between gap-2">
+              <span className="text-[10.5px] font-bold text-emerald-50/90">{t.hero.perHa}</span>
+              <ChevronDown
+                size={13}
+                strokeWidth={3}
+                aria-hidden
+                className={`shrink-0 text-emerald-100 transition-transform duration-300 ${
+                  flowOpen ? "rtl:rotate-90 ltr:-rotate-90" : ""
+                }`}
+              />
+            </span>
+            <span dir="ltr" className="mt-0.5 flex items-baseline gap-1 text-[14px] font-black tabular-nums text-white">
+              {fmt(irrigation.litresPerHaDay)}
+              <span className="text-[10px] font-extrabold text-emerald-50/75">L / ha</span>
+            </span>
+            <span className="mt-0.5 block text-[9.5px] font-bold text-emerald-50/70">{t.hero.perHaCta}</span>
+            {!reduce && !flowOpen && (
+              <motion.span
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-[1rem] ring-2 ring-emerald-300/50"
+                animate={{ opacity: [0.2, 0.8, 0.2] }}
+                transition={{ duration: 2.8, repeat: Infinity, ease: "easeInOut" }}
+              />
+            )}
+          </motion.button>
         </div>
 
         <ul className="mt-3 flex flex-col gap-2 rounded-[1.1rem] bg-white/10 p-3 ring-1 ring-white/12">

@@ -98,6 +98,21 @@ can now be live.
 
 - **Weather + water need**: live hourly and 7-day views (fallback: reference
   series), ET₀, agronomic advice line.
+- **Per-hectare breakdown** (`PerHectareFlowSheet`): the hero card's
+  "لكل هكتار" pill opens a step-by-step diagram of the very chain
+  `computeIrrigation` runs — climate inputs → ET₀ → Kc × soil factor →
+  ÷ system efficiency → L/ha → parcel m³. Each factor is a real button: hovering
+  or tapping it highlights the term it acts on and draws an animated connector,
+  with its mathematical effect spelled out. The headline litres and m³ are read
+  straight off the same `IrrigationResult` the card renders, so the explanation
+  can never drift from the number it explains.
+- **Field heatmap** (`FieldHeatmapCard`): the parcel split into a 4-column zone
+  grid with three switchable layers (thermal stress, water requirement,
+  transpiration index), tap/keyboard zone inspection with per-zone verdicts, and
+  slow sensor-style shimmer. The moisture layer averages back **exactly** to the
+  card's L/ha figure (the zone rounding preserves the total), and the whole
+  pattern is a deterministic model estimate built from the day's own inputs —
+  labelled as such, never presented as a satellite reading.
 - **Irrigation calculator**: crop × area × soil × system → L/ha, m³/day, m³/week
   and water saved versus furrow (FAO-56 style: `ET₀ × Kc × soil ÷ efficiency`).
 - **Leaf scan**: file picker / drag & drop / camera capture, local preview,
@@ -170,7 +185,8 @@ src/
 │   │   └── ui.tsx              # buttons, fields, strength meter, notice, badges
 │   └── dashboard/              # DashboardView shell, HeroCard, QuickActions, AccountSheet,
 │                               # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
-│                               # FieldTasksCard, WilayaSelect, parts
+│                               # FieldTasksCard, FieldHeatmapCard, PerHectareFlowSheet,
+│                               # IrrigationWindowSheet, WilayaSelect, parts
 ├── lib/
 │   ├── content.ts              # onboarding copy (AR/FR)
 │   ├── wilayas.ts              # 58 wilayas + coords + climate/soil/crop baselines, fuzzy search
@@ -178,7 +194,9 @@ src/
 │   └── weather/                # live Open-Meteo layer: fetch + cache + useLiveWeather hook
 │   ├── use-lang.ts             # persisted AR/FR state, keeps <html lang/dir> in sync
 │   ├── auth/                   # types, gateway, validation, profile, copy
-│   └── dashboard/copy.ts       # dashboard copy (AR/FR)
+│   ├── dashboard/copy.ts       # dashboard copy (AR/FR)
+│   ├── dashboard/flow.ts       # per-hectare chain exposed for the flow diagram
+│   └── dashboard/heatmap.ts    # deterministic zone model behind the heatmap
 ├── docs/firebase-adapter.md    # how to bind Firebase Auth
 └── e2e/                        # Playwright suites
 ```
@@ -195,6 +213,10 @@ Two projects (Pixel 7 + Desktop Chrome, 66 tests) covering:
 - **Onboarding** (`e2e/onboarding.spec.ts`): zero page scroll at 320/412 widths,
   48px+ targets, RTL mirroring, swipe semantics, dot jumps, AR⇄FR switching,
   CTA routing, no console errors.
+- **Hero flow + field heatmap** (`e2e/field-heatmap-flow.spec.ts`): the unit
+  pill opens/closes the flow (aria-expanded), the five steps print the card's own
+  figures, tapping a factor highlights its term and explains its effect, the
+  heatmap switches all three layers, zones inspect by tap and by arrow keys.
 - **Auth + dashboard** (`e2e/auth-flow.spec.ts`): field-level validation,
   password toggle + strength meter, phone validation, wrong/expired OTP, resend
   rate limit, changing the number, role requirement, wilaya search in Arabic and

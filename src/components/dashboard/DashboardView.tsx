@@ -15,14 +15,16 @@ import { DASHBOARD } from "@/lib/dashboard/copy";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
-import { CROPS, DEFAULT_WILAYA_CODE, getWilaya, type Lang } from "@/lib/wilayas";
+import { CROPS, DEFAULT_WILAYA_CODE, SOILS, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import { useLiveWeather } from "@/lib/weather/useLiveWeather";
 import AccountSheet from "./AccountSheet";
+import FieldHeatmapCard from "./FieldHeatmapCard";
 import FieldTasksCard from "./FieldTasksCard";
 import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
 import IrrigationWindowSheet from "./IrrigationWindowSheet";
+import PerHectareFlowSheet from "./PerHectareFlowSheet";
 import SatelliteCard from "./SatelliteCard";
 import SettingsSheet from "./SettingsSheet";
 import ScanCard from "./ScanCard";
@@ -62,6 +64,8 @@ export default function DashboardView() {
   const [openPersonalize, setOpenPersonalize] = useState(false);
   /** Irrigation-window detail sheet, opened from the hero's "نافذة السقي" tile. */
   const [openWindowDetail, setOpenWindowDetail] = useState(false);
+  /** Per-hectare calculation flow, opened from the hero's unit pill. */
+  const [openPerHectareFlow, setOpenPerHectareFlow] = useState(false);
   /** Parcel size in hectares: one input, consumed by every card. */
   const [areaHa, setAreaHa] = useState(2);
 
@@ -101,6 +105,7 @@ export default function DashboardView() {
     weather,
   });
 
+  const soilLabel = SOILS[wilaya.soil][lang];
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
   // Guests render as "زائر" / "Invité"; a real identity always wins.
   const displayName = guestActive
@@ -245,6 +250,8 @@ export default function DashboardView() {
             wilayaLabel={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
             advice={advice}
             onOpenWindowDetail={() => setOpenWindowDetail(true)}
+            onOpenPerHectareFlow={() => setOpenPerHectareFlow(true)}
+            flowOpen={openPerHectareFlow}
           />
 
           <FieldTasksCard
@@ -282,6 +289,17 @@ export default function DashboardView() {
           <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
+              {/* The map reads the same irrigation result as the hero card, so the
+                  moisture layer always averages back to the daily L/ha figure. */}
+              <FieldHeatmapCard
+                t={t}
+                lang={lang}
+                wilayaCode={wilayaCode}
+                crop={crop}
+                areaHa={areaHa}
+                irrigation={irrigation}
+                weather={weather}
+              />
               <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
               <ScanCard t={t} wilayaCode={wilayaCode} />
             </div>
@@ -319,6 +337,21 @@ export default function DashboardView() {
         weather={weather}
         irrigation={irrigation}
         source={liveWeather.source}
+      />
+
+      {/* Per-hectare flow: the same chain and the same numbers as the hero. */}
+      <PerHectareFlowSheet
+        open={openPerHectareFlow}
+        onClose={() => setOpenPerHectareFlow(false)}
+        t={t}
+        lang={lang}
+        wilayaName={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
+        cropName={CROPS[crop][lang]}
+        soilName={soilLabel}
+        systemName={t.irrigation.systems.drip}
+        areaHa={areaHa}
+        irrigation={irrigation}
+        weather={weather}
       />
 
       <AccountSheet
