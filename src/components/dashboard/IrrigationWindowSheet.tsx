@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, useInView, useReducedMotion } from "framer-motion";
 import {
   Check,
   Circle,
@@ -14,7 +14,7 @@ import {
   Waves,
   Wind,
 } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import Sheet from "@/components/app/Sheet";
 import type {
   DayPoint,
@@ -248,12 +248,14 @@ export default function IrrigationWindowSheet({
             <ChartFigure
               index={0}
               title={d.hoursTempTitle}
-              icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+              tone="heat"
+              icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden />}
               note={isLive ? d.hoursLiveNote : d.hoursTempNote}
             >
               <HourLineChart
                 points={hours.map((h) => ({ label: h.label, value: h.tempC }))}
                 format={(v) => `${fmt(v, 0)}°`}
+                tone="heat"
                 label={`${d.hoursTempTitle} (${wilayaName})`}
                 peakLabel={peak}
               />
@@ -261,12 +263,14 @@ export default function IrrigationWindowSheet({
             <ChartFigure
               index={1}
               title={d.hoursRainTitle}
-              icon={<CloudRain size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+              tone="rain"
+              icon={<CloudRain size={13} strokeWidth={2.6} aria-hidden />}
               note={isLive ? d.hoursLiveNote : d.hoursRainNote}
             >
               <HourBarChart
                 points={hours.map((h) => ({ label: h.label, value: h.rainPct }))}
                 format={(v) => `${fmt(v)}%`}
+                tone="rain"
                 label={`${d.hoursRainTitle} (${wilayaName})`}
                 peakLabel={peak}
               />
@@ -276,13 +280,14 @@ export default function IrrigationWindowSheet({
               <ChartFigure
                 index={2}
                 title={d.humidityChartTitle}
-                icon={<Droplets size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+                tone="humidity"
+                icon={<Droplets size={13} strokeWidth={2.6} aria-hidden />}
                 note={d.hoursLiveNote}
               >
                 <HourLineChart
                   points={hours.map((h) => ({ label: h.label, value: h.humidity ?? null }))}
                   format={(v) => `${fmt(v)}%`}
-                  tone="amber"
+                  tone="humidity"
                   label={`${d.humidityChartTitle} (${wilayaName})`}
                   peakLabel={peak}
                 />
@@ -292,13 +297,14 @@ export default function IrrigationWindowSheet({
               <ChartFigure
                 index={3}
                 title={d.windChartTitle}
-                icon={<Wind size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+                tone="wind"
+                icon={<Wind size={13} strokeWidth={2.6} aria-hidden />}
                 note={d.hoursLiveNote}
               >
                 <HourBarChart
                   points={hours.map((h) => ({ label: h.label, value: h.windKph ?? null }))}
                   format={(v) => `${fmt(v)} km/h`}
-                  tone="emerald"
+                  tone="wind"
                   label={`${d.windChartTitle} (${wilayaName})`}
                   peakLabel={peak}
                 />
@@ -309,7 +315,8 @@ export default function IrrigationWindowSheet({
           <ChartFigure
             index={4}
             title={d.weekTempTitle}
-            icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden className="text-emerald-600" />}
+            tone="heat"
+            icon={<Thermometer size={13} strokeWidth={2.6} aria-hidden />}
             note={isLive ? d.weekTempNoteLive : d.weekTempNote}
           >
             <WeekRangeChart
@@ -466,12 +473,118 @@ interface SeriesPoint {
   value: number | null;
 }
 
-type Tone = "emerald" | "amber";
+/**
+ * Semantic chart tones — one palette per weather metric so every line, bar,
+ * gradient, glow node and peak badge reads in its natural colour:
+ *   heat     → warm amber / orange     (temperature, 7-day range)
+ *   rain     → rain blue / sky         (rain probability)
+ *   wind     → slate / steel-cyan      (wind speed)
+ *   humidity → teal / cyan             (relative humidity)
+ */
+type Tone = "heat" | "rain" | "wind" | "humidity";
 
-const TONE_STROKE: Record<Tone, string> = { emerald: "#10b981", amber: "#f59e0b" };
-const TONE_STROKE_DEEP: Record<Tone, string> = { emerald: "#059669", amber: "#d97706" };
-const TONE_SOFT: Record<Tone, string> = { emerald: "#34d399", amber: "#fbbf24" };
-const TONE_GLOW: Record<Tone, string> = { emerald: "rgba(16,185,129,0.35)", amber: "rgba(245,158,11,0.35)" };
+interface Palette {
+  /** Primary stroke / dot colour. */
+  stroke: string;
+  /** Deeper end of gradients, peak node, badge fill. */
+  deep: string;
+  /** Lighter end of gradients (line start, bar top). */
+  soft: string;
+  /** Drop-shadow glow (rgba). */
+  glow: string;
+  /** Bar capsule: bottom → top. */
+  barFrom: string;
+  barTo: string;
+  /** Emphasised ("hot" / peak) capsule: bottom → top. */
+  hotFrom: string;
+  hotTo: string;
+  /** Peak badge (translucent container + tinted text + hairline border). */
+  badgeBg: string;
+  badgeText: string;
+  badgeBorder: string;
+  /** Tooltip value tint on the dark bubble. */
+  tipText: string;
+  /** Tailwind classes for the figure's icon chip. */
+  iconClass: string;
+}
+
+const PALETTE: Record<Tone, Palette> = {
+  heat: {
+    stroke: "#f59e0b",
+    deep: "#ea580c",
+    soft: "#fbbf24",
+    glow: "rgba(245,158,11,0.38)",
+    barFrom: "rgba(245,158,11,0.25)",
+    barTo: "#f59e0b",
+    hotFrom: "#ea580c",
+    hotTo: "#fbbf24",
+    badgeBg: "rgba(245,158,11,0.12)",
+    badgeText: "#d97706",
+    badgeBorder: "rgba(245,158,11,0.3)",
+    tipText: "#fde68a",
+    iconClass: "bg-amber-500/10 text-amber-600",
+  },
+  rain: {
+    stroke: "#3b82f6",
+    deep: "#2563eb",
+    soft: "#38bdf8",
+    glow: "rgba(59,130,246,0.38)",
+    barFrom: "rgba(59,130,246,0.25)",
+    barTo: "#38bdf8",
+    hotFrom: "#3b82f6",
+    hotTo: "#38bdf8",
+    badgeBg: "rgba(59,130,246,0.12)",
+    badgeText: "#2563eb",
+    badgeBorder: "rgba(59,130,246,0.3)",
+    tipText: "#bae6fd",
+    iconClass: "bg-blue-500/10 text-blue-600",
+  },
+  wind: {
+    stroke: "#64748b",
+    deep: "#0891b2",
+    soft: "#94a3b8",
+    glow: "rgba(8,145,178,0.32)",
+    barFrom: "rgba(100,116,139,0.25)",
+    barTo: "#64748b",
+    hotFrom: "#64748b",
+    hotTo: "#0891b2",
+    badgeBg: "rgba(100,116,139,0.12)",
+    badgeText: "#475569",
+    badgeBorder: "rgba(100,116,139,0.3)",
+    tipText: "#cffafe",
+    iconClass: "bg-slate-500/10 text-slate-600",
+  },
+  humidity: {
+    stroke: "#14b8a6",
+    deep: "#0d9488",
+    soft: "#22d3ee",
+    glow: "rgba(20,184,166,0.38)",
+    barFrom: "rgba(20,184,166,0.25)",
+    barTo: "#14b8a6",
+    hotFrom: "#14b8a6",
+    hotTo: "#22d3ee",
+    badgeBg: "rgba(20,184,166,0.12)",
+    badgeText: "#0d9488",
+    badgeBorder: "rgba(20,184,166,0.3)",
+    tipText: "#99f6e4",
+    iconClass: "bg-teal-500/10 text-teal-600",
+  },
+};
+
+const DRAW_MS = 0.8;
+const BAR_STAGGER = 0.08;
+
+/**
+ * Draw-on-enter: charts animate when the sheet opens *and* the figure is
+ * actually in view (the long sheet scrolls), so a chart further down draws
+ * itself as the user reaches it. Reduced-motion skips straight to the end.
+ */
+function useDrawOnView<T extends Element>() {
+  const ref = useRef<T | null>(null);
+  const reduce = useReducedMotion();
+  const inView = useInView(ref, { once: true, amount: 0.35 });
+  return { ref, drawn: reduce || inView, reduce };
+}
 
 /** Glass tile used by every container in the sheet: hairline emerald glow + soft blur. */
 const GLASS_TILE =
@@ -565,12 +678,14 @@ function ChartFigure({
   note,
   children,
   index = 0,
+  tone = "heat",
 }: {
   title: string;
   icon: ReactNode;
   note: string;
   children: ReactNode;
   index?: number;
+  tone?: Tone;
 }) {
   const reduce = useReducedMotion();
   return (
@@ -581,7 +696,9 @@ function ChartFigure({
       className={`${GLASS_TILE} m-0 flex flex-col gap-1.5 p-3`}
     >
       <figcaption className="flex items-center gap-1.5 text-[11.5px] font-black text-emerald-900">
-        {icon}
+        <span aria-hidden className={`grid h-5 w-5 place-items-center rounded-md ${PALETTE[tone].iconClass}`}>
+          {icon}
+        </span>
         {title}
       </figcaption>
       {children}
@@ -628,7 +745,7 @@ function SvgTooltip({
         textAnchor="middle"
         fontSize="9.5"
         fontWeight={800}
-        fill={tone === "amber" ? "#fde68a" : "#a7f3d0"}
+        fill={PALETTE[tone].tipText}
       >
         {text}
       </text>
@@ -658,19 +775,23 @@ function PeakBadge({
   const top = Math.max(y - h - 2, 1);
   return (
     <motion.g
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={{ opacity: 0, scale: 0.8 }}
+      animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.35, delay, ease: EASE_OUT }}
+      style={{ transformOrigin: `${left + w / 2}px ${top + h}px` }}
       pointerEvents="none"
     >
+      <rect x={left} y={top} width={w} height={h} rx={7} fill="#ffffff" opacity={0.92} />
       <rect
         x={left}
         y={top}
         width={w}
         height={h}
         rx={7}
-        fill={TONE_STROKE_DEEP[tone]}
-        style={{ filter: `drop-shadow(0 2px 4px ${TONE_GLOW[tone]})` }}
+        fill={PALETTE[tone].badgeBg}
+        stroke={PALETTE[tone].badgeBorder}
+        strokeWidth={1}
+        style={{ filter: `drop-shadow(0 2px 4px ${PALETTE[tone].glow})` }}
       />
       <text
         x={left + w / 2}
@@ -678,7 +799,7 @@ function PeakBadge({
         textAnchor="middle"
         fontSize="8.5"
         fontWeight={800}
-        fill="#ffffff"
+        fill={PALETTE[tone].badgeText}
       >
         {text}
       </text>
@@ -728,7 +849,7 @@ function HourLineChart({
   points,
   format,
   label,
-  tone = "emerald",
+  tone = "heat",
   peakLabel,
 }: {
   points: SeriesPoint[];
@@ -741,7 +862,8 @@ function HourLineChart({
   const PX = 20;
   const PY_TOP = 18;
   const PY_BOTTOM = 20;
-  const reduce = useReducedMotion();
+  const { ref, drawn, reduce } = useDrawOnView<SVGSVGElement>();
+  const pal = PALETTE[tone];
   const gradId = useId();
   const values = points.map((p) => p.value);
   const drawKey = seriesKey(values);
@@ -779,6 +901,7 @@ function HourLineChart({
   return (
     <svg
       viewBox={`0 0 ${CHART_W} ${H}`}
+      ref={ref}
       role="img"
       aria-label={label}
       className="w-full touch-manipulation select-none"
@@ -786,13 +909,13 @@ function HourLineChart({
     >
       <defs>
         <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={TONE_STROKE[tone]} stopOpacity={0.38} />
-          <stop offset="60%" stopColor={TONE_STROKE[tone]} stopOpacity={0.1} />
-          <stop offset="100%" stopColor={TONE_STROKE[tone]} stopOpacity={0} />
+          <stop offset="0%" stopColor={pal.stroke} stopOpacity={0.22} />
+          <stop offset="60%" stopColor={pal.stroke} stopOpacity={0.08} />
+          <stop offset="100%" stopColor={pal.stroke} stopOpacity={0} />
         </linearGradient>
         <linearGradient id={`${gradient}-stroke`} x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stopColor={TONE_SOFT[tone]} />
-          <stop offset="100%" stopColor={TONE_STROKE_DEEP[tone]} />
+          <stop offset="0%" stopColor={pal.stroke} />
+          <stop offset="100%" stopColor={pal.deep} />
         </linearGradient>
         <filter id={glow} x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="1.6" result="b" />
@@ -821,7 +944,7 @@ function HourLineChart({
           d={areaPath}
           fill={`url(#${gradient})`}
           initial={reduce ? false : { opacity: 0 }}
-          animate={reduce ? { opacity: 1 } : { opacity: [0, 1, 0.8, 1] }}
+          animate={!drawn ? { opacity: 0 } : reduce ? { opacity: 1 } : { opacity: [0, 1, 0.8, 1] }}
           transition={
             reduce
               ? { duration: 0 }
@@ -841,9 +964,9 @@ function HourLineChart({
           strokeLinecap="round"
           strokeLinejoin="round"
           initial={reduce ? false : { pathLength: 0, opacity: 0.4 }}
-          animate={{ pathLength: 1, opacity: 1 }}
-          transition={reduce ? { duration: 0 } : { duration: 0.8, ease: EASE_OUT }}
-          style={{ filter: `drop-shadow(0 2px 3px ${TONE_GLOW[tone]})` }}
+          animate={drawn ? { pathLength: 1, opacity: 1 } : { pathLength: 0, opacity: 0.4 }}
+          transition={reduce ? { duration: 0 } : { duration: DRAW_MS, ease: "easeOut" }}
+          style={{ filter: `drop-shadow(0 2px 3px ${pal.glow})` }}
         />
       )}
 
@@ -859,8 +982,9 @@ function HourLineChart({
                 cx={x(i)}
                 cy={y(v)}
                 r={7}
-                fill={TONE_STROKE[tone]}
-                opacity={0.25}
+                fill={pal.stroke}
+                opacity={drawn ? 0.25 : 0}
+                style={{ transition: "opacity 300ms ease" }}
                 className="animate-pulse"
                 pointerEvents="none"
               />
@@ -871,13 +995,13 @@ function HourLineChart({
                 cx={x(i)}
                 cy={y(v)}
                 r={isActive ? 4.2 : highlight ? 3.4 : 2.6}
-                fill={isActive || highlight ? TONE_STROKE_DEEP[tone] : "#ffffff"}
-                stroke={TONE_STROKE[tone]}
+                fill={isActive || highlight ? pal.deep : "#ffffff"}
+                stroke={pal.stroke}
                 strokeWidth={isActive || highlight ? 0 : 1.8}
                 filter={highlight ? `url(#${glow})` : undefined}
-                initial={reduce ? false : { scale: 0, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                transition={{ duration: 0.3, delay: reduce ? 0 : 0.2 + (i / Math.max(values.length, 1)) * 0.7 }}
+                initial={reduce ? false : { scale: 0.8, opacity: 0 }}
+                animate={drawn ? { scale: 1, opacity: 1 } : { scale: 0.8, opacity: 0 }}
+                transition={{ duration: 0.3, delay: reduce ? 0 : DRAW_MS * (i / Math.max(values.length - 1, 1)) + 0.05 }}
                 style={{ transformOrigin: `${x(i)}px ${y(v)}px`, transition: "r 160ms ease" }}
               />
             )}
@@ -890,8 +1014,8 @@ function HourLineChart({
                 fontWeight={800}
                 fill="#064e3b"
                 initial={reduce ? false : { opacity: 0, y: y(v) - 3 }}
-                animate={{ opacity: isActive ? 0 : 1, y: y(v) - 7 }}
-                transition={{ duration: 0.3, delay: reduce ? 0 : 0.5 + (i / Math.max(values.length, 1)) * 0.5 }}
+                animate={drawn ? { opacity: isActive ? 0 : 1, y: y(v) - 7 } : { opacity: 0, y: y(v) - 3 }}
+                transition={{ duration: 0.3, delay: reduce ? 0 : DRAW_MS * (i / Math.max(values.length - 1, 1)) + 0.2 }}
               >
                 {format(v)}
               </motion.text>
@@ -918,14 +1042,14 @@ function HourLineChart({
         );
       })}
 
-      {peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
+      {drawn && peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
         <PeakBadge
           x={x(peakIdx)}
           y={y(values[peakIdx] as number) - 15}
           text={peakLabel(format(values[peakIdx] as number))}
           tone={tone}
           chartW={CHART_W}
-          delay={reduce ? 0 : 1}
+          delay={reduce ? 0 : DRAW_MS + 0.1}
         />
       )}
 
@@ -946,7 +1070,7 @@ function HourBarChart({
   points,
   format,
   label,
-  tone = "amber",
+  tone = "rain",
   peakLabel,
 }: {
   points: SeriesPoint[];
@@ -959,7 +1083,8 @@ function HourBarChart({
   const PX = 16;
   const PY_TOP = 16;
   const PY_BOTTOM = 20;
-  const reduce = useReducedMotion();
+  const { ref, drawn, reduce } = useDrawOnView<SVGSVGElement>();
+  const pal = PALETTE[tone];
   const gradId = useId();
   const values = points.map((p) => p.value);
   const drawKey = seriesKey(values);
@@ -976,6 +1101,7 @@ function HourBarChart({
   return (
     <svg
       viewBox={`0 0 ${CHART_W} ${H}`}
+      ref={ref}
       role="img"
       aria-label={label}
       className="w-full touch-manipulation select-none"
@@ -984,13 +1110,13 @@ function HourBarChart({
       <defs>
         {/* Soft capsule: transparent base → solid top */}
         <linearGradient id={gradSoft} x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0%" stopColor={TONE_STROKE[tone]} stopOpacity={0.2} />
-          <stop offset="100%" stopColor={TONE_STROKE[tone]} stopOpacity={0.85} />
+          <stop offset="0%" stopColor={pal.barFrom} />
+          <stop offset="100%" stopColor={pal.barTo} />
         </linearGradient>
-        {/* Hot capsule (peak / ≥50 % rain): teal → emerald / amber → yellow */}
+        {/* Emphasised capsule (peak / ≥50 % rain): the metric's full two-tone gradient */}
         <linearGradient id={gradHot} x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0%" stopColor={tone === "emerald" ? "#14b8a6" : "#f59e0b"} />
-          <stop offset="100%" stopColor={tone === "emerald" ? "#34d399" : "#fbbf24"} />
+          <stop offset="0%" stopColor={pal.hotFrom} />
+          <stop offset="100%" stopColor={pal.hotTo} />
         </linearGradient>
       </defs>
 
@@ -1021,9 +1147,9 @@ function HourBarChart({
         }
         const hBar = (p.value / max) * (H - PY_TOP - PY_BOTTOM);
         const yBar = H - PY_BOTTOM - hBar;
-        const hot = (p.value >= 50 && tone === "amber") || i === peakIdx;
+        const hot = (p.value >= 50 && tone === "rain") || i === peakIdx;
         const isActive = activeIdx === i;
-        const delay = reduce ? 0 : 0.1 + i * 0.1;
+        const delay = reduce ? 0 : i * BAR_STAGGER;
         return (
           <g key={p.label}>
             <motion.rect
@@ -1035,11 +1161,15 @@ function HourBarChart({
               rx={Math.min(barW / 2, 8)}
               fill={`url(#${hot ? gradHot : gradSoft})`}
               initial={reduce ? false : { scaleY: 0, opacity: 0.4 }}
-              animate={{ scaleY: 1, opacity: isActive || activeIdx === null ? 1 : 0.55 }}
-              transition={{ duration: 0.6, delay, ease: EASE_OUT }}
+              animate={
+                drawn
+                  ? { scaleY: 1, opacity: isActive || activeIdx === null ? 1 : 0.55 }
+                  : { scaleY: 0, opacity: 0.4 }
+              }
+              transition={{ duration: 0.6, delay, ease: "easeOut" }}
               style={{
                 transformOrigin: `${cx}px ${H - PY_BOTTOM}px`,
-                filter: hot ? `drop-shadow(0 3px 6px ${TONE_GLOW[tone]})` : undefined,
+                filter: hot ? `drop-shadow(0 3px 6px ${pal.glow})` : undefined,
               }}
             />
             {/* Glossy cap highlight on the top of the capsule */}
@@ -1054,7 +1184,7 @@ function HourBarChart({
                 fill="#ffffff"
                 opacity={0.5}
                 initial={reduce ? false : { opacity: 0 }}
-                animate={{ opacity: 0.5 }}
+                animate={{ opacity: drawn ? 0.5 : 0 }}
                 transition={{ duration: 0.3, delay: delay + 0.45 }}
                 pointerEvents="none"
               />
@@ -1068,7 +1198,7 @@ function HourBarChart({
               fontWeight={800}
               fill="#064e3b"
               initial={reduce ? false : { opacity: 0 }}
-              animate={{ opacity: isActive ? 0 : 1 }}
+              animate={{ opacity: !drawn || isActive ? 0 : 1 }}
               transition={{ duration: 0.3, delay: delay + 0.35 }}
             >
               {format(p.value)}
@@ -1092,14 +1222,14 @@ function HourBarChart({
         );
       })}
 
-      {peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
+      {drawn && peakLabel && peakIdx >= 0 && values[peakIdx] !== null && activeIdx === null && (
         <PeakBadge
           x={PX + slot * peakIdx + slot / 2}
           y={H - PY_BOTTOM - ((values[peakIdx] as number) / max) * (H - PY_TOP - PY_BOTTOM) - 14}
           text={peakLabel(format(values[peakIdx] as number))}
           tone={tone}
           chartW={CHART_W}
-          delay={reduce ? 0 : 0.2 + points.length * 0.1 + 0.4}
+          delay={reduce ? 0 : (points.length - 1) * BAR_STAGGER + 0.6}
         />
       )}
 
@@ -1131,7 +1261,8 @@ function WeekRangeChart({
   const PX = 12;
   const PY_TOP = 16;
   const PY_BOTTOM = 20;
-  const reduce = useReducedMotion();
+  const { ref, drawn, reduce } = useDrawOnView<SVGSVGElement>();
+  const pal = PALETTE.heat;
   const gradId = useId();
   const mins = days.map((d) => d.minC);
   const maxs = days.map((d) => d.maxC);
@@ -1149,6 +1280,7 @@ function WeekRangeChart({
   return (
     <svg
       viewBox={`0 0 ${CHART_W} ${H}`}
+      ref={ref}
       role="img"
       aria-label={label}
       className="w-full touch-manipulation select-none"
@@ -1156,12 +1288,13 @@ function WeekRangeChart({
     >
       <defs>
         <linearGradient id={grad} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#10b981" />
-          <stop offset="100%" stopColor="#a7f3d0" />
+          {/* Warm range capsule: hot orange at the day's max → pale amber at the min */}
+          <stop offset="0%" stopColor={pal.stroke} />
+          <stop offset="100%" stopColor="#fde68a" />
         </linearGradient>
         <linearGradient id={`${grad}-hot`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#059669" />
-          <stop offset="100%" stopColor="#6ee7b7" />
+          <stop offset="0%" stopColor={pal.deep} />
+          <stop offset="100%" stopColor="#fcd34d" />
         </linearGradient>
       </defs>
 
@@ -1171,7 +1304,7 @@ function WeekRangeChart({
         const yBottom = y(day.minC);
         const isPeak = i === peakIdx;
         const isActive = activeIdx === i;
-        const delay = reduce ? 0 : 0.1 + i * 0.09;
+        const delay = reduce ? 0 : i * BAR_STAGGER;
         return (
           <g key={day.labelKey}>
             {/* Track behind the capsule, so the range reads against the full scale */}
@@ -1194,25 +1327,38 @@ function WeekRangeChart({
               strokeWidth={barW}
               strokeLinecap="round"
               initial={reduce ? false : { scaleY: 0, opacity: 0.3 }}
-              animate={{ scaleY: 1, opacity: activeIdx === null || isActive ? (isPeak ? 0.95 : 0.7) : 0.4 }}
-              transition={{ duration: 0.6, delay, ease: EASE_OUT }}
+              animate={
+                drawn
+                  ? { scaleY: 1, opacity: activeIdx === null || isActive ? (isPeak ? 0.95 : 0.75) : 0.4 }
+                  : { scaleY: 0, opacity: 0.3 }
+              }
+              transition={{ duration: 0.6, delay, ease: "easeOut" }}
               style={{
                 transformOrigin: `${cx}px ${yBottom}px`,
-                filter: isPeak ? "drop-shadow(0 3px 6px rgba(16,185,129,0.4))" : undefined,
+                filter: isPeak ? `drop-shadow(0 3px 6px ${pal.glow})` : undefined,
               }}
             />
             {isPeak && !reduce && (
-              <circle cx={cx} cy={yTop} r={6.5} fill="#10b981" opacity={0.25} className="animate-pulse" pointerEvents="none" />
+              <circle
+                cx={cx}
+                cy={yTop}
+                r={6.5}
+                fill={pal.stroke}
+                opacity={drawn ? 0.25 : 0}
+                className="animate-pulse"
+                style={{ transition: "opacity 300ms ease" }}
+                pointerEvents="none"
+              />
             )}
             <motion.circle
               key={`hi-${drawKey}-${i}`}
               cx={cx}
               cy={yTop}
               r={isPeak ? 3 : 2.4}
-              fill="#059669"
-              initial={reduce ? false : { scale: 0 }}
-              animate={{ scale: 1 }}
-              transition={{ duration: 0.3, delay: delay + 0.4 }}
+              fill={pal.deep}
+              initial={reduce ? false : { scale: 0.8, opacity: 0 }}
+              animate={drawn ? { scale: 1, opacity: 1 } : { scale: 0.8, opacity: 0 }}
+              transition={{ duration: 0.3, delay: delay + 0.45 }}
               style={{ transformOrigin: `${cx}px ${yTop}px` }}
             />
             <motion.circle
@@ -1220,11 +1366,11 @@ function WeekRangeChart({
               cx={cx}
               cy={yBottom}
               r={2.4}
-              fill="#a7f3d0"
+              fill="#fde68a"
               stroke="#ffffff"
               strokeWidth={1}
-              initial={reduce ? false : { scale: 0 }}
-              animate={{ scale: 1 }}
+              initial={reduce ? false : { scale: 0.8, opacity: 0 }}
+              animate={drawn ? { scale: 1, opacity: 1 } : { scale: 0.8, opacity: 0 }}
               transition={{ duration: 0.3, delay: delay + 0.1 }}
               style={{ transformOrigin: `${cx}px ${yBottom}px` }}
             />
@@ -1237,7 +1383,7 @@ function WeekRangeChart({
               fontWeight={800}
               fill="#064e3b"
               initial={reduce ? false : { opacity: 0 }}
-              animate={{ opacity: isActive ? 0 : 1 }}
+              animate={{ opacity: !drawn || isActive ? 0 : 1 }}
               transition={{ duration: 0.3, delay: delay + 0.45 }}
             >
               {fmt(day.maxC)}°
@@ -1252,7 +1398,7 @@ function WeekRangeChart({
               fontWeight={700}
               fill="rgba(6,78,59,0.6)"
               initial={reduce ? false : { opacity: 0 }}
-              animate={{ opacity: isActive ? 0 : 1 }}
+              animate={{ opacity: !drawn || isActive ? 0 : 1 }}
               transition={{ duration: 0.3, delay: delay + 0.3 }}
             >
               {fmt(day.minC)}°
@@ -1276,14 +1422,14 @@ function WeekRangeChart({
         );
       })}
 
-      {peakLabel && peakIdx >= 0 && activeIdx === null && (
+      {drawn && peakLabel && peakIdx >= 0 && activeIdx === null && (
         <PeakBadge
           x={PX + slot * peakIdx + slot / 2}
           y={y(hi) - 14}
           text={peakLabel(`${fmt(hi)}°`)}
-          tone="emerald"
+          tone="heat"
           chartW={CHART_W}
-          delay={reduce ? 0 : 0.2 + days.length * 0.09 + 0.4}
+          delay={reduce ? 0 : (days.length - 1) * BAR_STAGGER + 0.6}
         />
       )}
 
@@ -1292,7 +1438,7 @@ function WeekRangeChart({
           x={PX + slot * activeIdx + slot / 2}
           y={y(days[activeIdx].maxC)}
           text={`${dayLabels[days[activeIdx].labelKey]} · ${fmt(days[activeIdx].minC)}° – ${fmt(days[activeIdx].maxC)}°`}
-          tone="emerald"
+          tone="heat"
           chartW={CHART_W}
         />
       )}
