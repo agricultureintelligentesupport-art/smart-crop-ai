@@ -1,14 +1,12 @@
 "use client";
 
 import { useMotionValueEvent, useScroll } from "framer-motion";
-import { Leaf, LogOut, MapPin, Settings2, Sprout } from "lucide-react";
+import { Leaf, MapPin, Sprout } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import AppBar, { AppBarAction, AppBarBrand } from "@/components/app/AppBar";
+import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
-import LanguageSwitch from "@/components/auth/LanguageSwitch";
-import { FOCUS_RING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { computeIrrigation, weatherFor } from "@/lib/agronomy";
 import { APP_SHELL } from "@/lib/app/copy";
@@ -25,6 +23,7 @@ import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
 import QuickActions, { type QuickTarget } from "./QuickActions";
 import SatelliteCard from "./SatelliteCard";
+import SettingsSheet from "./SettingsSheet";
 import ScanCard from "./ScanCard";
 import WeatherCard, { fmt } from "./WeatherCard";
 import { SectionHeader } from "./parts";
@@ -180,6 +179,24 @@ export default function DashboardView() {
     setOpenPersonalize(false);
   };
 
+  // Same hash-driven pattern for the "الإعدادات" tab (`#settings`).
+  const [openSettings, setOpenSettings] = useState(false);
+  const hashSettings = useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener("hashchange", onChange);
+      return () => window.removeEventListener("hashchange", onChange);
+    },
+    () => window.location.hash === "#settings",
+    () => false,
+  );
+  const settingsOpen = openSettings || hashSettings;
+  const closeSettings = () => {
+    if (window.location.hash === "#settings") {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    setOpenSettings(false);
+  };
+
   const ring = (target: QuickTarget) =>
     highlight === target ? "rounded-[1.5rem] ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-[#f4f8f5]" : "";
 
@@ -218,20 +235,6 @@ export default function DashboardView() {
             }
           />
         }
-        trailing={
-          <>
-            <LanguageSwitch
-              lang={lang}
-              onChange={setLang}
-              ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-              labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-              layoutId="dashboard-lang-thumb"
-            />
-            <AppBarAction label={t.header.signOut} onClick={() => void signOut()}>
-              <LogOut size={18} strokeWidth={2.4} aria-hidden />
-            </AppBarAction>
-          </>
-        }
       />
 
       {/* One scroll region between the two bars. */}
@@ -268,15 +271,6 @@ export default function DashboardView() {
                   )}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => (accountOpen ? closeAccount() : setOpenPersonalize(true))}
-                aria-expanded={accountOpen}
-                className={`inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-3.5 text-[12px] font-black text-emerald-800 ring-1 ring-emerald-100 transition-colors hover:bg-emerald-100/80 ${FOCUS_RING}`}
-              >
-                <Settings2 size={14} strokeWidth={2.8} aria-hidden />
-                {accountOpen ? t.personalize.close : t.personalize.edit}
-              </button>
             </div>
           </header>
 
@@ -327,8 +321,15 @@ export default function DashboardView() {
       </main>
 
       {/* The account sheet owns the screen while it is open — no competing tab bar. */}
-      {!accountOpen && (
-        <TabBar active="home" lang={lang} onAccount={() => setOpenPersonalize(true)} accountOpen={accountOpen} />
+      {!accountOpen && !settingsOpen && (
+        <TabBar
+          active="home"
+          lang={lang}
+          onAccount={() => setOpenPersonalize(true)}
+          accountOpen={accountOpen}
+          onSettings={() => setOpenSettings(true)}
+          settingsOpen={settingsOpen}
+        />
       )}
 
       <AccountSheet
@@ -342,6 +343,17 @@ export default function DashboardView() {
         wilayaCode={wilayaCode}
         onWilayaChange={updateWilaya}
         onRoleChange={updateRole}
+      />
+
+      <SettingsSheet
+        open={settingsOpen}
+        onClose={closeSettings}
+        t={t}
+        lang={lang}
+        onLangChange={setLang}
+        wilayaCode={wilayaCode}
+        onWilayaChange={updateWilaya}
+        onSignOut={() => void signOut()}
       />
     </div>
   );

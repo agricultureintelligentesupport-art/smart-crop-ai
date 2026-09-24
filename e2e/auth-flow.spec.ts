@@ -288,6 +288,7 @@ test.describe("email sign-in", () => {
     await expect(page).toHaveURL(/\/dashboard/);
 
     // Sign out and come back with a bad password
+    await page.getByRole("button", { name: "الإعدادات" }).click();
     await page.getByRole("button", { name: "تسجيل الخروج" }).click();
     await expect(page).toHaveURL(/\/auth/);
     await openEmailChannel(page);
@@ -312,6 +313,7 @@ test.describe("email sign-in", () => {
     await page.getByRole("button", { name: "إنشاء الحساب" }).click();
     await completeSetup(page);
     await page.getByRole("button", { name: /الدخول إلى لوحة التحكم/ }).click();
+    await page.getByRole("button", { name: "الإعدادات" }).click();
     await page.getByRole("button", { name: "تسجيل الخروج" }).click();
 
     // Known device (role + wilaya remembered) → the ladder collapses to one step
@@ -371,6 +373,7 @@ test.describe("dashboard session guard", () => {
 
     // Signing out from the guest dashboard wipes the flag and returns to
     // the wizard — no guest session survives the wipe.
+    await page.getByRole("button", { name: "الإعدادات" }).click();
     await page.getByRole("button", { name: /تسجيل الخروج/ }).click();
     await expect(page).toHaveURL(/\/auth/);
     await page.goto("/dashboard");
@@ -427,7 +430,7 @@ test.describe("member dashboard", () => {
 
   test("personalising the wilaya updates the header and can be persisted", async ({ page }) => {
     await openDashboard(page);
-    await page.getByRole("button", { name: /تعديل/ }).click();
+    await page.getByRole("button", { name: "الإعدادات" }).click();
     const picker = page.getByRole("button", { name: /الولاية/ });
     await expect(picker).toBeVisible();
     await picker.click();
@@ -462,7 +465,9 @@ test.describe("bilingual chrome", () => {
 
   test("French dashboard copy is complete", async ({ page }) => {
     await openDashboard(page);
+    await page.getByRole("button", { name: "الإعدادات" }).click();
     await page.getByRole("button", { name: "Français" }).click();
+    await page.getByRole("button", { name: "Fermer" }).first().click();
     await expect(page.getByRole("heading", { name: "Météo et besoin en eau" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Calculateur d'irrigation" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Diagnostic de la feuille" })).toBeVisible();
