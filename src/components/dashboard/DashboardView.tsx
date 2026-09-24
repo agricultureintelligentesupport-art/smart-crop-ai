@@ -21,6 +21,7 @@ import AccountSheet from "./AccountSheet";
 import FieldTasksCard from "./FieldTasksCard";
 import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
+import IrrigationWindowSheet from "./IrrigationWindowSheet";
 import SatelliteCard from "./SatelliteCard";
 import SettingsSheet from "./SettingsSheet";
 import ScanCard from "./ScanCard";
@@ -58,6 +59,8 @@ export default function DashboardView() {
   const [wilayaOverride, setWilayaOverride] = useState<string | null>(null);
   const [roleOverride, setRoleOverride] = useState<AuthRole | null>(null);
   const [openPersonalize, setOpenPersonalize] = useState(false);
+  /** Irrigation-window detail sheet, opened from the hero's "نافذة السقي" tile. */
+  const [openWindowDetail, setOpenWindowDetail] = useState(false);
   /** Parcel size in hectares: one input, consumed by every card. */
   const [areaHa, setAreaHa] = useState(2);
 
@@ -234,6 +237,7 @@ export default function DashboardView() {
             cropLabel={CROPS[crop][lang]}
             wilayaLabel={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
             advice={advice}
+            onOpenWindowDetail={() => setOpenWindowDetail(true)}
           />
 
           <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
@@ -279,6 +283,21 @@ export default function DashboardView() {
           settingsOpen={settingsOpen}
         />
       )}
+
+      {/* Irrigation-window detail: why this window + volume (real inputs only).
+          Same inputs as the hero's own numbers: wilaya crop, wilaya soil, drip. */}
+      <IrrigationWindowSheet
+        open={openWindowDetail}
+        onClose={() => setOpenWindowDetail(false)}
+        t={t}
+        lang={lang}
+        wilayaCode={wilayaCode}
+        crop={crop}
+        soil={wilaya.soil}
+        areaHa={areaHa}
+        weather={weather}
+        irrigation={irrigation}
+      />
 
       <AccountSheet
         open={accountOpen}

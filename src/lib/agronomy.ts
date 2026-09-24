@@ -78,14 +78,37 @@ export const DAY_KEYS = [0, 1, 2, 3, 4, 5, 6] as const;
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
 /**
+ * Intermediate terms of the ET0 formula, surfaced so the UI can explain the
+ * calculation with the exact numbers that were used. Same arithmetic as
+ * `referenceEt0` — nothing here changes the result.
+ */
+export interface Et0Breakdown {
+  /** Humidity damping factor: `0.72 + (humidity/100) × 0.42`. */
+  humidityDamping: number;
+  /** Wind boost factor: `1 + (windKph − 12) × 0.012`. */
+  windBoost: number;
+  /** `0.155 × tempC × humidityDamping × windBoost`, before clamping. */
+  raw: number;
+  /** Final ET0 (mm/day): the raw value clamped to [1.4, 9.5], rounded to 1 decimal. */
+  final: number;
+  /** True when the [1.4, 9.5] clamp actually changed the value. */
+  clamped: boolean;
+}
+
+export function referenceEt0Detail(climate: Wilaya["climate"]): Et0Breakdown {
+  const humidityDamping = 0.72 + (climate.humidity / 100) * 0.42; // ~0.8 humid → ~1.06 arid
+  const windBoost = 1 + (climate.windKph - 12) * 0.012;
+  const raw = 0.155 * climate.tempC * humidityDamping * windBoost;
+  const final = round1(Math.min(Math.max(raw, 1.4), 9.5));
+  return { humidityDamping, windBoost, raw, final, clamped: final !== round1(raw) };
+}
+
+/**
  * Hargreaves-style reference evapotranspiration estimate for the reference
  * season. Coastal/humid sites are damped, arid sites amplified.
  */
 export function referenceEt0(climate: Wilaya["climate"]): number {
-  const humidityDamping = 0.72 + (climate.humidity / 100) * 0.42; // ~0.8 humid → ~1.06 arid
-  const windBoost = 1 + (climate.windKph - 12) * 0.012;
-  const et0 = 0.155 * climate.tempC * humidityDamping * windBoost;
-  return round1(Math.min(Math.max(et0, 1.4), 9.5));
+  return referenceEt0Detail(climate).final;
 }
 
 export function weatherFor(wilayaCode: string | null | undefined): WeatherSnapshot {
@@ -123,6 +146,20 @@ export function weatherFor(wilayaCode: string | null | undefined): WeatherSnapsh
     days,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/*  Weather advice thresholds                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The exact thresholds the dashboard's advisory rules use (see WeatherCard):
+ * `tempC ≥ 33` → heat-wave advice, `windKph ≥ 20` → wind advice, otherwise
+ * `et0 ≥ 5` → keep-usual-schedule, else calm. Exported so the window detail
+ * sheet can evaluate the same rules with the same numbers.
+ */
+export const HEAT_THRESHOLD_C = 33;
+export const WIND_THRESHOLD_KPH = 20;
+export const ET0_ADVISE_MM_DAY = 5;
 
 /* ------------------------------------------------------------------ */
 /*  Irrigation                                                         */
@@ -208,6 +245,14 @@ export interface IrrigationResult {
   savedPct: number;
   et0: number;
   kc: number;
+  /** Soil texture factor applied to ET0 × Kc (see SOIL_FACTOR). */
+  soilFactor: number;
+  /** Application efficiency of the chosen system (0–1). */
+  efficiency: number;
+  /** Gross (applied) requirement in mm/day before the volume conversion. */
+  grossMmDay: number;
+  /** Gross requirement in mm/day if the furrow system were used instead. */
+  furrowMmDay: number;
 }
 
 export function computeIrrigation({
@@ -243,6 +288,10 @@ export function computeIrrigation({
     savedPct,
     et0: weather.et0,
     kc,
+    soilFactor,
+    efficiency,
+    grossMmDay: round1(grossMmDay),
+    furrowMmDay: round1(furrowMmDay),
   };
 }
 

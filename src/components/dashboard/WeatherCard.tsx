@@ -1,7 +1,7 @@
 "use client";
 
 import { CloudRain, Droplets, Sun, Thermometer, TriangleAlert, Waves, Wind } from "lucide-react";
-import type { WeatherSnapshot } from "@/lib/agronomy";
+import { ET0_ADVISE_MM_DAY, HEAT_THRESHOLD_C, WIND_THRESHOLD_KPH, type WeatherSnapshot } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import type { Lang } from "@/lib/wilayas";
 import { Card, Chip, Metric } from "./parts";
@@ -19,9 +19,9 @@ export default function WeatherCard({
   weather: WeatherSnapshot;
 }) {
   const { tempC, humidity, windKph, rainMmYear, et0, hours, days, wilaya } = weather;
-  const hot = tempC >= 33;
-  const windy = windKph >= 20;
-  const advice = hot ? t.weather.adviceHeat : windy ? t.weather.adviceWind : et0 >= 5 ? t.weather.adviceIrrigate : t.weather.adviceCalm;
+  const hot = tempC >= HEAT_THRESHOLD_C;
+  const windy = windKph >= WIND_THRESHOLD_KPH;
+  const advice = hot ? t.weather.adviceHeat : windy ? t.weather.adviceWind : et0 >= ET0_ADVISE_MM_DAY ? t.weather.adviceIrrigate : t.weather.adviceCalm;
 
   return (
     <Card

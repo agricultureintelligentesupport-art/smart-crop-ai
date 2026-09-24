@@ -30,6 +30,54 @@ export interface DashboardCopy {
     /** Time range of the day's best irrigation window (LTR-pinned in the UI). */
     windowValue: string;
   };
+  /** Irrigation-window detail sheet: why this window + volume (real inputs only). */
+  windowDetail: {
+    /** Accessible label for the window tile's expand control. */
+    ariaOpen: string;
+    title: string;
+    subtitle: string;
+    windowLabel: string;
+    volumeLabel: string;
+    perHaLabel: string;
+    whyTitle: string;
+    windowFixed: string;
+    rulesNote: string;
+    ruleHeatTitle: string;
+    ruleHeatText: string;
+    ruleWindTitle: string;
+    ruleWindText: string;
+    ruleEt0Title: string;
+    ruleEt0Text: string;
+    ruleCalmTitle: string;
+    ruleCalmText: string;
+    activeRule: string;
+    dataTitle: string;
+    dataNote: string;
+    hoursTempTitle: string;
+    hoursTempNote: string;
+    weekTempTitle: string;
+    weekTempNote: string;
+    hoursRainTitle: string;
+    hoursRainNote: string;
+    singleTitle: string;
+    singleNote: string;
+    tempRef: string;
+    breakdownTitle: string;
+    stepEt0Label: string;
+    stepEt0Formula: string;
+    stepEt0Note: string;
+    stepNetLabel: string;
+    stepNetFormula: string;
+    stepNetNote: string;
+    stepGrossLabel: string;
+    stepGrossFormula: string;
+    stepGrossNote: string;
+    stepVolumeLabel: string;
+    stepVolumeFormula: string;
+    stepParcelFormula: string;
+    stepVolumeNote: string;
+    sourceNote: string;
+  };
   quick: {
     title: string;
     scan: string;
@@ -170,6 +218,56 @@ const AR: DashboardCopy = {
     perHa: "لكل هكتار",
     window: "نافذة السقي",
     windowValue: "05:30 — 08:30",
+  },
+  windowDetail: {
+    ariaOpen: "لماذا هذه النافذة والكمية؟",
+    title: "لماذا هذه النافذة والكمية؟",
+    subtitle: "شرح مبني على نفس بيانات الولاية ومعادلات اللوحة — بلا أرقام إضافية.",
+    windowLabel: "النافذة المقترحة",
+    volumeLabel: "حاجة القطعة اليوم",
+    perHaLabel: "لكل هكتار",
+    whyTitle: "لماذا النافذة الصباحية؟",
+    windowFixed:
+      "في الإصدار الحالي، النافذة مقترحة صباحية ثابتة ({window}) قبل ذروة التبخر. لا توجد بعد معادلة تحسبها من بيانات بالساعة، لكن قواعد النصيحة أدناه — بنفس أرقام اللوحة — تفسّر تفضيل الصباح.",
+    rulesNote: "قواعد بطاقة الطقس تُطبَّق بالترتيب: الحرارة ثم الرياح ثم التبخر.",
+    ruleHeatTitle: "حرارة 33° فأكثر",
+    ruleHeatText: "الحرارة المرجعية اليوم {temp}° → السقي قبل الثامنة صباحاً وتجنّب الرشّ ظهراً.",
+    ruleWindTitle: "رياح 20 كم/س فأكثر",
+    ruleWindText: "الرياح المرجعية اليوم {wind} كم/س → إنزال ضغط الرشّ والرشّ صباحاً باكراً.",
+    ruleEt0Title: "تبخر 5 مم/يوم فأكثر",
+    ruleEt0Text: "التبخر المرجعي اليوم {et0} مم/يوم → التزم بجدول السقي المعتاد.",
+    ruleCalmTitle: "ظروف معتدلة",
+    ruleCalmText: "لا حرارة مرتفعة ولا رياح قوية ولا تبخر عالٍ → ظروف مناسبة للسقي اليوم.",
+    activeRule: "القاعدة النشطة اليوم",
+    dataTitle: "المدخلات الفعلية للحساب",
+    dataNote: "نفس السلاسل والقيم المرجعية التي تعرضها بطاقة الطقس لولاية {wilaya}.",
+    hoursTempTitle: "درجة الحرارة — ساعات اليوم",
+    hoursTempNote: "6 قراءات مرجعية من 06:00 إلى 21:00.",
+    weekTempTitle: "المدى اليومي — 7 أيام",
+    weekTempNote: "أدنى وأعلى درجة لكل يوم من السلسلة الأسبوعية المرجعية.",
+    hoursRainTitle: "احتمال المطر — ساعات اليوم",
+    hoursRainNote: "نسبة مرجعية لكل قراءة من قراءات الساعات.",
+    singleTitle: "قيم مفردة — بلا سلسلة زمنية",
+    singleNote:
+      "المصدر الحالي يوفر الرطوبة والرياح كقيمة مرجعية واحدة للولاية فقط. لا توجد لهما قراءات بساعة أو تاريخية، لذلك لا نرسم لهما منحنيات.",
+    tempRef: "الحرارة المرجعية",
+    breakdownTitle: "كيف حُسبت كمية اليوم",
+    stepEt0Label: "التبخر المرجعي ET₀",
+    stepEt0Formula: "0.155 × {temp}° × {damp} × {windFactor} = {raw} مم/يوم",
+    stepEt0Note:
+      "معامل الرطوبة {damp} ومعامل الرياح {windFactor} محسوبان من بيانات الولاية. يُقيَّد الناتج بين 1.4 و9.5 مم/يوم → النتيجة {et0} مم/يوم.",
+    stepNetLabel: "الاحتياج الصافي للمحصول",
+    stepNetFormula: "{et0} مم × {kc} (معامل {crop}) × {soilFactor} (تربة {soil}) = {net} مم/يوم",
+    stepNetNote: "كمية الماء التي يحتاجها المحصول يومياً قبل خسائر نظام السقي.",
+    stepGrossLabel: "الحجم الإجمالي حسب نظام السقي",
+    stepGrossFormula: "{net} مم ÷ {efficiency} (كفاءة {system}) = {gross} مم/يوم",
+    stepGrossNote: "كفاءة نظام {system} هي {effPct}%، فترفع الكمية الصافية لتغطية الخسائر.",
+    stepVolumeLabel: "تحويل الملليمتر إلى حجم",
+    stepVolumeFormula: "{gross} مم × 10 000 لتر/هكتار/مم = {litres} لتر/هكتار",
+    stepParcelFormula: "{gross} مم × {area} هكتار × 10 م³/هكتار/مم = {daily} م³/يوم",
+    stepVolumeNote: "الأسبوع: {weekly} م³. (1 مم فوق هكتار = 10 م³ = 10 000 لتر.)",
+    sourceNote:
+      "المدخلات: قيم مناخية مرجعية طويلة المدى للولاية محفوظة في التطبيق، ومعاملات ثابتة للمحصول والتربة والنظام. لا يوجد بعد مصدر طقس حي أو قراءات بساعة؛ وعند ربطه تتحدّث هذه الأرقام.",
   },
   quick: {
     title: "وصول سريع",
@@ -341,6 +439,56 @@ const FR: DashboardCopy = {
     perHa: "Par hectare",
     window: "Fenêtre d'irrigation",
     windowValue: "05:30 — 08:30",
+  },
+  windowDetail: {
+    ariaOpen: "Pourquoi cette fenêtre et ce volume ?",
+    title: "Pourquoi cette fenêtre et ce volume ?",
+    subtitle: "Explication basée sur les mêmes données de wilaya et les mêmes formules du tableau — aucun chiffre inventé.",
+    windowLabel: "Fenêtre proposée",
+    volumeLabel: "Besoin de la parcelle",
+    perHaLabel: "Par hectare",
+    whyTitle: "Pourquoi la fenêtre du matin ?",
+    windowFixed:
+      "Dans la version actuelle, la fenêtre est une fenêtre matinale fixe ({window}) avant le pic d'évaporation. Aucune formule ne la calcule encore à partir de données horaires, mais les règles de conseil ci-dessous — avec les mêmes chiffres du tableau — expliquent le choix du matin.",
+    rulesNote: "Les règles de la carte météo s'appliquent dans l'ordre : chaleur, puis vent, puis évapotranspiration.",
+    ruleHeatTitle: "Chaleur ≥ 33 °",
+    ruleHeatText: "Température de référence aujourd'hui {temp}° → irriguez avant 8 h et évitez l'aspersion à midi.",
+    ruleWindTitle: "Vent ≥ 20 km/h",
+    ruleWindText: "Vent de référence aujourd'hui {wind} km/h → baissez la pression d'aspersion et arrosez tôt le matin.",
+    ruleEt0Title: "Évapotranspiration ≥ 5 mm/jour",
+    ruleEt0Text: "Évapotranspiration de référence aujourd'hui {et0} mm/jour → gardez le planning d'irrigation du jour.",
+    ruleCalmTitle: "Conditions modérées",
+    ruleCalmText: "Ni forte chaleur, ni vent fort, ni forte évaporation → conditions favorables à l'irrigation aujourd'hui.",
+    activeRule: "Règle active aujourd'hui",
+    dataTitle: "Données réellement utilisées",
+    dataNote: "Les mêmes séries et valeurs de référence que la carte météo pour la wilaya {wilaya}.",
+    hoursTempTitle: "Température — heures de la journée",
+    hoursTempNote: "6 lectures de référence, de 06:00 à 21:00.",
+    weekTempTitle: "Amplitude quotidienne — 7 jours",
+    weekTempNote: "Minimum et maximum de chaque jour de la série hebdomadaire de référence.",
+    hoursRainTitle: "Risque de pluie — heures de la journée",
+    hoursRainNote: "Pourcentage de référence pour chaque lecture horaire.",
+    singleTitle: "Valeurs uniques — sans série temporelle",
+    singleNote:
+      "La source actuelle ne fournit l'humidité et le vent qu'en valeur de référence unique par wilaya. Aucune lecture horaire ou historique n'existe pour l'instant ; nous ne dessinons donc pas de courbes pour elles.",
+    tempRef: "Température de référence",
+    breakdownTitle: "Comment le volume du jour est calculé",
+    stepEt0Label: "Évapotranspiration de référence ET₀",
+    stepEt0Formula: "0.155 × {temp}° × {damp} × {windFactor} = {raw} mm/jour",
+    stepEt0Note:
+      "Facteur d'humidité {damp} et facteur de vent {windFactor}, calculés sur les données de la wilaya. Le résultat est borné entre 1,4 et 9,5 mm/jour → {et0} mm/jour.",
+    stepNetLabel: "Besoin net de la culture",
+    stepNetFormula: "{et0} mm × {kc} (coefficient {crop}) × {soilFactor} (sol {soil}) = {net} mm/jour",
+    stepNetNote: "L'eau dont la culture a besoin chaque jour, avant les pertes du système d'irrigation.",
+    stepGrossLabel: "Volume brut selon le système",
+    stepGrossFormula: "{net} mm ÷ {efficiency} (rendement {system}) = {gross} mm/jour",
+    stepGrossNote: "Le rendement du système {system} est de {effPct} % ; le volume net est donc majoré pour couvrir les pertes.",
+    stepVolumeLabel: "Conversion en volume",
+    stepVolumeFormula: "{gross} mm × 10 000 L/ha/mm = {litres} L/ha",
+    stepParcelFormula: "{gross} mm × {area} ha × 10 m³/ha/mm = {daily} m³/jour",
+    stepVolumeNote: "Par semaine : {weekly} m³. (1 mm sur un hectare = 10 m³ = 10 000 L.)",
+    sourceNote:
+      "Données d'entrée : valeurs climatiques de référence à long terme de la wilaya, conservées dans l'application, et coefficients fixes pour la culture, le sol et le système. Aucune source météo en direct ni lecture horaire n'est branchée pour l'instant ; ces chiffres suivront son arrivée.",
   },
   quick: {
     title: "Accès rapide",
