@@ -29,6 +29,105 @@ export interface DashboardCopy {
     window: string;
     /** Time range of the day's best irrigation window (LTR-pinned in the UI). */
     windowValue: string;
+    /** Accessible label of the per-hectare pill (opens the calculation flow). */
+    perHaOpen: string;
+    /** Short trailing hint inside the per-hectare pill. */
+    perHaCta: string;
+  };
+  /**
+   * Per-hectare calculation flow: the same numbers the decision card shows,
+   * unrolled as a step-by-step diagram with interactive factors.
+   */
+  flow: {
+    title: string;
+    /** `{crop}` `{wilaya}` `{system}` */
+    subtitle: string;
+    /** How to use the interactive factors. */
+    hint: string;
+    /** `{n}` */
+    stepLabel: string;
+    /** Row label for a step's produced value. */
+    resultTag: string;
+    /** Heading of the clickable-factor block. */
+    factorsTag: string;
+    climateTitle: string;
+    climateNote: string;
+    factorTemp: string;
+    /** `{temp}` `{base}` */
+    factorTempEffect: string;
+    factorHumidity: string;
+    /** `{humidity}` `{damp}` `{pct}` */
+    factorHumidityEffect: string;
+    factorWind: string;
+    /** `{wind}` `{boost}` `{pct}` */
+    factorWindEffect: string;
+    cropTitle: string;
+    cropNote: string;
+    /** `{crop}` `{kc}` */
+    factorKc: string;
+    /** `{kc}` `{crop}` */
+    factorKcEffect: string;
+    factorSoil: string;
+    /** `{soil}` `{soilFactor}` `{pct}` */
+    factorSoilEffect: string;
+    efficiencyTitle: string;
+    efficiencyNote: string;
+    /** `{efficiency}` */
+    factorEfficiency: string;
+    /** `{efficiency}` `{pct}` */
+    factorEfficiencyEffect: string;
+    hectareTitle: string;
+    hectareNote: string;
+    totalTitle: string;
+    /** `{area}` */
+    totalNote: string;
+    /** Why the mm values carry two decimals (the chain stays exact). */
+    precisionNote: string;
+    /** `{litres}` `{daily}` — the promise that nothing diverges from the card. */
+    syncNote: string;
+  };
+  /**
+   * Field heatmap: the parcel split into zones, with three switchable layers
+   * and a tap-to-inspect reading per zone. Values are model estimates centred
+   * on the same daily average as the decision card.
+   */
+  heatmap: {
+    title: string;
+    /** `{area}` `{zones}` */
+    subtitle: string;
+    /** Accessible label of the layer switcher. */
+    layersAria: string;
+    layers: { thermal: string; moisture: string; transpiration: string };
+    /** Zone letters, in reading order (up to 24 zones). */
+    zoneIds: string[];
+    /** `{id}` */
+    zoneLabel: string;
+    /** Accessible label of one zone cell: `{zone}` `{value}` `{unit}` `{status}`. */
+    cellAria: string;
+    units: { thermal: string; moisture: string; transpiration: string };
+    status: {
+      moisture: { wet: string; balanced: string; mildDry: string; dry: string };
+      thermal: { low: string; moderate: string; high: string; severe: string };
+      transpiration: { low: string; moderate: string; good: string; high: string };
+    };
+    /** Per-layer inspection sentence: `{value}` `{delta}`. */
+    layerNote: { thermal: string; moisture: string; transpiration: string };
+    /** `{pct}` */
+    deltaAbove: string;
+    /** `{pct}` */
+    deltaBelow: string;
+    deltaEven: string;
+    /** Field average of the active layer, synchronised with the decision card. */
+    average: string;
+    legendLow: string;
+    legendHigh: string;
+    /** `{n}` `{area}` */
+    zonesCount: string;
+    hint: string;
+    /** Marks the panel that shows the tapped zone. */
+    selectedZone: string;
+    /** Honest provenance note for the spatial model. */
+    note: string;
   };
   /** Irrigation-window detail sheet: why this window + volume (real inputs only). */
   windowDetail: {
@@ -243,6 +342,96 @@ const AR: DashboardCopy = {
     perHa: "لكل هكتار",
     window: "نافذة السقي",
     windowValue: "05:30 — 08:30",
+    perHaOpen: "لكل هكتار: عرض خطوات الحساب",
+    perHaCta: "كيف حُسب؟",
+  },
+  flow: {
+    title: "من أين جاء رقم الهكتار؟",
+    subtitle: "{crop} في {wilaya} بنظام {system}، خطوة بخطوة حتى حجم القطعة.",
+    hint: "اضغط على أي معامل لترى أثره في المعادلة.",
+    stepLabel: "الخطوة {n}",
+    resultTag: "الناتج",
+    factorsTag: "المعاملات المؤثرة",
+    climateTitle: "مدخلات المناخ",
+    climateNote: "الحرارة والرطوبة والرياح تُدخل أولاً في معادلة التبخر المرجعي ET₀.",
+    factorTemp: "الحرارة {temp}°",
+    factorTempEffect: "الحرارة أساس المعادلة: 0.155 × {temp}° = {base}.",
+    factorHumidity: "معامل الرطوبة {damp}",
+    factorHumidityEffect: "رطوبة {humidity}% تُدخل معاملاً قدره {damp}، أي {pct} عن المعامل المحايد 1.00.",
+    factorWind: "معامل الرياح {boost}",
+    factorWindEffect: "ريح بـ{wind} كم/س تُدخل معاملاً قدره {boost}، أي {pct} عن المعامل المحايد 1.00.",
+    cropTitle: "معامل المحصول والتربة",
+    cropNote: "التبخر المرجعي يُضرب في معامل المحصول، ثم في معامل حالة التربة.",
+    factorKc: "معامل {crop} {kc}",
+    factorKcEffect: "كل مليمتر تبخر يتحول إلى {kc} مم احتياج فعلي لمحصول {crop}.",
+    factorSoil: "معامل التربة {soilFactor}",
+    factorSoilEffect: "تربة {soil} تعدّل الاحتياج بمعامل {soilFactor}، أي {pct} عن تربة مثالية.",
+    efficiencyTitle: "كفاءة نظام السقي",
+    efficiencyNote: "الاحتياج الصافي يُقسَم على كفاءة النظام حتى يغطي الماء المضاف الفاقد أثناء التوزيع.",
+    factorEfficiency: "كفاءة السقي {efficiency}",
+    factorEfficiencyEffect: "القسمة على {efficiency} ترفع الكمية بنسبة {pct} لتغطية الفاقد.",
+    hectareTitle: "النتيجة للهكتار الواحد",
+    hectareNote: "تحويل الملليمترات إلى لترات: كل 1 مم فوق هكتار واحد يساوي 10 000 لتر.",
+    totalTitle: "إجمالي القطعة اليوم",
+    totalNote: "الضرب في مساحة القطعة {area} هكتار، ثم التقريب إلى أقرب متر مكعب كما في بطاقة القرار.",
+    precisionNote:
+      "نعرض قيم الملليمتر بمنزليتين هنا حتى تكون سلسلة الضرب مطابقة تماماً للرقم النهائي، وبطاقة القرار تعرض نفس الكميات بمنزلة واحدة.",
+    syncNote: "الرقمان أعلاه هما نفسهما المعروضان في بطاقة القرار: {litres} لتر لكل هكتار، و{daily} م³ للقطعة.",
+  },
+  heatmap: {
+    title: "الخريطة الحرارية للقطعة",
+    subtitle: "{zones} منطقة في {area} هكتار، توزيع تقديري حول متوسط اليوم نفسه.",
+    layersAria: "طبقات الخريطة الحرارية",
+    layers: { thermal: "الإجهاد الحراري", moisture: "الاحتياج المائي", transpiration: "مؤشر النتح" },
+    zoneIds: [
+      "أ",
+      "ب",
+      "ج",
+      "د",
+      "هـ",
+      "و",
+      "ز",
+      "ح",
+      "ط",
+      "ي",
+      "ك",
+      "ل",
+      "م",
+      "ن",
+      "س",
+      "ع",
+      "ف",
+      "ص",
+      "ق",
+      "ر",
+      "ش",
+      "ت",
+      "ث",
+      "خ",
+    ],
+    zoneLabel: "المنطقة {id}",
+    cellAria: "{zone}: {value} {unit}، {status}",
+    units: { thermal: "مؤشر من 100", moisture: "لتر/هكتار", transpiration: "مؤشر من 100" },
+    status: {
+      moisture: { wet: "رطوبة عالية", balanced: "رطوبة متوازنة", mildDry: "جفاف خفيف", dry: "جفاف واضح" },
+      thermal: { low: "إجهاد منخفض", moderate: "إجهاد متوسط", high: "إجهاد مرتفع", severe: "إجهاد حرج" },
+      transpiration: { low: "نتح منخفض", moderate: "نتح متوسط", good: "نتح جيد", high: "نتح مرتفع" },
+    },
+    layerNote: {
+      moisture: "تحتاج هذه المنطقة {value} لتر/هكتار اليوم، {delta}.",
+      thermal: "مؤشر الإجهاد الحراري هنا {value} من 100، {delta}.",
+      transpiration: "مؤشر النتح هنا {value} من 100، {delta}.",
+    },
+    deltaAbove: "أعلى بنسبة {pct}% من متوسط القطعة",
+    deltaBelow: "أقل بنسبة {pct}% من متوسط القطعة",
+    deltaEven: "مطابق تقريباً لمتوسط القطعة",
+    average: "متوسط القطعة",
+    legendLow: "أدنى",
+    legendHigh: "أعلى",
+    zonesCount: "{n} منطقة في {area} هكتار",
+    hint: "اضغط على أي مربع لعرض تفاصيل المنطقة.",
+    selectedZone: "المنطقة المحددة",
+    note: "تقدير نموذجي للتوزيع المكاني داخل القطعة، مشتق من متوسط اليوم نفسه. يُستبدل بقراءات المستشعرات أو الأقمار الصناعية عند توصيلها.",
   },
   windowDetail: {
     ariaOpen: "لماذا هذه النافذة والكمية؟",
@@ -482,6 +671,96 @@ const FR: DashboardCopy = {
     perHa: "Par hectare",
     window: "Fenêtre d'irrigation",
     windowValue: "05:30 — 08:30",
+    perHaOpen: "Par hectare : voir les étapes du calcul",
+    perHaCta: "Comment ?",
+  },
+  flow: {
+    title: "D'où vient le chiffre par hectare ?",
+    subtitle: "{crop} à {wilaya} en système {system}, étape par étape jusqu'au volume de la parcelle.",
+    hint: "Touchez un coefficient pour voir son effet dans la formule.",
+    stepLabel: "Étape {n}",
+    resultTag: "Résultat",
+    factorsTag: "Coefficients en jeu",
+    climateTitle: "Données météo",
+    climateNote: "Température, humidité et vent entrent d'abord dans la formule de l'évapotranspiration ET₀.",
+    factorTemp: "Température {temp}°",
+    factorTempEffect: "La température porte la formule : 0.155 × {temp}° = {base}.",
+    factorHumidity: "Coefficient humidité {damp}",
+    factorHumidityEffect: "L'humidité {humidity} % applique un coefficient de {damp}, soit {pct} par rapport au neutre 1.00.",
+    factorWind: "Coefficient vent {boost}",
+    factorWindEffect: "Un vent de {wind} km/h applique un coefficient de {boost}, soit {pct} par rapport au neutre 1.00.",
+    cropTitle: "Coefficient cultural et sol",
+    cropNote: "L'ET₀ de référence est multipliée par le coefficient cultural, puis par celui du sol.",
+    factorKc: "Coefficient {crop} {kc}",
+    factorKcEffect: "Chaque millimètre évaporé devient {kc} mm de besoin réel pour {crop}.",
+    factorSoil: "Coefficient sol {soilFactor}",
+    factorSoilEffect: "Le sol {soil} applique un coefficient de {soilFactor}, soit {pct} par rapport à un sol idéal.",
+    efficiencyTitle: "Rendement du système d'irrigation",
+    efficiencyNote: "Le besoin net est divisé par le rendement du système pour couvrir les pertes à la distribution.",
+    factorEfficiency: "Rendement {efficiency}",
+    factorEfficiencyEffect: "La division par {efficiency} majore le volume de {pct} pour couvrir les pertes.",
+    hectareTitle: "Résultat pour un hectare",
+    hectareNote: "Conversion des millimètres en litres : 1 mm sur 1 hectare vaut 10 000 litres.",
+    totalTitle: "Total de la parcelle aujourd'hui",
+    totalNote: "Multiplication par la surface de {area} hectares, puis arrondi au m³ le plus proche comme dans la carte de décision.",
+    precisionNote:
+      "Les millimètres sont affichés avec deux décimales pour que la chaîne de multiplication corresponde exactement au résultat final ; la carte de décision montre les mêmes quantités avec une décimale.",
+    syncNote: "Les deux chiffres ci-dessus sont ceux de la carte de décision : {litres} L par hectare et {daily} m³ pour la parcelle.",
+  },
+  heatmap: {
+    title: "Carte thermique de la parcelle",
+    subtitle: "{zones} zones sur {area} hectares, répartition estimée autour de la moyenne du jour.",
+    layersAria: "Couches de la carte thermique",
+    layers: { thermal: "Stress thermique", moisture: "Besoin en eau", transpiration: "Transpiration" },
+    zoneIds: [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H",
+      "I",
+      "J",
+      "K",
+      "L",
+      "M",
+      "N",
+      "O",
+      "P",
+      "Q",
+      "R",
+      "S",
+      "T",
+      "U",
+      "V",
+      "W",
+      "X",
+    ],
+    zoneLabel: "Zone {id}",
+    cellAria: "{zone} : {value} {unit}, {status}",
+    units: { thermal: "indice sur 100", moisture: "L/ha", transpiration: "indice sur 100" },
+    status: {
+      moisture: { wet: "humidité élevée", balanced: "humidité équilibrée", mildDry: "léger déficit", dry: "déficit marqué" },
+      thermal: { low: "stress faible", moderate: "stress modéré", high: "stress élevé", severe: "stress critique" },
+      transpiration: { low: "transpiration faible", moderate: "transpiration moyenne", good: "transpiration bonne", high: "transpiration élevée" },
+    },
+    layerNote: {
+      moisture: "Cette zone demande {value} L/ha aujourd'hui, {delta}.",
+      thermal: "L'indice de stress thermique ici est de {value} sur 100, {delta}.",
+      transpiration: "L'indice de transpiration ici est de {value} sur 100, {delta}.",
+    },
+    deltaAbove: "{pct} % au-dessus de la moyenne de la parcelle",
+    deltaBelow: "{pct} % en dessous de la moyenne de la parcelle",
+    deltaEven: "proche de la moyenne de la parcelle",
+    average: "Moyenne de la parcelle",
+    legendLow: "Min",
+    legendHigh: "Max",
+    zonesCount: "{n} zones sur {area} hectares",
+    hint: "Touchez une cellule pour lire le détail de la zone.",
+    selectedZone: "Zone sélectionnée",
+    note: "Estimation modèle de la répartition spatiale dans la parcelle, dérivée de la moyenne du jour. Elle sera remplacée par les relevés capteurs ou satellite dès leur branchement.",
   },
   windowDetail: {
     ariaOpen: "Pourquoi cette fenêtre et ce volume ?",
