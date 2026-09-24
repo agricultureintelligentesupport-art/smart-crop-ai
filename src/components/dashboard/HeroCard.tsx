@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
+import { ChevronLeft, Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
 import type { IrrigationResult } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import { GPU } from "@/components/auth/ui";
@@ -24,6 +24,7 @@ export default function HeroCard({
   /** Wilaya name, shown as a small low-emphasis context label. */
   wilayaLabel,
   advice,
+  onOpenWindowDetail,
 }: {
   t: DashboardCopy;
   irrigation: IrrigationResult;
@@ -31,6 +32,8 @@ export default function HeroCard({
   wilayaLabel: string;
   /** Pre-composed advisory lines (same copy + values as before). */
   advice: { line1: string; line2: string; line3: string };
+  /** Opens the irrigation-window detail sheet (why this window + volume). */
+  onOpenWindowDetail: () => void;
 }) {
   const reduce = useReducedMotion();
 
@@ -83,12 +86,25 @@ export default function HeroCard({
 
         {/* Values are Latin/numeric → pinned LTR so the range never reorders. */}
         <div className="mt-4 flex flex-wrap gap-2">
-          <div className="min-w-[9rem] flex-1 rounded-[1rem] bg-white/12 px-3 py-2 ring-1 ring-white/15">
-            <p className="text-[10.5px] font-bold text-emerald-50/90">{t.hero.window}</p>
-            <p dir="ltr" className="mt-0.5 text-[14px] font-black tabular-nums text-white">
+          <button
+            type="button"
+            onClick={onOpenWindowDetail}
+            aria-label={t.windowDetail.ariaOpen}
+            className="group min-w-[9rem] flex-1 rounded-[1rem] bg-white/12 px-3 py-2 text-start ring-1 ring-white/15 transition-colors hover:bg-white/[0.18] hover:ring-white/30 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-white/45"
+          >
+            <span className="flex items-center justify-between gap-2">
+              <span className="text-[10.5px] font-bold text-emerald-50/90">{t.hero.window}</span>
+              <ChevronLeft
+                size={14}
+                strokeWidth={2.8}
+                aria-hidden
+                className="shrink-0 text-emerald-50/60 transition-colors group-hover:text-white rtl:rotate-0 ltr:rotate-180"
+              />
+            </span>
+            <span dir="ltr" className="mt-0.5 block text-[14px] font-black tabular-nums text-white">
               {t.hero.windowValue}
-            </p>
-          </div>
+            </span>
+          </button>
           <div className="min-w-[7.5rem] flex-1 rounded-[1rem] bg-white/12 px-3 py-2 ring-1 ring-white/15">
             <p className="text-[10.5px] font-bold text-emerald-50/90">{t.hero.perHa}</p>
             <p dir="ltr" className="mt-0.5 text-[14px] font-black tabular-nums text-white">
