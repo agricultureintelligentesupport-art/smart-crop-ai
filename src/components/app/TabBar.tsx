@@ -1,19 +1,20 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { Bot, Sprout, UserRound } from "lucide-react";
+import { Bot, Settings, Sprout, UserRound } from "lucide-react";
 import Link from "next/link";
 import { memo, type ReactNode } from "react";
 import { FOCUS_RING, SPRING } from "@/components/auth/ui";
 import { APP_SHELL } from "@/lib/app/copy";
 import type { Lang } from "@/lib/wilayas";
 
-export type TabId = "home" | "assistant" | "account";
+export type TabId = "home" | "assistant" | "account" | "settings";
 
 const TAB_ICONS: Record<TabId, typeof Bot> = {
   home: Sprout,
   assistant: Bot,
   account: UserRound,
+  settings: Settings,
 };
 
 /**
@@ -24,18 +25,24 @@ const TAB_ICONS: Record<TabId, typeof Bot> = {
  * - "حسابي" opens the account sheet when a handler is supplied (dashboard) and
  *   otherwise deep-links to the dashboard with `#account` (assistant screen),
  *   so the bar never dead-ends.
+ * - "الإعدادات" works the same way with `onSettings` / `#settings`.
  */
 function TabBar({
   active,
   lang,
   onAccount,
   accountOpen = false,
+  onSettings,
+  settingsOpen = false,
 }: {
   active: TabId;
   lang: Lang;
   onAccount?: () => void;
   /** Keeps the account pill lit while its sheet is open. */
   accountOpen?: boolean;
+  onSettings?: () => void;
+  /** Keeps the settings pill lit while its sheet is open. */
+  settingsOpen?: boolean;
 }) {
   const t = APP_SHELL[lang];
   const reduce = useReducedMotion();
@@ -44,6 +51,7 @@ function TabBar({
     { id: "home", label: t.tabs.home, href: "/dashboard" },
     { id: "assistant", label: t.tabs.assistant, href: "/assistant" },
     { id: "account", label: t.tabs.account, href: onAccount ? undefined : "/dashboard#account" },
+    { id: "settings", label: t.tabs.settings, href: onSettings ? undefined : "/dashboard#settings" },
   ];
 
   return (
@@ -54,7 +62,8 @@ function TabBar({
       <ul className="flex items-stretch px-2 sm:px-3">
         {items.map((item) => {
           const Icon = TAB_ICONS[item.id];
-          const isActive = item.id === active || (item.id === "account" && accountOpen);
+          const isActive = item.id === active || (item.id === "account" && accountOpen) ||
+            (item.id === "settings" && settingsOpen);
           const className = `relative flex h-[3.25rem] flex-1 select-none flex-col items-center justify-center gap-0.5 rounded-[1.1rem] transition-transform active:scale-[0.94] ${FOCUS_RING}`;
 
           const content: ReactNode = (
@@ -98,8 +107,8 @@ function TabBar({
               ) : (
                 <button
                   type="button"
-                  onClick={onAccount}
-                  aria-expanded={accountOpen}
+                  onClick={item.id === "settings" ? onSettings : onAccount}
+                  aria-expanded={item.id === "settings" ? settingsOpen : accountOpen}
                   className={className}
                 >
                   {content}

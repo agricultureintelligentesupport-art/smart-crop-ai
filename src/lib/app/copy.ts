@@ -14,6 +14,15 @@ export interface AppShellCopy {
     home: string;
     assistant: string;
     account: string;
+    settings: string;
+  };
+  /** Settings sheet (language, wilaya, sign-out). */
+  settings: {
+    title: string;
+    subtitle: string;
+    language: string;
+    region: string;
+    session: string;
   };
   /** Accessible name of the tab bar itself. */
   navLabel: string;
@@ -27,14 +36,28 @@ export interface AppShellCopy {
 }
 
 const AR: AppShellCopy = {
-  tabs: { home: "الرئيسية", assistant: "المساعد", account: "حسابي" },
+  tabs: { home: "الرئيسية", assistant: "المساعد", account: "حسابي", settings: "الإعدادات" },
+  settings: {
+    title: "الإعدادات",
+    subtitle: "اللغة والولاية والجلسة.",
+    language: "اللغة",
+    region: "الولاية",
+    session: "الجلسة",
+  },
   navLabel: "التنقل الرئيسي",
   barLabel: "شريط التطبيق",
   actions: { close: "إغلاق", openAccount: "فتح حسابي" },
 };
 
 const FR: AppShellCopy = {
-  tabs: { home: "Accueil", assistant: "Assistant", account: "Profil" },
+  tabs: { home: "Accueil", assistant: "Assistant", account: "Profil", settings: "Réglages" },
+  settings: {
+    title: "Réglages",
+    subtitle: "Langue, wilaya et session.",
+    language: "Langue",
+    region: "Wilaya",
+    session: "Session",
+  },
   navLabel: "Navigation principale",
   barLabel: "Barre de l'application",
   actions: { close: "Fermer", openAccount: "Ouvrir mon profil" },
