@@ -1,21 +1,28 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
-import { ChevronDown, ChevronLeft, Clock, Droplets, MapPin, ShieldCheck, Sparkles, Waves } from "lucide-react";
+import { ChevronDown, ChevronLeft, Droplets, MapPin, Sparkles } from "lucide-react";
 import type { IrrigationResult } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
+import type { DailyTask } from "@/lib/dailyTasks/types";
 import { GPU } from "@/components/auth/ui";
 import { fmt } from "./WeatherCard";
+import HeroTasksChecklist from "./HeroTasksChecklist";
 
 /**
  * Hero decision card — the first thing a farmer sees.
  *
  * Promotes the "quick reading" that used to be a plain strip in the middle of
- * the scroll into the screen's headline: today's water volume for the parcel,
- * the irrigation window, and the three advisory lines, all still fed by the
- * exact same `computeIrrigation` numbers as the calculator below. The wilaya
- * name — formerly its own card — rides along as a quiet context label in the
- * header row, next to the crop name.
+ * the scroll into the screen's headline: today's water volume for the parcel
+ * and the irrigation window, all still fed by the exact same
+ * `computeIrrigation` numbers as the calculator below. The wilaya name —
+ * formerly its own card — rides along as a quiet context label in the header
+ * row, next to the crop name.
+ *
+ * The old static advisory lines are gone: their place is taken by the
+ * interactive "مهام اليوم الموصى بها (AI)" checklist (see
+ * `HeroTasksChecklist`) — the daily AI task engine's output, with per-task
+ * checkboxes, category badges and priority indicators.
  */
 export default function HeroCard({
   t,
@@ -23,7 +30,12 @@ export default function HeroCard({
   cropLabel,
   /** Wilaya name, shown as a small low-emphasis context label. */
   wilayaLabel,
-  advice,
+  tasks,
+  taskDone,
+  onToggleTask,
+  tasksDoneCount,
+  tasksTotal,
+  tasksAllDone,
   onOpenWindowDetail,
   onOpenPerHectareFlow,
   flowOpen,
@@ -32,8 +44,15 @@ export default function HeroCard({
   irrigation: IrrigationResult;
   cropLabel: string;
   wilayaLabel: string;
-  /** Pre-composed advisory lines (same copy + values as before). */
-  advice: { line1: string; line2: string; line3: string };
+  /** Today's AI-generated tasks (display-ready in the active language). */
+  tasks: Array<DailyTask & { title: string; subtitle: string }>;
+  /** Checked-task map (persisted locally per day). */
+  taskDone: Record<string, boolean>;
+  /** Toggles one task's checked state (strike-through + check animation). */
+  onToggleTask: (taskId: string) => void;
+  tasksDoneCount: number;
+  tasksTotal: number;
+  tasksAllDone: boolean;
   /** Opens the irrigation-window detail sheet (why this window + volume). */
   onOpenWindowDetail: () => void;
   /** Opens the per-hectare calculation flow (the unit pill below). */
@@ -45,7 +64,7 @@ export default function HeroCard({
 
   return (
     <motion.section
-      aria-label={t.advice.title}
+      aria-label={t.hero.eyebrow}
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
@@ -153,18 +172,16 @@ export default function HeroCard({
           </motion.button>
         </div>
 
-        <ul className="mt-3 flex flex-col gap-2 rounded-[1.1rem] bg-white/10 p-3 ring-1 ring-white/12">
-          {[
-            { icon: <Waves size={14} strokeWidth={2.6} aria-hidden />, text: advice.line1 },
-            { icon: <Clock size={14} strokeWidth={2.6} aria-hidden />, text: advice.line2 },
-            { icon: <ShieldCheck size={14} strokeWidth={2.6} aria-hidden />, text: advice.line3 },
-          ].map((line) => (
-            <li key={line.text} className="flex items-start gap-2 text-[12.5px] font-bold leading-[1.7] text-white">
-              <span className="mt-[3px] shrink-0 text-emerald-50/90">{line.icon}</span>
-              <span className="min-w-0">{line.text}</span>
-            </li>
-          ))}
-        </ul>
+        {/* Daily AI task checklist — replaces the old static advice block. */}
+        <HeroTasksChecklist
+          t={t}
+          tasks={tasks}
+          done={taskDone}
+          onToggle={onToggleTask}
+          doneCount={tasksDoneCount}
+          total={tasksTotal}
+          allDone={tasksAllDone}
+        />
       </div>
 
       {/* Decorative water-drop corner glyph, kept out of the a11y tree. */}

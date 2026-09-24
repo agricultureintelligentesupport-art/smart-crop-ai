@@ -405,10 +405,12 @@ test.describe("member dashboard", () => {
     await expect(perDay).not.toHaveText(dripValue ?? "");
 
     // Nudge buttons move the same value, and the whole dashboard follows it
+    // (the parcel-area figure now surfaces in the field heatmap's zone line —
+    // the hero's old static advice block was replaced by the AI task checklist).
     await page.getByRole("button", { name: "المساحة بالسقي +" }).click();
-    await expect(page.getByText(/على 9.5 هكتار/)).toBeVisible();
+    await expect(page.getByText(/في 9\.5 هكتار/).first()).toBeVisible();
     await page.getByRole("button", { name: "المساحة بالسقي −" }).click();
-    await expect(page.getByText(/على 9.0 هكتار/)).toBeVisible();
+    await expect(page.getByText(/في 9\.0 هكتار/).first()).toBeVisible();
   });
 
   test("leaf scan produces a diagnosis with field advice", async ({ page }) => {

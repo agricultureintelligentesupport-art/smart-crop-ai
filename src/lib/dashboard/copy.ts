@@ -299,26 +299,25 @@ export interface DashboardCopy {
     bands: { poor: string; fair: string; good: string; excellent: string };
     note: string;
   };
-  tasks: {
+  /**
+   * Daily AI task checklist — merged INTO the hero decision card (it replaces
+   * the old static advice lines and the standalone tasks card).
+   */
+  heroTasks: {
     title: string;
     subtitle: string;
-    irrigation: string;
-    irrigationDetail: string;
-    wind: string;
-    windDetail: string;
-    heat: string;
-    heatDetail: string;
-    scan: string;
-    scanDetail: string;
-    done: string;
-    remaining: string;
-  };
-  advice: {
-    title: string;
-    subtitle: string;
-    line1: string;
-    line2: string;
-    line3: string;
+    /** `{done}` `{total}` — progress counter beside the bar. */
+    progress: string;
+    /** `{done}` `{total}` — celebratory badge when every task is checked. */
+    allDone: string;
+    /** Category badges (the three task buckets). */
+    categories: { irrigation: string; protection: string; fertilization: string };
+    /** Priority indicators: High / Normal. */
+    priorities: { high: string; normal: string };
+    /** Accessible label of a task checkbox: `{title}`. */
+    checkAria: string;
+    /** Card footer — the AI publish stamp of the daily workflow. */
+    updatedAi: string;
   };
   footer: {
     disclaimer: string;
@@ -597,26 +596,15 @@ const AR: DashboardCopy = {
     bands: { poor: "ضعيف", fair: "متوسط", good: "جيد", excellent: "ممتاز" },
     note: "يحاكي هذا الرسم طبقة الأقمار الصناعية؛ المصدر الحقيقي يُربط عبر Sentinel-2.",
   },
-  tasks: {
-    title: "مهام اليوم",
-    subtitle: "قائمة مشتقة من الطقس والمحاصيل المختارة.",
-    irrigation: "سقاية القطعة",
-    irrigationDetail: "التزم بـ {value} م³ اليوم حسب الحساب.",
-    wind: "فحص شبكة السقي",
-    windDetail: "رياح {value} كم/س، تحقق من النقاطات المغطاة بالرمل.",
-    heat: "حماية النباتات من الحرارة",
-    heatDetail: "الحرارة {value}°، رشّ شبكة التظليل إن وُجدت.",
-    scan: "مسح ورقة أسبوعي",
-    scanDetail: "صوّر 5 أوراق من نقاط مختلفة في القطعة.",
-    done: "منجزة",
-    remaining: "باقية {n}",
-  },
-  advice: {
-    title: "قراءة سريعة",
-    subtitle: "خلاصة تعتمد على الطقس والمحصول المختار.",
-    line1: "سقِ بمعدل {mm} مم اليوم على {area} هكتار.",
-    line2: "أفضل نافذة للسقي: من {from} إلى {to}.",
-    line3: "راقب {crop}: الظروف مناسبة لإنتشار {risk}.",
+  heroTasks: {
+    title: "مهام اليوم الموصى بها (AI)",
+    subtitle: "خطة يومية يولّدها الذكاء الاصطناعي من طقس قطعتك ومحصولها.",
+    progress: "{done}/{total} مهام منجزة",
+    allDone: "{done}/{total} اكتملت مهام اليوم 🎉",
+    categories: { irrigation: "💧 سقي", protection: "🛡️ وقاية", fertilization: "🚜 تسميد/صيانة" },
+    priorities: { high: "عالية", normal: "عادية" },
+    checkAria: "تعليم المهمة كمنجزة: {title}",
+    updatedAi: "✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00",
   },
   footer: {
     disclaimer: "كل الأرقام تقديرية لدعم القرار ولا تعوّض القياس الميداني أو تشخيص مهندس زراعي.",
@@ -926,26 +914,19 @@ const FR: DashboardCopy = {
     bands: { poor: "Faible", fair: "Moyen", good: "Bon", excellent: "Excellent" },
     note: "Ce graphique simule la couche satellite ; la source réelle arrive via Sentinel-2.",
   },
-  tasks: {
-    title: "Tâches du jour",
-    subtitle: "Liste dérivée de la météo et des cultures sélectionnées.",
-    irrigation: "Irriguer la parcelle",
-    irrigationDetail: "Respectez {value} m³ aujourd'hui selon le calcul.",
-    wind: "Vérifier le réseau d'irrigation",
-    windDetail: "Vent {value} km/h, contrôlez les goutteurs ensablés.",
-    heat: "Protéger les plants de la chaleur",
-    heatDetail: "Température {value}°, activez l'ombrage si disponible.",
-    scan: "Scan hebdomadaire des feuilles",
-    scanDetail: "Photographiez 5 feuilles à des points différents.",
-    done: "Terminées",
-    remaining: "{n} restantes",
-  },
-  advice: {
-    title: "Lecture rapide",
-    subtitle: "Synthèse basée sur la météo et la culture choisie.",
-    line1: "Irriguez {mm} mm aujourd'hui sur {area} hectares.",
-    line2: "Meilleure fenêtre d'irrigation : de {from} à {to}.",
-    line3: "Surveillez {crop} : conditions favorables au développement de {risk}.",
+  heroTasks: {
+    title: "Tâches du jour recommandées (AI)",
+    subtitle: "Plan quotidien généré par l'IA à partir de la météo et de la culture de votre parcelle.",
+    progress: "{done}/{total} tâches accomplies",
+    allDone: "{done}/{total} tâches du jour accomplies 🎉",
+    categories: {
+      irrigation: "💧 Irrigation",
+      protection: "🛡️ Protection",
+      fertilization: "🚜 Fertilisation/entretien",
+    },
+    priorities: { high: "Haute", normal: "Normale" },
+    checkAria: "Marquer la tâche comme accomplie : {title}",
+    updatedAi: "✨ Mises à jour par l'IA - aujourd'hui 00:00",
   },
   footer: {
     disclaimer: "Toutes les valeurs sont des estimations d'aide à la décision, sans remplacer la mesure terrain ni l'avis d'un agronome.",

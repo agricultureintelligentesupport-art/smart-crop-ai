@@ -23,6 +23,12 @@ npm run dev   # http://localhost:3000
 > `#account` opens the dashboard's account sheet directly (the "حسابي" tab
 deep-links to it from `/assistant`).
 
+API routes (JSON): `/api/assistant` (the resilient AI diagnosis chain),
+`/api/daily-tasks` (daily AI task generation + published-day lookup for the
+hero checklist) and the scheduled pair `/api/cron/daily-snapshot` (23:55
+context snapshot) → `/api/cron/daily-tasks` (00:00 AI generation + publish) —
+see [`docs/daily-tasks.md`](docs/daily-tasks.md).
+
 Every route is interactive end to end. There are no "coming soon" screens:
 every CTA leads to a working destination, and every dashboard feature requires
 an authenticated account (Google, Algerian phone OTP, or e-mail) — or the
@@ -118,8 +124,18 @@ can now be live.
 - **Leaf scan**: file picker / drag & drop / camera capture, local preview,
   progress, diagnosis with confidence, severity and numbered field steps.
 - **Vegetation index**: NDVI reading, 8-week sparkline, stress share.
-- **Field tasks**: checklist derived from the same weather and irrigation
-  numbers, with progress.
+- **Daily AI tasks (hero checklist)**: the hero decision card's lower half is
+  the interactive **"مهام اليوم الموصى بها (AI)"** checklist — it replaces the
+  old static advice lines and the standalone tasks card. Each task carries an
+  animated check + strike-through, a category badge (💧 سقي / 🛡️ وقاية /
+  🚜 تسميد/صيانة) and a High/Normal priority indicator; a progress bar and a
+  `🎉` mini-badge celebrate a fully checked day, and the card footer carries
+  the AI publish stamp (`✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم
+  00:00`). Sets are generated daily by the 23:55 → 00:00 scheduled workflow
+  (`/api/cron/daily-snapshot` + `/api/cron/daily-tasks`, AI with a never-empty
+  rule-based fallback) and cached per `YYYY-MM-DD` in LocalStorage (and RTDB
+  when configured); checked state survives refreshes for the day. See
+  [`docs/daily-tasks.md`](docs/daily-tasks.md).
 
 Values are labelled as decision-support estimates, not measurements.
 
