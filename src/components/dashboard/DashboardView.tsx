@@ -1,9 +1,9 @@
 "use client";
 
 import { useMotionValueEvent, useScroll } from "framer-motion";
-import { Leaf, MapPin, Sprout } from "lucide-react";
+import { Leaf } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
@@ -15,13 +15,12 @@ import { DASHBOARD } from "@/lib/dashboard/copy";
 import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
-import { CROPS, DEFAULT_WILAYA_CODE, REGIONS, getWilaya, type Lang } from "@/lib/wilayas";
+import { CROPS, DEFAULT_WILAYA_CODE, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import AccountSheet from "./AccountSheet";
 import FieldTasksCard from "./FieldTasksCard";
 import HeroCard from "./HeroCard";
 import IrrigationCard from "./IrrigationCard";
-import QuickActions, { type QuickTarget } from "./QuickActions";
 import SatelliteCard from "./SatelliteCard";
 import SettingsSheet from "./SettingsSheet";
 import ScanCard from "./ScanCard";
@@ -30,18 +29,15 @@ import { SectionHeader } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
 
-/** How long a jump target keeps its focus ring after a quick action. */
-const HIGHLIGHT_MS = 1400;
-
 /**
  * The live member dashboard, rendered by `/dashboard`. Every number reacts to
  * the wilaya + crop + parcel inputs, so the page is fully operational without
  * a backend: it is seeded, deterministic and clearly labelled as an estimate.
  *
  * Presentation is a native app shell: a translucent top bar, one scroll region
- * holding a large title, a hero decision card, thumb-zone quick actions and
- * grouped card sections, then a bottom tab bar. All state, derivations and
- * handlers below are unchanged — only what wraps them is.
+ * holding a large title, a hero decision card and grouped card sections, then a
+ * bottom tab bar. All state, derivations and handlers below are unchanged —
+ * only what wraps them is.
  *
  * Session-gated with a guest escape hatch: an authenticated user (Google,
  * phone or e-mail — Firebase session or gateway-backed on-device session)
@@ -139,25 +135,6 @@ export default function DashboardView() {
   const { scrollY } = useScroll({ container: scrollRef });
   useMotionValueEvent(scrollY, "change", (value) => setElevated(value > 8));
 
-  /** Quick-action jump targets + the ring that answers "where did I land?". */
-  const tasksRef = useRef<HTMLDivElement | null>(null);
-  const irrigationRef = useRef<HTMLDivElement | null>(null);
-  const scanRef = useRef<HTMLDivElement | null>(null);
-  const [highlight, setHighlight] = useState<QuickTarget | null>(null);
-  const highlightTimer = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
-  }, []);
-
-  const jumpTo = useCallback((target: QuickTarget) => {
-    const node =
-      target === "scan" ? scanRef.current : target === "irrigation" ? irrigationRef.current : tasksRef.current;
-    node?.scrollIntoView({ behavior: "smooth", block: "start" });
-    setHighlight(target);
-    if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
-    highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
-  }, []);
-
   // The "حسابي" tab deep-links to the dashboard with `#account` from other
   // screens. Read through the URL (hydration-safe, no state mirrored from an
   // effect) so the sheet can be opened, closed and re-opened by navigation.
@@ -196,9 +173,6 @@ export default function DashboardView() {
     }
     setOpenSettings(false);
   };
-
-  const ring = (target: QuickTarget) =>
-    highlight === target ? "rounded-[1.5rem] ring-2 ring-emerald-400/55 ring-offset-2 ring-offset-[#f4f8f5]" : "";
 
   const advice = {
     line1: t.advice.line1
@@ -244,62 +218,38 @@ export default function DashboardView() {
       >
         <div className={`${SHELL_COLUMN} lg:max-w-[720px] scroll-pad-bottom flex flex-col gap-5 px-4 pt-2`}>
           {/* Large title + context */}
-          <header className="flex flex-col gap-3 pt-1">
-            <div>
-              <h1 className="text-[26px] font-black leading-tight tracking-tight text-emerald-950">{greeting}</h1>
-              <p className="mt-1.5 text-[12.5px] font-semibold leading-5 text-emerald-900/60">
-                {t.welcome.caption
-                  .replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)
-                  .replace("{month}", month)}
-              </p>
-            </div>
-
-            <div className="app-surface flex items-center gap-2.5 p-2 ps-3.5">
-              <MapPin size={18} strokeWidth={2.5} aria-hidden className="shrink-0 text-emerald-600" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-[13.5px] font-black text-emerald-950">
-                  {lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
-                </p>
-                <p className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] font-semibold text-emerald-900/60">
-                  <span className="truncate">{lang === "ar" ? REGIONS[wilaya.region].ar : REGIONS[wilaya.region].fr}</span>
-                  {role && (
-                    <>
-                      <span aria-hidden className="text-emerald-900/25">·</span>
-                      <Sprout size={11} strokeWidth={3} aria-hidden className="shrink-0 text-emerald-500" />
-                      <span className="truncate">{t.personalize.roleOptions[role]}</span>
-                    </>
-                  )}
-                </p>
-              </div>
-            </div>
+          <header className="pt-1">
+            <h1 className="text-[26px] font-black leading-tight tracking-tight text-emerald-950">{greeting}</h1>
+            <p className="mt-1.5 text-[12.5px] font-semibold leading-5 text-emerald-900/60">
+              {t.welcome.caption
+                .replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)
+                .replace("{month}", month)}
+            </p>
           </header>
 
-          {/* Today's decision + thumb-zone shortcuts */}
-          <HeroCard t={t} irrigation={irrigation} cropLabel={CROPS[crop][lang]} advice={advice} />
+          {/* Today's decision */}
+          <HeroCard
+            t={t}
+            irrigation={irrigation}
+            cropLabel={CROPS[crop][lang]}
+            wilayaLabel={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
+            advice={advice}
+          />
 
-          <QuickActions t={t} onJump={jumpTo} />
-
-          <div ref={tasksRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("tasks")}`}>
-            <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
-          </div>
+          <FieldTasksCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} areaHa={areaHa} />
 
           {/* Weather + water calculator */}
           <section id="section-weather" aria-label={t.sections.weather} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.weather} />
             <div className="grid gap-3 lg:grid-cols-2">
               <WeatherCard t={t} lang={lang} weather={weather} />
-              <div
-                ref={irrigationRef}
-                className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("irrigation")}`}
-              >
-                <IrrigationCard
-                  t={t}
-                  lang={lang}
-                  wilayaCode={wilayaCode}
-                  areaHa={areaHa}
-                  onAreaChange={setAreaHa}
-                />
-              </div>
+              <IrrigationCard
+                t={t}
+                lang={lang}
+                wilayaCode={wilayaCode}
+                areaHa={areaHa}
+                onAreaChange={setAreaHa}
+              />
             </div>
           </section>
 
@@ -308,9 +258,7 @@ export default function DashboardView() {
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
               <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-              <div ref={scanRef} className={`scroll-mt-24 transition-[box-shadow,border-radius] ${ring("scan")}`}>
-                <ScanCard t={t} wilayaCode={wilayaCode} />
-              </div>
+              <ScanCard t={t} wilayaCode={wilayaCode} />
             </div>
           </section>
 
