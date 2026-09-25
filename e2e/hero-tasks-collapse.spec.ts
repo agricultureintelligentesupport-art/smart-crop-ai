@@ -1,17 +1,20 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 /**
- * Collapsible "مهام اليوم الموصى بها (AI)" checklist inside the hero card.
+ * The hero decision card's AI task tray — the seamless lower zone of the card.
  *
- * The checklist ships **collapsed**: the first (highest-priority) task stays on
- * screen and the rest wait behind the glass pill at the foot of the card, so on
- * a phone the decision card stays a quick read. This spec pins the three
- * promises of that feature:
+ * The card is ONE container with two zones joined by a single hairline (no
+ * nested cards, no inner boxes): metrics above, `✨ مهام اليوم الذكية` below,
+ * with the day's counter + thin progress rail in its header. The tray ships
+ * **collapsed**: the first (highest-priority) task stays on screen and the rest
+ * wait behind the integrated glass handle at its foot. This spec pins:
  *
- *   1. collapsed by default → one checkbox, pill reads «عرض باقي المهام (n+) ▾»;
+ *   1. collapsed by default → one checkbox, handle reads «عرض باقي المهام (n+)»;
  *   2. expanding reveals every remaining task (badges, descriptions, boxes) and
- *      the pill flips to «طي القائمة ▴»;
- *   3. the boundary — the hero's own figures never move, and a checked task
+ *      the handle flips to «طي القائمة»;
+ *   3. seamlessness — the tray carries no card surface and every task row is a
+ *      borderless wash, with exactly one hairline between the two zones;
+ *   4. the boundary — the hero's own figures never move, and a checked task
  *      stays checked across collapse/expand and a full reload.
  *
  * Reference weather is forced (Open-Meteo aborted) so the numbers quoted below
@@ -23,9 +26,14 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("button", { name: "لكل هكتار: عرض خطوات الحساب" })).toBeVisible();
 });
 
-/** The checklist block (its own labelled region inside the hero region). */
+/** The hero decision card itself (one container, two zones). */
+function hero(page: import("@playwright/test").Page): Locator {
+  return page.getByRole("region", { name: "قرار اليوم" });
+}
+
+/** The task tray — the labelled region of the crisp `✨ …` header. */
 function checklist(page: import("@playwright/test").Page): Locator {
-  return page.getByRole("region", { name: "مهام اليوم الموصى بها (AI)" });
+  return page.getByRole("region", { name: "✨ مهام اليوم الذكية" });
 }
 
 /** The day's total, straight from the progress bar the card renders. */
@@ -52,26 +60,79 @@ test("the checklist is collapsed by default: first task only, pill at the foot",
   const total = await taskTotal(page);
   expect(total).toBeGreaterThanOrEqual(3);
 
-  // Header copy stays: the section title, the progress counter and the bar.
-  await expect(card.getByRole("heading", { name: "مهام اليوم الموصى بها (AI)" })).toBeVisible();
-  await expect(card.getByRole("progressbar")).toHaveAttribute("aria-valuemax", String(total));
+  // Compact header row: the crisp title on one edge, `0/n منجزة` + thin rail
+  // on the other. (The long descriptive subtitle is gone by design.)
+  await expect(card.getByRole("heading", { name: "✨ مهام اليوم الذكية" })).toBeVisible();
+  await expect(card.getByText(`${0}/${total} منجزة`)).toBeVisible();
+  const rail = card.getByRole("progressbar");
+  await expect(rail).toHaveAttribute("aria-valuemax", String(total));
+  expect((await rail.boundingBox())?.width).toBeCloseTo(64, 0);
 
   // Exactly one checkable row — the generator's first, highest-priority task.
   const boxes = card.getByRole("checkbox");
   await expect(boxes).toHaveCount(1);
   await expect(boxes.first()).toHaveAccessibleName(/تعليم المهمة كمنجزة: /);
 
-  // The pill carries the live hidden count and the collapsed chevron.
+  // The handle carries the live hidden count, the ⚡ glyph and the chevron.
   const pill = togglePill(card);
   await expect(pill).toBeVisible();
   await expect(pill).toHaveAttribute("aria-expanded", "false");
   await expect(pill).toContainText(`عرض باقي المهام (${total - 1}+)`);
-  await expect(pill).toContainText("▾");
+  await expect(pill).toContainText("⚡");
+  await expect(pill.locator("svg")).toHaveCount(1); // the animated ChevronDown
 
   // 44px touch target, and it never pushes the card sideways on a phone.
   const box = await pill.boundingBox();
-  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  expect(Math.round(box?.height ?? 0)).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+});
+
+test("the tray is seamless: one container, one hairline, no nested cards", async ({ page }) => {
+  const card = checklist(page);
+  const surface = hero(page);
+
+  // Exactly one zone seam, a 1px hairline — and it is the only border between
+  // the metrics and the tray.
+  const seam = surface.locator("[data-hero-seam]");
+  await expect(seam).toHaveCount(1);
+  const seamStyle = await seam.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { top: s.borderTopWidth, sides: s.borderLeftWidth + s.borderRightWidth };
+  });
+  expect(seamStyle.top).toBe("1px");
+  expect(seamStyle.sides).toBe("0px0px");
+
+  // The tray itself is NOT a card: no fill, no ring/shadow, no border.
+  const trayStyle = await card.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      background: s.backgroundColor,
+      border: `${s.borderTopWidth}${s.borderLeftWidth}${s.borderRightWidth}${s.borderBottomWidth}`,
+      shadow: s.boxShadow,
+    };
+  });
+  expect(trayStyle.background).toBe("rgba(0, 0, 0, 0)");
+  expect(trayStyle.border).toBe("0px0px0px0px");
+  expect(trayStyle.shadow).toBe("none");
+
+  // …and neither is a task row: borderless washes, radius only.
+  const rowStyle = await card.getByRole("checkbox").first().evaluate((input) => {
+    const label = input.closest("label");
+    if (!label) throw new Error("a task row must be a label wrapping its checkbox");
+    const s = getComputedStyle(label);
+    return {
+      border: `${s.borderTopWidth}${s.borderLeftWidth}${s.borderRightWidth}${s.borderBottomWidth}`,
+      background: s.backgroundColor,
+    };
+  });
+  expect(rowStyle.border).toBe("0px0px0px0px");
+  // A soft glassy fill, not a solid box (Chrome serialises it in oklab).
+  expect(rowStyle.background).toMatch(/0\.1\)$/);
+
+  // Both zones live inside the one master container: the tray is the only
+  // nested region (the metrics are plain rows, not a second card).
+  await expect(surface.locator("section")).toHaveCount(1);
+  await expect(card).toBeVisible();
 });
 
 test("expanding reveals every task and collapsing puts them back", async ({ page }) => {
@@ -149,10 +210,10 @@ for (const width of [320, 360, 412]) {
     const card = checklist(page);
     const pill = togglePill(card);
 
-    await expect(card.getByRole("heading", { name: "مهام اليوم الموصى بها (AI)" })).toBeVisible();
+    await expect(card.getByRole("heading", { name: "✨ مهام اليوم الذكية" })).toBeVisible();
     await expect(card.getByRole("checkbox")).toHaveCount(1);
     const box = await pill.boundingBox();
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    expect(Math.round(box?.height ?? 0)).toBeGreaterThanOrEqual(44);
     expect(box?.width ?? 0).toBeGreaterThan(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 
