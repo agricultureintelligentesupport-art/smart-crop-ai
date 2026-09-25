@@ -6,6 +6,10 @@ import { dynamic, POST } from "../../src/app/api/assistant/route";
 /** Stage-1 keys used across the suite (values are deliberately padded). */
 const GEMINI_KEY = "test-gemini";
 const HF_KEY = "test-hf";
+/** Step 1 primary vision engine key (CodeCraft, OpenAI-compatible). */
+const CODECRAFT_KEY = "test-codecraft";
+/** Default CodeCraft endpoint — `CODECRAFT_BASE_URL` + `/chat/completions`. */
+const CODECRAFT_CHAT_URL = "https://codecraftapi.com/v1/chat/completions";
 
 /**
  * Stage-1 AbortController window, mirrored from the route: 18 s for the
@@ -31,7 +35,7 @@ const GEMINI_FALLBACK_ORDER = [
  * model-chain overrides.
  */
 const SCRUBBED_ENV_PATTERN =
-  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL)/;
+  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
 
 const originalKeys: Record<string, string | undefined> = {};
 for (const [name, value] of Object.entries(process.env)) {
@@ -1996,4 +2000,351 @@ test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip
   assert.equal(payload.preprocessing?.status, "skipped");
   assert.match(warningText(payload), /Step 1 vision unavailable/);
   assert.doesNotMatch(warningText(payload), /Step 0/);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Step 1 — dual-engine vision: CodeCraft PRIMARY, MobileNetV2 backup  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The CodeCraft chat-completions endpoint. NOTE: it also matches the Stage 2
+ * helper `isChatUrl` (`/v1/chat/completions`), so every mock in this section
+ * checks CodeCraft FIRST.
+ */
+const isCodeCraftUrl = (url: string) =>
+  /codecraftapi\.com\/v1\/chat\/completions$/.test(String(url));
+
+interface CodeCraftContentPart {
+  type?: string;
+  text?: string;
+  image_url?: { url?: string };
+}
+
+interface CodeCraftRequestBody {
+  model?: string;
+  messages?: { role: string; content: string | CodeCraftContentPart[] }[];
+}
+
+const parseCodeCraftBody = (init: RequestInit): CodeCraftRequestBody =>
+  JSON.parse(String(init.body ?? "{}")) as CodeCraftRequestBody;
+
+/** The data URL CodeCraft received (proves the photo actually travelled). */
+const codeCraftImageUrl = (body: CodeCraftRequestBody): string => {
+  const userMessage = (body.messages ?? []).find((message) => message.role === "user");
+  const content = userMessage?.content;
+  if (!Array.isArray(content)) return "";
+  const imagePart = content.find((part) => part?.type === "image_url");
+  return imagePart?.image_url?.url ?? "";
+};
+
+/**
+ * A successful CodeCraft verdict — the structured agricultural diagnostic
+ * data the engine is asked for (disease name, severity, immediate treatment).
+ */
+const codecraftVerdict = (overrides: Record<string, unknown> = {}) =>
+  Response.json({
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: JSON.stringify({
+            is_plant: true,
+            crop: "Tomato",
+            crop_ar: "الطماطم",
+            disease: "Early blight",
+            disease_ar: "اللفحة المبكرة",
+            healthy: false,
+            severity: "medium",
+            severity_percent: 45,
+            confidence: 92,
+            symptoms: ["بقع بنية دائرية على الأوراق السفلية"],
+            immediate_treatment: ["رشّ مانكوزيب بالجرعة المسجلة"],
+            prevention: ["تناوب زراعي لموسمين"],
+            alternatives: [{ disease: "Late blight", confidence: 6 }],
+            notes: "الإصابة في مرحلة مبكرة",
+            ...overrides,
+          }),
+        },
+        finish_reason: "stop",
+      },
+    ],
+  });
+
+/** An OpenAI-shaped error envelope from the CodeCraft gateway. */
+const codecraftHttpError = (status: number, message: string, code?: string) =>
+  Response.json(
+    {
+      error: {
+        message,
+        type: status === 402 ? "billing_error" : "invalid_request_error",
+        ...(code ? { code } : {}),
+      },
+    },
+    { status },
+  );
+
+/** Enable the CodeCraft engine (padded, to prove the route trims the value). */
+const configureCodeCraft = (key: string = CODECRAFT_KEY) => {
+  process.env.CODECRAFT_API_KEY = ` ${key} `;
+};
+
+test("Step 1 primary: CodeCraft diagnoses the leaf and its findings feed the EXISTING agent pipeline", async () => {
+  configureKeys();
+  configureCodeCraft();
+  const urls: string[] = [];
+  let codecraftAuth: string | null = null;
+  let codecraftBody: CodeCraftRequestBody = {};
+  let geminiBody: GeminiRequestBody = {};
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    urls.push(String(url));
+    if (isCodeCraftUrl(String(url))) {
+      codecraftAuth = new Headers(init.headers).get("Authorization");
+      codecraftBody = parseCodeCraftBody(init);
+      return codecraftVerdict();
+    }
+    if (isGeminiUrl(String(url))) {
+      geminiBody = parseGeminiBody(init);
+      return geminiReply("علاج فوري.");
+    }
+    if (isDetectUrl(String(url))) return leafDetection();
+    // The Hugging Face classifier must NOT run: CodeCraft answered.
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+
+  // Pipeline order: Step 0 crop → Step 1 CodeCraft (primary) → Stage 1 Gemini.
+  assert.equal(urls.length, 3);
+  assert.ok(isDetectUrl(urls[0]));
+  assert.equal(urls[1], CODECRAFT_CHAT_URL);
+  assert.ok(isGeminiUrl(urls[2]));
+
+  // OpenAI-compatible round-trip: Bearer key, vision model, the photo itself.
+  assert.equal(codecraftAuth, `Bearer ${CODECRAFT_KEY}`);
+  assert.equal(codecraftBody.model, "gpt-4o");
+  assert.match(codeCraftImageUrl(codecraftBody), /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/);
+
+  // SAME contract as MobileNetV2 — the UI card, the source and the crop
+  // report are untouched by the engine swap.
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 92);
+  assert.equal((payload.diagnosis as { engine?: string } | null)?.engine, "codecraft");
+  assert.equal(payload.preprocessing?.status, "cropped");
+  assert.equal(payload.source, "hybrid");
+
+  // The structured findings (disease, severity, immediate treatment) are
+  // handed to the EXISTING conversation context…
+  const userTurn = geminiUserText(geminiBody);
+  assert.match(userTurn, /اللفحة المبكرة/);
+  assert.match(userTurn, /92%/);
+  assert.match(userTurn, /درجة الخطورة/);
+  assert.match(userTurn, /مانكوزيب/);
+  assert.match(userTurn, /تناوب زراعي لموسمين/);
+  // …while the agent's persona and system prompt stay exactly as they were.
+  assert.match(geminiSystemText(geminiBody), /^أنت مساعد زراعي خبير داخل تطبيق/);
+  assert.doesNotMatch(geminiSystemText(geminiBody), /plant pathology vision module/i);
+  assert.doesNotMatch(userTurn, /CodeCraft/i);
+
+  // No secret ever leaves the server.
+  assert.doesNotMatch(
+    JSON.stringify(payload),
+    new RegExp(`${GEMINI_KEY}|${HF_KEY}|${CODECRAFT_KEY}`),
+  );
+});
+
+test("Step 1 fallback: CodeCraft HTTP 402 (payment) fails over to MobileNetV2 + Gemini — 200, never 500", async () => {
+  configureKeys();
+  configureCodeCraft();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isCodeCraftUrl(String(url))) {
+      return codecraftHttpError(402, "You exceeded your current quota.", "insufficient_quota");
+    }
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isClassifyUrl(String(url))) {
+      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+    }
+    if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  // The backup engine ran: detect → codecraft → classify → gemini.
+  assert.equal(urls.length, 4);
+  assert.ok(isClassifyUrl(urls[2]));
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(payload.source, "hybrid");
+  // The failover is recorded for the operator — and never shown as an error.
+  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
+  assert.match(warningText(payload), /insufficient_quota/);
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(CODECRAFT_KEY));
+});
+
+test("Step 1 fallback: a CodeCraft timeout fails over to MobileNetV2 + Gemini", async () => {
+  configureKeys();
+  configureCodeCraft();
+  let classifyCalled = false;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isCodeCraftUrl(String(url))) {
+      const timeout = new Error("The operation was aborted due to timeout");
+      timeout.name = "TimeoutError";
+      throw timeout;
+    }
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isClassifyUrl(String(url))) {
+      classifyCalled = true;
+      return Response.json([{ label: "Tomato___Late_blight", score: 0.88 }]);
+    }
+    if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.ok(classifyCalled, "the MobileNetV2 backup engine must answer");
+  assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
+  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
+  assert.match(warningText(payload), /timeout/i);
+});
+
+test("Step 1 fallback: a non-JSON CodeCraft answer fails over to MobileNetV2", async () => {
+  configureKeys();
+  configureCodeCraft();
+  let classifyCalled = false;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isCodeCraftUrl(String(url))) {
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "لا أستطيع تحليل هذه الصورة." } }],
+      });
+    }
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isClassifyUrl(String(url))) {
+      classifyCalled = true;
+      return Response.json([{ label: "Tomato___healthy", score: 0.91 }]);
+    }
+    if (isGeminiUrl(String(url))) return geminiReply("النبتة سليمة.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.ok(classifyCalled, "an unusable verdict must fall back to MobileNetV2");
+  assert.equal(payload.diagnosis?.label, "Tomato___healthy");
+  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
+});
+
+test("Step 1: an unconfigured CodeCraft key leaves the pipeline byte-for-byte unchanged", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isClassifyUrl(String(url))) {
+      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+    }
+    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(urls.length, 3);
+  assert.ok(!urls.some(isCodeCraftUrl), "no CodeCraft request without a key");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.doesNotMatch(warningText(payload), /CodeCraft/);
+});
+
+test("Step 1: the documented placeholder key keeps the CodeCraft engine disabled", async () => {
+  configureKeys();
+  configureCodeCraft("your_key_here");
+  let classifyCalled = false;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    assert.ok(!isCodeCraftUrl(String(url)), "a placeholder key must not call CodeCraft");
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isClassifyUrl(String(url))) {
+      classifyCalled = true;
+      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+    }
+    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.ok(classifyCalled);
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.doesNotMatch(warningText(payload), /CodeCraft/);
+});
+
+test("Step 1: CODECRAFT_BASE_URL overrides the endpoint (slashes and a pasted path are normalised)", async () => {
+  configureKeys();
+  configureCodeCraft();
+  process.env.CODECRAFT_BASE_URL = " https://proxy.internal/cc/v1/chat/completions/ ";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (/proxy\.internal\/cc\/v1\/chat\/completions$/.test(String(url))) return codecraftVerdict();
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(urls[1], "https://proxy.internal/cc/v1/chat/completions");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(payload.source, "hybrid");
+});
+
+test("Step 1 primary + every LLM down: the direct card reuses the CodeCraft treatment plan", async () => {
+  // No Gemini key (Stage 1 skipped) + a dead HF LLM (Stage 2) → Stage 3.
+  process.env.HUGGINGFACE_API_KEY = HF_KEY;
+  configureCodeCraft();
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isCodeCraftUrl(String(url))) return codecraftVerdict();
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isChatUrl(String(url))) {
+      return Response.json({ error: "Model is loading" }, { status: 503 });
+    }
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "direct");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  // The zero-failure card speaks with the engine's own plan…
+  assert.match(payload.reply, /مانكوزيب/);
+  assert.match(payload.reply, /درجة الخطورة/);
+  // …and keeps the assistant's established structure.
+  assert.match(payload.reply, /## 🔬 التشخيص/);
+  assert.match(payload.reply, /## 💊 خطة العلاج/);
+});
+
+test("Step 1: a CodeCraft-only deployment answers an image request without Gemini or HF keys", async () => {
+  configureCodeCraft();
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isCodeCraftUrl(String(url))) return codecraftVerdict();
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  // Every LLM stage is unconfigured → the built-in formatter answers, still 200.
+  assert.equal(payload.source, "direct");
+  assert.doesNotMatch(warningText(payload), /MISSING_KEYS/);
 });
