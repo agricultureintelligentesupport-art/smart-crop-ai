@@ -2,8 +2,9 @@
  * `/api/assistant` — fail-proof 3-stage resilient AI chain for the
  * agricultural assistant. The route NEVER returns HTTP 500.
  *
- * Pipeline (Google Gemini first, Hugging Face fallback, built-in formatter
- * last — a vision pre-step feeds both LLM stages):
+ * Pipeline (Hugging Face LLM first, Google Gemini as the secondary
+ * fallback, built-in formatter last — a vision pre-step feeds both LLM
+ * stages):
  *
  *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
  *     free Hugging Face Inference router now ALSO runs an open-source object
@@ -66,68 +67,14 @@
  *         primary predicted disease class + confidence percentage + candidate
  *         diseases; handles 503/530 loading with a clear message. Non-fatal:
  *         a vision outage is recorded in `warnings[]` and the request
- *         continues — Stage 1 (Gemini) then inspects the raw image
- *         INDEPENDENTLY (Fallback A below). Receives the Step 0 crop when
- *         detection succeeded, the full frame otherwise.
+ *         continues — Stage 2 (Gemini, the fallback LLM) then inspects the
+ *         raw image INDEPENDENTLY (Fallback A below). Receives the Step 0
+ *         crop when detection succeeded, the full frame otherwise.
  *         Env override: `HF_VISION_MODEL` (single id) replaces the default.
  *
- *   Stage 1 — Google Gemini (`gemini-1.5-flash-latest` — overridable with
- *     `GEMINI_MODEL` — then `gemini-2.0-flash-exp` → `gemini-2.5-flash` when an
- *     id is retired) — PRIMARY LLM: REST call to
- *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
- *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
- *     (including comma-separated values) plus numbered variants such as
- *     `GEMINI_API_KEY_2` and `GEMINI_API_KEY_3`, and guarded by one
- *     shared 18 s `AbortController` deadline for the whole model chain (an
- *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
- *     so the previous 9 s window aborted healthy generations and pushed
- *     traffic onto the weaker fallbacks). The primary defaults to the stable
- *     `gemini-1.5-flash-latest` id — its free tier carries the generous
- *     ~1,500 RPD / 15 RPM allowance, while the preview generations
- *     (`gemini-3.5-flash`…) are throttled to ~20 RPD — and `GEMINI_MODEL`
- *     pins a different primary (e.g. `gemini-2.0-flash-exp`) without a code
- *     change. Google still retires model generations on a fast cadence, so
- *     the model ids form a chain: a 404 / model-not-found walks to the next
- *     id within the remaining budget, while key/safety/network/timeout
- *     failures fail the current key immediately. Quota and transient server
- *     errors (HTTP 429/500/503) rotate to the next Gemini credential before
- *     the stage is declared unavailable. The payload is generation-aware:
- *     Gemini 2.5 takes `thinkingBudget: 0`, while the 1.5/2.0 generations
- *     predate thinking and receive NO `thinkingConfig` (the wrong parameter
- *     is a 400).
- *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
- *     `systemInstruction`; the user turn carries the user query, the Firestore
- *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
- *     — the MobileNetV2 reference diagnosis (disease label, confidence score
- *     and candidate diseases). Whenever a photo is attached, the image
- *     itself travels with the turn as an `inlineData` part (the Step 0 crop
- *     when detection succeeded, the raw frame otherwise), so:
- *       • HYBRID PRIMARY PATH — MobileNetV2 ran: Gemini inspects the image,
- *         evaluates MobileNetV2's reference and generates the final
- *         structured diagnosis report;
- *       • FALLBACK A — MobileNetV2 failed: Gemini inspects the raw image
- *         independently and generates the report on its own.
- *     Key pool: EVERY environment variable starting with `GEMINI_API_KEY`
- *     participates — `GEMINI_API_KEY` and `GEMINI_API_KEYS` (comma-separated
- *     pool) plus numbered variants (`GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`,
- *     …). All values are trimmed, deduplicated and rotation-ordered; rate-
- *     limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit)
- *     rotate to the next key and retry until one answers or every key is
- *     exhausted.
- *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
- *     answer ships together with a Step 1 diagnosis) carrying Gemini's
- *     generated Arabic reply.
- *
- *   FALLBACK B (MobileNetV2 succeeded but every Gemini key failed): the
- *     route constructs a valid structured response DIRECTLY from
- *     MobileNetV2's findings (the built-in Arabic diagnosis card,
- *     `source: "direct"`) — the farmer still gets the full diagnosis +
- *     treatment plan without any LLM.
- *
- *   Stage 2 (Gemini failed / timed out / `GEMINI_API_KEY` missing): Hugging
- *     Face Inference Providers LLM chat completion for concise text response
- *     formatting through the official OpenAI-compatible router
- *     `https://router.huggingface.co/v1/chat/completions` (Bearer
+ *   Stage 1 — Hugging Face Inference Providers LLM (PRIMARY LLM): concise
+ *     text response formatting through the official OpenAI-compatible
+ *     router `https://router.huggingface.co/v1/chat/completions` (Bearer
  *     `HUGGINGFACE_API_KEY`, model id in the JSON body). The router picks a
  *     live serving provider for the requested id and fails over between
  *     providers by itself; the monthly free Inference Providers credits of
@@ -144,10 +91,10 @@
  *     is additionally a gated repository (403 on tokens that never accepted
  *     Meta's license). Availability failures (`404 — Model not found`,
  *     `400 — model_not_supported` / "not supported by any provider", gated
- *     403s, empty choices) walk the chain and fail gracefully into Stage 3.
- *     When no Hugging Face token is configured at all, Stage 2 is skipped
- *     synchronously — no request, no exception, no waiting — and Stage 3
- *     answers immediately.
+ *     403s, empty choices) walk the chain and fail gracefully into Stage 2
+ *     (Gemini) and then Stage 3. When no Hugging Face token is configured at
+ *     all, Stage 1 is skipped synchronously — no request, no exception, no
+ *     waiting — and Stage 2 (Gemini) answers immediately.
  *     The same system prompt, the same user query and the same Step 1 vision
  *     context are fed into the LLM behind a system prompt that enforces a
  *     direct, precise and practical Arabic answer in the voice of the serious
@@ -155,6 +102,60 @@
  *     greetings, no introductory pleasantries once the conversation is
  *     underway, and no rehashed advice — strictly within the agriculture /
  *     date-palm / Algerian farming domain.
+ *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
+ *     answer ships together with a Step 1 diagnosis).
+ *
+ *   Stage 2 — Google Gemini (`gemini-3.6-flash` — overridable with
+ *     `GEMINI_MODEL` — then `gemini-2.5-flash` → `gemini-2.0-flash-exp` when
+ *     an id is retired) — FALLBACK LLM, invoked ONLY when the primary
+ *     Hugging Face stage above failed, timed out or has no token: REST call
+ *     to https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
+ *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
+ *     (including comma-separated values) plus numbered variants such as
+ *     `GEMINI_API_KEY_2` and `GEMINI_API_KEY_3`, and guarded by one
+ *     shared 18 s `AbortController` deadline for the whole model chain (an
+ *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
+ *     so the previous 9 s window aborted healthy generations and pushed
+ *     traffic onto the weaker fallbacks). `GEMINI_MODEL` pins a different
+ *     fallback primary (e.g. `gemini-2.0-flash-exp`) without a code change.
+ *     Google still retires model generations on a fast cadence, so
+ *     the model ids form a chain: a 404 / model-not-found walks to the next
+ *     id within the remaining budget, while key/safety/network/timeout
+ *     failures fail the current key immediately. Quota and transient server
+ *     errors (HTTP 429/500/503) rotate to the next Gemini credential before
+ *     the stage is declared unavailable. The payload is generation-aware:
+ *     Gemini 3.x takes `thinkingLevel: "low"` (answer-first), Gemini 2.5
+ *     takes `thinkingBudget: 0`, while the 1.5/2.0 generations
+ *     predate thinking and receive NO `thinkingConfig` (the wrong parameter
+ *     is a 400).
+ *     The expert system instruction ("أنت مساعد زراعي خبير…") is sent as
+ *     `systemInstruction`; the user turn carries the user query, the Firestore
+ *     profile context (Wilaya, crop, role…) and — whenever Step 1 produced one
+ *     — the MobileNetV2 reference diagnosis (disease label, confidence score
+ *     and candidate diseases). Whenever a photo is attached, the image
+ *     itself travels with the turn as an `inlineData` part (the Step 0 crop
+ *     when detection succeeded, the raw frame otherwise), so:
+ *       • FALLBACK A — MobileNetV2 failed: Gemini inspects the raw image
+ *         independently and generates the report on its own;
+ *       • HYBRID FALLBACK PATH — MobileNetV2 ran: Gemini inspects the image,
+ *         evaluates MobileNetV2's reference and generates the final
+ *         structured diagnosis report.
+ *     Key pool: EVERY environment variable starting with `GEMINI_API_KEY`
+ *     participates — `GEMINI_API_KEY` and `GEMINI_API_KEYS` (comma-separated
+ *     pool) plus numbered variants (`GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`,
+ *     …). All values are trimmed, deduplicated and rotation-ordered; rate-
+ *     limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit)
+ *     rotate to the next key and retry until one answers or every key is
+ *     exhausted.
+ *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
+ *     answer ships together with a Step 1 diagnosis) carrying Gemini's
+ *     generated Arabic reply.
+ *
+ *   FALLBACK B (Step 1 succeeded but every LLM stage failed): the
+ *     route constructs a valid structured response DIRECTLY from
+ *     the Step 1 findings (the built-in Arabic diagnosis card,
+ *     `source: "direct"`) — the farmer still gets the full diagnosis +
+ *     treatment plan without any LLM.
  *
  *   Stage 3 (both LLM stages down — zero-failure formatting):
  *     built-in TypeScript formatters answer 200 with `{ source: "direct" }`:
@@ -188,12 +189,12 @@
  * server-misconfiguration signal). No HTTP 500 ever.
  *
  * Error reporting: each stage logs to the server console
- * (`[Step 1: HF Success]` / `[Stage 1: Gemini Success]` /
- * `[Stage 2: HF LLM Success]` and corresponding warning logs;
- * `[Stage 1: Gemini Fallback]` / `[Stage 2: HF LLM Fallback]` mark a model
+ * (`[Step 1: HF Success]` / `[Stage 1: HF LLM Success]` /
+ * `[Stage 2: Gemini Success]` and corresponding warning logs;
+ * `[Stage 1: HF LLM Fallback]` / `[Stage 2: Gemini Fallback]` mark a model
  * switch,
- * `[Step 1: HF Unavailable]` / `[Stage 1: Gemini Unavailable → Stage 2]` /
- * `[Stage 2: HF LLM Unavailable → Stage 3]` mark graceful degradation and
+ * `[Step 1: HF Unavailable]` / `[Stage 1: HF LLM Unavailable → Stage 2]` /
+ * `[Stage 2: Gemini Unavailable → Stage 3]` mark graceful degradation and
  * `[Safety Net]` an unexpected internal error).
  * Non-fatal degradations are surfaced to the client in `warnings[]`.
  */
@@ -564,27 +565,32 @@ async function runCodeCraftVisionStage(
   return null;
 }
 
-/* ---- Stage 1 — Google Gemini (primary LLM) ----------------------- */
+/* ---- Stage 2 — Google Gemini (FALLBACK LLM) ---------------------- */
 
 /**
- * The stable Gemini id Stage 1 defaults to. The preview generations
- * (`gemini-3.5-flash` and friends) are throttled to a strict ~20 RPD
- * free-tier quota, which normal usage exhausts almost immediately; the
- * stable `gemini-1.5-flash-latest` id carries the generous free-tier allowance
- * (~1,500 RPD / 15 RPM). `GEMINI_MODEL` overrides the primary at request
- * time (e.g. to pin `gemini-2.0-flash-exp`, which shares the same free-tier
- * quota bucket); the fallback ids below still catch a retired or mistyped
- * override.
+ * The Gemini id Stage 2 (the FALLBACK LLM) defaults to:
+ * `gemini-3.6-flash`. Gemini only runs when the primary Hugging Face stage
+ * ({@link askHfLlmStrict}) could not answer, so the id tracks the current
+ * Flash generation instead of the older free-tier line. `GEMINI_MODEL`
+ * overrides it at request time (e.g. to pin `gemini-2.0-flash-exp`); the
+ * fallback ids below still catch a retired or mistyped override.
  */
-const GEMINI_MODEL_DEFAULT = "gemini-1.5-flash-latest";
+const GEMINI_MODEL_DEFAULT: GeminiModel = {
+  id: "gemini-3.6-flash",
+  // Gemini 3.x reasons by default: `thinkingLevel` keeps the model in fast,
+  // answer-first mode so the 18 s budget is spent on the reply (the legacy
+  // numeric `thinkingBudget` is rejected on this generation).
+  thinking: { thinkingLevel: "low" },
+};
 
 /**
- * Stage 1 model chain entry. `thinking` carries the per-generation
+ * Stage 2 model chain entry. `thinking` carries the per-generation
  * `thinkingConfig` — OPTIONAL, because each generation 400s on the wrong
- * shape: Gemini 2.5 takes a numeric `thinkingBudget` (`0` = skip the
- * reasoning pass, answer-first), while the stable 1.5/2.0 Flash ids (and
- * unknown `GEMINI_MODEL` overrides) predate thinking entirely and reject
- * the parameter — `undefined` means "send no `thinkingConfig` at all".
+ * shape: Gemini 3.x takes `thinkingLevel` (`"low"` = answer-first), Gemini
+ * 2.5 takes a numeric `thinkingBudget` (`0` = skip the reasoning pass,
+ * answer-first), while the stable 1.5/2.0 Flash ids (and unknown
+ * `GEMINI_MODEL` overrides) predate thinking entirely and reject the
+ * parameter — `undefined` means "send no `thinkingConfig` at all".
  */
 interface GeminiModel {
   id: string;
@@ -592,17 +598,18 @@ interface GeminiModel {
 }
 
 /**
- * Built-in fallback ids walked (within the remaining Stage-1 budget) when
+ * Built-in fallback ids walked (within the remaining Stage-2 budget) when
  * the primary answers 404 / model-not-found — a retired or mistyped id
- * never kills the stage while a successor can still answer.
+ * never kills the stage while a successor can still answer. Ordered from
+ * the newest generation to the oldest.
  */
 const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
-  { id: "gemini-2.0-flash-exp" },
   { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
+  { id: "gemini-2.0-flash-exp" },
 ];
 
 /**
- * Resolve the ordered Stage-1 model chain at request time: the
+ * Resolve the ordered Stage-2 model chain at request time: the
  * `GEMINI_MODEL` override (whitespace-trimmed) or
  * {@link GEMINI_MODEL_DEFAULT} first, then the built-in fallback ids —
  * deduplicated, so pinning an id that is also a fallback never doubles it.
@@ -611,17 +618,17 @@ const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
  */
 function resolveGeminiModels(): GeminiModel[] {
   const override = process.env.GEMINI_MODEL?.trim();
-  const primary: GeminiModel = { id: override || GEMINI_MODEL_DEFAULT };
+  const primary: GeminiModel = override ? { id: override } : GEMINI_MODEL_DEFAULT;
   return [primary, ...GEMINI_FALLBACK_MODELS.filter((model) => model.id !== primary.id)];
 }
 
 /**
- * Stage 1 hard timeout for the WHOLE model chain: 18 s. A full Arabic
+ * Stage 2 hard timeout for the WHOLE model chain: 18 s. A full Arabic
  * ~200-word answer (system prompt + profile context + vision verdict in, up
  * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
  * Flash model; the previous 9 s window aborted those healthy generations
  * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
- * still leaves the Stage 2 round-trip and the Stage 3 formatter comfortably
+ * still leaves the Stage 3 formatter comfortably
  * inside {@link maxDuration}. Enforced with an explicit `AbortController`
  * (not `AbortSignal.timeout`) so the abort reason and the timer are both
  * inspectable/clearable per request; a fast 404 on an earlier id hands the
@@ -630,11 +637,11 @@ function resolveGeminiModels(): GeminiModel[] {
 const GEMINI_TIMEOUT_MS = 18_000;
 
 /**
- * Output cap for Stage 1. Slightly above {@link MAX_REPLY_TOKENS} because
+ * Output cap for Stage 2. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
- * the per-generation thinking payload (no `thinkingConfig` on 1.5/2.0,
- * `thinkingBudget: 0` on 2.5) keeps the model in fast, answer-first mode so
- * the 18 s budget is spent on the reply.
+ * the per-generation thinking payload (`thinkingLevel: "low"` on 3.x,
+ * `thinkingBudget: 0` on 2.5, none on 1.5/2.0) keeps the model in fast,
+ * answer-first mode so the 18 s budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
@@ -667,11 +674,12 @@ function resolveGeminiApiKeys(): string[] {
   return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
 }
 
-/* ---- Step 1 (vision) + Stage 2 — Hugging Face -------------------- */
+/* ---- Step 1 (vision) + Stage 1 — Hugging Face -------------------- */
 
 /**
- * Lightweight open-source LLM ids tried by Stage 2, in order, through the
- * Hugging Face Inference Providers router ({@link HF_ROUTER_CHAT_URL}).
+ * Lightweight open-source LLM ids tried by Stage 1 (the PRIMARY LLM), in
+ * order, through the Hugging Face Inference Providers router
+ * ({@link HF_ROUTER_CHAT_URL}).
  *
  * Every id below is an open, NON-gated repository (no license click-through,
  * so no 403 on a fresh token) with at least one `status: "live"`
@@ -747,18 +755,19 @@ function bad(message: string, status = 400): NextResponse {
 
 /**
  * Environment variables consulted, in order, for the Hugging Face user access
- * token that authenticates Step 1 (vision) and Stage 2 (router LLM).
- * `HUGGINGFACE_API_KEY` is this project's documented name; `HF_TOKEN` is the
- * name Hugging Face's own SDKs/CLI read, so a deployment configured the
- * "Hugging Face way" still gets the fallback LLM instead of a silent skip.
+ * token that authenticates Step 1 (vision) and Stage 1 (router LLM — the
+ * PRIMARY LLM). `HUGGINGFACE_API_KEY` is this project's documented name;
+ * `HF_TOKEN` is the name Hugging Face's own SDKs/CLI read, so a deployment
+ * configured the "Hugging Face way" still gets the primary LLM instead of a
+ * silent skip.
  */
 const HF_TOKEN_ENV_VARS = ["HUGGINGFACE_API_KEY", "HF_TOKEN"] as const;
 
 /**
  * The first usable Hugging Face token found in the environment, whitespace
  * trimmed — or `null` when none is configured (unset or blank). Purely
- * synchronous: a missing token lets the handler skip Step 1 and Stage 2
- * instantly, with no request, no exception and no waiting.
+ * synchronous: a missing token lets the handler skip the vision step and the
+ * primary LLM instantly, with no request, no exception and no waiting.
  */
 function resolveHuggingFaceToken(): string | null {
   for (const name of HF_TOKEN_ENV_VARS) {
@@ -942,7 +951,7 @@ async function classifyPlantImageStrict(
 
 /* ------------------------------------------------------------------ */
 /*  Shared prompting — one system prompt + user turn for BOTH LLMs      */
-/*  (Stage 1 Gemini and Stage 2 Hugging Face receive identical input)   */
+/*  (Stage 1 Hugging Face and Stage 2 Gemini receive identical input)   */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -1081,12 +1090,12 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
 }
 
 /**
- * Builds the single user turn shared by Stage 1 (Gemini `contents`) and
- * Stage 2 (HF `messages[1]`): Firestore profile context (Wilaya, crop, role,
+ * Builds the single user turn shared by Stage 1 (HF `messages[1]`) and
+ * Stage 2 (Gemini `contents`): Firestore profile context (Wilaya, crop, role,
  * language, name) + the Step 1 MobileNetV2 reference diagnosis (disease
  * label, confidence score and candidate diseases) when one is available +
  * the user's own query. When a photo is attached, an image instruction is
- * added: with a MobileNetV2 verdict in hand (HYBRID PRIMARY PATH) Gemini
+ * added: with a MobileNetV2 verdict in hand (HYBRID FALLBACK PATH) Gemini
  * must inspect the attached image, evaluate the reference and issue the
  * final structured report; without one (FALLBACK A) it must diagnose the
  * raw image independently. Keeping one builder guarantees the fallback LLM
@@ -1119,7 +1128,7 @@ function buildUserContent(
   return sections.join("\n\n");
 }
 
-/** Any Stage-1 failure; the caller degrades to Stage 2 (and then 3) either way. */
+/** Any Stage-2 (Gemini) failure; the caller degrades to Stage 3 either way. */
 class GeminiError extends Error {
   /** Upstream status when the failure came back as an HTTP response. */
   status: number | undefined;
@@ -1151,9 +1160,9 @@ function geminiText(payload: GeminiPayload | null): string {
 /**
  * Message fragments Google returns when the *model id* is the problem rather
  * than the request: a retired or mistyped id answers
- * `404 — models/gemini-1.5-flash-latest is not found for API version v1beta, or is
+ * `404 — models/gemini-3.6-flash is not found for API version v1beta, or is
  * not supported for generateContent`. Together with an HTTP 404 these are the
- * only Stage-1 failures that walk the Gemini model chain — invalid keys
+ * only Stage-2 failures that walk the Gemini model chain — invalid keys
  * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
  * abort are surfaced immediately, because another model id can't fix them.
  */
@@ -1178,7 +1187,7 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
  *   • `contents[0].parts` — the user query + profile context + the Step 1
  *     MobileNetV2 reference diagnosis (label, confidence, candidates); when
  *     `image` is set the photo travels too as an `inlineData` part — the
- *     HYBRID PRIMARY PATH (with a MobileNetV2 verdict) or FALLBACK A (raw
+ *     HYBRID FALLBACK PATH (with a MobileNetV2 verdict) or FALLBACK A (raw
  *     image inspected independently);
  *   • `generationConfig` — the sampling params plus the model's own
  *     `thinkingConfig` when its generation supports one
@@ -1292,12 +1301,12 @@ interface GeminiResult {
 }
 
 /**
- * Stage 1 — Google Gemini, the PRIMARY LLM.
+ * Stage 2 — Google Gemini, the FALLBACK LLM.
  *
  * POSTs to
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
  * walking the per-request chain from {@link resolveGeminiModels} in order —
- * starting at `gemini-1.5-flash-latest` (or the `GEMINI_MODEL` override).
+ * starting at `gemini-3.6-flash` (or the `GEMINI_MODEL` override).
  *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
@@ -1309,8 +1318,8 @@ interface GeminiResult {
  * empty candidate list, network error or the timeout abort — throws
  * {@link GeminiError} immediately for the outer key-rotation loop. Quota and
  * transient upstream failures (HTTP 429/500/503) are likewise surfaced to
- * that loop, which backs off and tries the next credential before walking to
- * Stage 2 (Hugging Face) and finally Stage 3 (built-in formatter).
+ * that loop, which backs off and tries the next credential before the stage
+ * is declared unavailable and Stage 3 (built-in formatter) answers.
  */
 async function generateWithGeminiForKey(
   userContent: string,
@@ -1361,8 +1370,8 @@ async function generateWithGeminiForKey(
 
         const next = models[index + 1];
         if (next) {
-          warnings.push(`Stage 1 Gemini unavailable — ${error.message}`.slice(0, 400));
-          console.warn(`[Stage 1: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
+          warnings.push(`Stage 2 Gemini unavailable — ${error.message}`.slice(0, 400));
+          console.warn(`[Stage 2: Gemini Fallback] ${error.message} — retrying with ${next.id}`);
           continue;
         }
         // Availability failure on the LAST id — fall through to the summary.
@@ -1409,7 +1418,7 @@ function isGeminiRetryableError(error: unknown): error is GeminiError {
  * remaining keys without a delay. The request retries the next key in the
  * pool until one answers successfully or ALL keys are exhausted. `image`
  * (the Step 0 crop or the raw frame) is attached to every attempt so both
- * the hybrid primary path and Fallback A reach Gemini with the photo. API
+ * the hybrid fallback path and Fallback A reach Gemini with the photo. API
  * keys are represented only by their ordinal in logs and warnings; their
  * values never leave the server or appear in a client response.
  */
@@ -1441,11 +1450,11 @@ async function generateWithGemini(
       if (isGeminiRetryableError(error) && hasNextKey) {
         const status = error.status ?? "unknown";
         const warning =
-          `Stage 1 Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
+          `Stage 2 Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
           `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
         rotationWarnings.push(warning);
         console.warn(
-          `[Stage 1: Gemini Key Rotation] ${warning} Retrying after 1 second.`,
+          `[Stage 2: Gemini Key Rotation] ${warning} Retrying after 1 second.`,
         );
         await new Promise((res) => setTimeout(res, 1000));
       } else if (hasNextKey) {
@@ -1453,11 +1462,11 @@ async function generateWithGemini(
         // example an invalid or revoked key). Try the next configured key
         // before allowing the request to fall through to Hugging Face.
         const warning =
-          `Stage 1 Gemini failed on ${keyLabel} — ` +
+          `Stage 2 Gemini failed on ${keyLabel} — ` +
           `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
         rotationWarnings.push(warning);
         console.warn(
-          `[Stage 1: Gemini Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
+          `[Stage 2: Gemini Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
         );
       }
     }
@@ -1469,7 +1478,7 @@ async function generateWithGemini(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Stage 2 — Hugging Face LLM fallback chain (STRICT)                 */
+/*  Stage 1 — Hugging Face LLM primary chain (STRICT)                  */
 /* ------------------------------------------------------------------ */
 
 /** HTTP / transport failure with the response status kept for fallback logic. */
@@ -1627,18 +1636,19 @@ async function generateWithHfLlmModel(
 }
 
 /**
- * Strict Stage 2 (fallback): concise Arabic text response formatting via the
- * Hugging Face Inference Providers router, starting at
+ * Strict Stage 1 (PRIMARY LLM): concise Arabic text response formatting via
+ * the Hugging Face Inference Providers router, starting at
  * {@link HF_LLM_MODELS Qwen/Qwen3-4B-Instruct-2507} and falling back
  * through the remaining open, non-gated ids when the router reports a model
  * as unavailable (404 not-found / 400 model_not_supported / 403
  * gated-license / empty choices). Any failure throws an "LLM Error:" — the
- * handler catches it and answers from Stage 3, so a Stage 2 outage never
- * breaks the HTTP response.
+ * handler catches it and hands the request to Stage 2 (Gemini) and then to
+ * Stage 3, so a Stage 1 outage never breaks the HTTP response.
  * - Never called without a token: the handler skips the stage synchronously
  *   when no Hugging Face token is configured.
- * - Runs only after Stage 1 (Gemini) failed, timed out or its key is missing.
- * - Receives the exact same user turn as Gemini — built by
+ * - Runs FIRST in the LLM chain: Gemini (Stage 2) is only consulted once this
+ *   stage failed, timed out or could not be configured.
+ * - Receives the exact same user turn Gemini would get — built by
  *   {@link buildUserContent}, so it carries the PlantVillage label +
  *   confidence from Step 1 (when available), the user's text message and the
  *   Firestore profile context (Wilaya, crop).
@@ -1653,7 +1663,7 @@ async function askHfLlmStrict(apiKey: string, userContent: string, history: Assi
       const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
 
       console.log(
-        `[Stage 2: HF LLM Success] model=${model} replyLength=${text.length}`,
+        `[Stage 1: HF LLM Success] model=${model} replyLength=${text.length}`,
       );
       return text;
     } catch (error) {
@@ -1663,7 +1673,7 @@ async function askHfLlmStrict(apiKey: string, userContent: string, history: Assi
 
       const nextModel = index < HF_LLM_MODELS.length - 1 ? HF_LLM_MODELS[index + 1] : null;
       if (modelLevel && nextModel) {
-        console.warn(`[Stage 2: HF LLM Fallback] ${detail} — retrying with ${nextModel}`);
+        console.warn(`[Stage 1: HF LLM Fallback] ${detail} — retrying with ${nextModel}`);
         continue;
       }
 
@@ -1671,7 +1681,7 @@ async function askHfLlmStrict(apiKey: string, userContent: string, history: Assi
       // timeout) fails the stage immediately.
       if (!modelLevel) {
         const wrapped = new Error(`LLM Error: ${detail}`);
-        console.error(`[Stage 2: HF LLM Error] ${wrapped.message}`);
+        console.error(`[Stage 1: HF LLM Error] ${wrapped.message}`);
         throw wrapped;
       }
       break;
@@ -1683,7 +1693,7 @@ async function askHfLlmStrict(apiKey: string, userContent: string, history: Assi
   const wrapped = new Error(
     `LLM Error: no HF LLM model could answer (tried ${HF_LLM_MODELS.join(", ")}) — ${failures.join(" | ")}`,
   );
-  console.error(`[Stage 2: HF LLM Error] ${wrapped.message}`);
+  console.error(`[Stage 1: HF LLM Error] ${wrapped.message}`);
   throw wrapped;
 }
 
@@ -1970,7 +1980,7 @@ function isGreetingMessage(message: string): boolean {
 
 /**
  * Friendly basic-mode text reply used when the whole LLM chain (Stage 1
- * Gemini + Stage 2 Hugging Face) is unavailable on a request without a usable
+ * Hugging Face + Stage 2 Gemini) is unavailable on a request without a usable
  * diagnosis. Greets back simple salutations ("هلا"، "مرحبا"، "السلام عليكم"…)
  * and asks how to help with the farm; otherwise explains the basic mode and
  * invites crop symptoms or a leaf photo (which Step 1 + the direct formatter
@@ -2009,9 +2019,9 @@ const VISION_UNAVAILABLE_NOTE = [
  * Fail-proof pipeline body. Every upstream stage is non-fatal:
  * - Step 1 (vision) failure → warning, continue through Stage 1/2 (an LLM can
  *   still answer the text part) or straight to the Stage 3 direct replies.
- * - Stage 1 (Gemini) failure, timeout, or missing `GEMINI_API_KEY` → warning,
- *   fall through to Stage 2 (the Hugging Face LLM chain).
- * - Stage 2 (Hugging Face) failure or missing `HUGGINGFACE_API_KEY` → warning,
+ * - Stage 1 (Hugging Face, the PRIMARY LLM) failure, timeout, or missing
+ *   `HUGGINGFACE_API_KEY` → warning, fall through to Stage 2 (Gemini).
+ * - Stage 2 (Gemini) failure or a missing `GEMINI_API_KEY` → warning,
  *   answer 200 from the Stage 3 built-in formatters: diagnosis card when
  *   Step 1 succeeded, friendly basic-mode text otherwise.
  * - The only non-200 responses left are client input errors (400/413) and
@@ -2064,14 +2074,14 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Server-only secrets — never exposed to the client bundle. Read on every
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
-  //   GEMINI_API_KEY        → Stage 1, the primary LLM (comma-separated keys
-  //                           are supported).
+  //   GEMINI_API_KEY        → Stage 2, the FALLBACK LLM (comma-separated
+  //                           keys are supported).
   //   GEMINI_API_KEYS      → optional comma-separated Gemini key pool.
   //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_1`, `_2`, …).
   //                           All sources above are combined into ONE pool
   //                           (trimmed, deduplicated, rotation-ordered) and
   //                           rotated on 429 / RESOURCE_EXHAUSTED / quota.
-  //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 2 fallback LLM
+  //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 1 PRIMARY LLM
   //                           (HF_TOKEN, Hugging Face's own conventional
   //                           variable name, is honoured as an alias).
   //   CODECRAFT_API_KEY     → Step 1 PRIMARY vision engine (CodeCraft,
@@ -2159,70 +2169,72 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // One user turn for both LLM stages: user query + Firestore profile context
   // (Wilaya, crop type, role) + the Step 1 MobileNetV2 reference diagnosis
   // (disease label, confidence score, candidate diseases) whenever it exists
-  // + the image instruction whenever a photo is attached (hybrid primary
+  // + the image instruction whenever a photo is attached (hybrid fallback
   // path with the reference, Fallback A without it).
   const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage), isFirstTurn);
 
-  // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
-  // gemini-1.5-flash-latest or the GEMINI_MODEL override (→ 2.0-flash-exp →
-  // 2.5-flash on a retired-id 404) via
+  // ---- Stage 1: Hugging Face LLM (PRIMARY LLM) ----------------------
+  // Called FIRST: the open Qwen chain through the Inference Providers
+  // router, with the same system prompt and the same user turn (query +
+  // profile + Step 1 vision context). Non-fatal: on total LLM failure the
+  // request walks to Stage 2 (Gemini) and finally Stage 3 answers locally
+  // with 200.
+  let reply: string | null = null;
+  if (huggingfaceKey) {
+    try {
+      reply = await askHfLlmStrict(huggingfaceKey, userContent, history);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
+      console.warn(`[Stage 1: HF LLM Unavailable → Stage 2] ${detail}`);
+      warnings.push(`Stage 1 HF LLM unavailable — ${detail}`.slice(0, 400));
+    }
+  } else {
+    // No Hugging Face token anywhere in the environment → skip the stage
+    // synchronously (no request, no throw, no timer) and let Stage 2
+    // (Gemini) answer right away.
+    const detail =
+      "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — skipping the primary LLM.";
+    console.warn(`[Stage 1: HF LLM Skipped] ${detail} → Stage 2 (Gemini LLM chain)`);
+    warnings.push(`Stage 1 HF LLM unavailable — ${detail}`.slice(0, 400));
+  }
+
+  // ---- Stage 2: Google Gemini (FALLBACK LLM) ------------------------
+  // Runs ONLY when the primary Hugging Face stage produced nothing:
+  // gemini-3.6-flash or the GEMINI_MODEL override (→ 2.5-flash →
+  // 2.0-flash-exp on a retired-id 404) via
   // the Generative Language REST API, keyed with the full Gemini key pool
   // (GEMINI_API_KEY + GEMINI_API_KEYS + numbered GEMINI_API_KEY_N — rotated
   // on 429 / RESOURCE_EXHAUSTED / quota) and bounded by a shared 18 s
   // AbortController. When a photo is attached it travels with the turn
-  // (inlineData): HYBRID PRIMARY PATH with the MobileNetV2 reference
+  // (inlineData): HYBRID FALLBACK PATH with the Step 1 reference
   // diagnosis, FALLBACK A (raw image, independent inspection) when Step 1
-  // failed. If every key is exhausted and MobileNetV2 DID produce a
+  // failed. If every key is exhausted and Step 1 DID produce a
   // diagnosis, FALLBACK B answers the structured diagnosis card directly
   // from its findings. Non-fatal: on any failure (or a missing key) the
-  // request walks to Stage 2.
-  let reply: string | null = null;
-  if (geminiApiKeys.length > 0) {
-    try {
-      const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage, history);
-      reply = geminiResult.text;
-      // Non-fatal degradations the chain walked past (a retired primary id
-      // 404ing before its successor answered) are still surfaced to the
-      // client — the operator should see that the primary is gone.
-      warnings.push(...geminiResult.warnings);
-      console.log(
-        `[Stage 1: Gemini Success] model=${geminiResult.model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.warn(`[Stage 1: Gemini Unavailable → Stage 2] ${detail}`);
-      warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
-    }
-  } else {
-    const detail =
-      "GEMINI_API_KEY is not configured (GEMINI_API_KEY_2 is also empty) — skipping the primary LLM.";
-    console.warn(`[Stage 1: Gemini Skipped] ${detail} → Stage 2 (Hugging Face LLM chain)`);
-    warnings.push(`Stage 1 Gemini unavailable — ${detail}`.slice(0, 400));
-  }
-
-  // ---- Stage 2: Hugging Face LLM fallback chain ---------------------
-  // Runs only when Stage 1 produced nothing: the open Qwen chain through the
-  // Inference Providers router, same system prompt and the same user turn
-  // (query + profile + Step 1 vision context). Non-fatal: on total LLM
-  // failure Stage 3 answers locally with 200.
+  // request walks to Stage 3.
   if (reply === null) {
-    if (huggingfaceKey) {
+    if (geminiApiKeys.length > 0) {
       try {
-        reply = await askHfLlmStrict(huggingfaceKey, userContent, history);
+        const geminiResult = await generateWithGemini(userContent, geminiApiKeys, classifyImage, history);
+        reply = geminiResult.text;
+        // Non-fatal degradations the chain walked past (a retired id
+        // 404ing before its successor answered) are still surfaced to the
+        // client — the operator should see that the fallback model is gone.
+        warnings.push(...geminiResult.warnings);
+        console.log(
+          `[Stage 2: Gemini Success] model=${geminiResult.model} diagnosis=${diagnosis?.label ?? "none"} confidence=${diagnosis ? `${Math.round(diagnosis.confidence * 100)}%` : "n/a"} replyLength=${reply.length}`,
+        );
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
-        console.warn(`[Stage 2: HF LLM Unavailable → Stage 3] ${detail}`);
-        warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[Stage 2: Gemini Unavailable → Stage 3] ${detail}`);
+        warnings.push(`Stage 2 Gemini unavailable — ${detail}`.slice(0, 400));
       }
     } else {
-      // No Hugging Face token anywhere in the environment → skip the stage
-      // synchronously (no request, no throw, no timer) and let Stage 3
-      // answer right away.
       const detail =
-        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — skipping the fallback LLM.";
-      console.warn(`[Stage 2: HF LLM Skipped] ${detail} → Stage 3 (built-in formatter)`);
-      warnings.push(`Stage 2 LLM unavailable — ${detail}`.slice(0, 400));
+        "GEMINI_API_KEY is not configured (GEMINI_API_KEY_2 is also empty) — skipping the fallback LLM.";
+      console.warn(`[Stage 2: Gemini Skipped] ${detail} → Stage 3 (built-in formatter)`);
+      warnings.push(`Stage 2 Gemini unavailable — ${detail}`.slice(0, 400));
     }
   }
 

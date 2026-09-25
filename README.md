@@ -187,9 +187,15 @@ photo (base64)
   │    error, non-JSON answer, "not a plant") — silently, behind a try/catch:
   │    the user never sees an error, a broken UI or a code exception.
   │
-  └─ Stages 1–3 · HYBRID Gemini (image + reference diagnosis; raw-image
-     Fallback A when both vision engines fail; direct diagnosis card Fallback
-     B when every Gemini key fails) → HF LLM chain → built-in formatter.
+  └─ Stages 1–3 · Stage 1 = PRIMARY LLM — the Hugging Face Inference
+     Providers router (open Qwen chain, Bearer HUGGINGFACE_API_KEY / HF_TOKEN)
+     → Stage 2 = FALLBACK LLM — Google Gemini (gemini-3.6-flash → 2.5-flash →
+     2.0-flash-exp on a retired-id 404), reached ONLY when the primary HF
+     stage failed, timed out or has no token. Gemini inspects the image itself
+     (inlineData) with the reference diagnosis when Step 1 produced one
+     (HYBRID path) and independently when it did not (Fallback A); when every
+     LLM stage is down the built-in formatter answers from the Step 1
+     findings (direct diagnosis card, Fallback B).
      Gemini key pool: GEMINI_API_KEY + GEMINI_API_KEYS + numbered
      GEMINI_API_KEY_N — rotated on 429 / RESOURCE_EXHAUSTED / quota.
 ```

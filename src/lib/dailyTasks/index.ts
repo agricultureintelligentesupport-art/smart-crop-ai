@@ -2,7 +2,7 @@
  * Daily AI task engine — public surface.
  *
  *   context.ts   the 23:55 context snapshot (weather + ET₀ + crop/stage/soil)
- *   ai.ts        the 00:00 AI generation (Gemini → OpenAI), JSON-normalized
+ *   ai.ts        the 00:00 AI generation (OpenAI → Gemini), JSON-normalized
  *   rules.ts     the never-fail local rule-based generator
  *   engine.ts    orchestration + RTDB publish (cron handlers)
  *   store.ts     LocalStorage cache + checked-state (per date)

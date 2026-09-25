@@ -456,10 +456,13 @@ const SPEC_SAMPLE_TASKS = [
 ];
 
 test("generateAiTasks parses the spec's Gemini JSON sample end-to-end", async () => {
+  // No OPENAI_API_KEY → the OpenAI primary is skipped and the Gemini
+  // fallback answers with its own default model id.
   process.env.GEMINI_API_KEY = "test-key";
   const fetchImpl: FetchLike = async (url) => {
     assert.ok(String(url).includes("generativelanguage.googleapis.com"));
     assert.ok(String(url).includes("key=test-key"));
+    assert.ok(String(url).includes("/models/gemini-3.6-flash:generateContent"));
     return {
       ok: true,
       json: async () => ({
@@ -485,13 +488,15 @@ test("generateAiTasks parses the spec's Gemini JSON sample end-to-end", async ()
   assert.equal(result!.tasks[1].category, "protection");
 });
 
-test("generateAiTasks falls back to OpenAI when Gemini is down, and to null when both fail", async () => {
+test("generateAiTasks calls the OpenAI primary first, then the Gemini fallback, then null", async () => {
   process.env.GEMINI_API_KEY = "test-key";
   process.env.OPENAI_API_KEY = "openai-key";
-  let calls = 0;
-  const fetchImpl: FetchLike = async (url) => {
-    calls += 1;
-    if (String(url).includes("generativelanguage")) return { ok: false, status: 503, json: async () => ({}) };
+  const urls: string[] = [];
+  const ctx = buildDailyContext({ wilayaCode: "07", crop: "wheat", date: "2026-09-25" });
+
+  // 1. The primary (OpenAI) answers → the Gemini fallback is never called.
+  const primaryFetch: FetchLike = async (url) => {
+    urls.push(String(url));
     return {
       ok: true,
       json: async () => ({
@@ -499,18 +504,37 @@ test("generateAiTasks falls back to OpenAI when Gemini is down, and to null when
       }),
     };
   };
-  const ctx = buildDailyContext({ wilayaCode: "07", crop: "wheat", date: "2026-09-25" });
-  const result = await generateAiTasks(ctx, fetchImpl);
-  assert.ok(result);
-  assert.equal(result!.provider, "openai");
-  assert.ok(calls >= 2); // gemini tried first, then openai
+  const primary = await generateAiTasks(ctx, primaryFetch);
+  assert.ok(primary);
+  assert.equal(primary!.provider, "openai");
+  assert.equal(primary!.model, "gpt-4o-mini");
+  assert.equal(urls.length, 1);
+  assert.ok(String(urls[0]).includes("api.openai.com"));
 
-  // Every provider answers unusable text → null (caller must use the rules).
+  // 2. The primary is down → the Gemini fallback answers (gemini-3.6-flash).
+  urls.length = 0;
+  const fallbackFetch: FetchLike = async (url) => {
+    urls.push(String(url));
+    if (String(url).includes("api.openai.com")) return { ok: false, status: 503, json: async () => ({}) };
+    return {
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ tasks: SPEC_SAMPLE_TASKS }) }] } }],
+      }),
+    };
+  };
+  const fallback = await generateAiTasks(ctx, fallbackFetch);
+  assert.ok(fallback);
+  assert.equal(fallback!.provider, "gemini");
+  assert.equal(fallback!.model, "gemini-3.6-flash");
+  assert.equal(urls.length, 2); // openai tried first, then gemini
+  assert.ok(String(urls[1]).includes("/models/gemini-3.6-flash:generateContent"));
+
+  // 3. Every provider answers unusable text → null (caller must use the rules).
   const badFetch: FetchLike = async () => ({
     ok: true,
     json: async () => ({ candidates: [{ content: { parts: [{ text: "عذراً، لا أستطيع" }] } }] }),
   });
-  delete process.env.OPENAI_API_KEY;
   const failed = await generateAiTasks(ctx, badFetch);
   assert.equal(failed, null);
 });
