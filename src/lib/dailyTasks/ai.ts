@@ -6,7 +6,7 @@
  * `priority`, `titleFr`, `subtitleFr`). Provider chain mirrors the assistant
  * route's resilience philosophy, minus the vision stages:
  *
- *   Stage 1 — Google Gemini (`GEMINI_MODEL`, default `gemini-1.5-flash`, then
+ *   Stage 1 — Google Gemini (`GEMINI_MODEL`, default `gemini-1.5-flash-latest`, then
  *             `gemini-2.0-flash` → `gemini-2.5-flash` on a retired-id 404),
  *             keyed with the full `GEMINI_API_KEY*` pool (rotated on quota).
  *   Stage 2 — OpenAI-compatible chat endpoint (`OPENAI_API_KEY`,
@@ -40,7 +40,7 @@ export const AI_TIMEOUT_MS = 15_000;
 /** Model chain for Gemini — a retired primary 404s onto its successor. */
 export function resolveGeminiModels(): string[] {
   const override = (process.env.GEMINI_MODEL ?? "").trim();
-  const chain = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"];
+  const chain = ["gemini-1.5-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash"];
   return override ? [override, ...chain.filter((m) => m !== override)] : chain;
 }
 

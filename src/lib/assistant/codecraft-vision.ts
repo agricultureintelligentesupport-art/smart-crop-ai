@@ -736,6 +736,55 @@ function toVisionError(
   return new CodeCraftVisionError(detail, { status, code, model, retryable: false });
 }
 
+/* ------------------------------------------------------------------ */
+/*  Failure logging — explicit root-cause trail for the Vercel logs    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Log-safe API key presence check: reports whether `CODECRAFT_API_KEY` is
+ * set, whether it is still a documented placeholder value, and how long it
+ * is. The secret itself is NEVER echoed (module contract) — presence alone
+ * already distinguishes "env var missing in this deployment" from "the
+ * upstream rejected my credentials".
+ */
+function describeApiKeyPresence(): string {
+  const key = readEnv("CODECRAFT_API_KEY");
+  if (!key) return "MISSING (CODECRAFT_API_KEY unset or blank)";
+  if (PLACEHOLDER_KEY_PATTERN.test(key)) return `placeholder value (len=${key.length})`;
+  return `present (len=${key.length})`;
+}
+
+/**
+ * Explicit `console.error` emitted on EVERY CodeCraft failure, carrying the
+ * HTTP status code, the raw error body, the upstream response headers and an
+ * API key PRESENCE check on one line — so the exact root cause (missing or
+ * placeholder key, invalid/unpaid key, exhausted quota, retired model id,
+ * upstream outage, bad base URL, network timeout) is identifiable straight
+ * from the Vercel logs when the pipeline falls back to MobileNetV2. Pure
+ * logging: no behaviour change, no secret ever printed.
+ */
+function logCodeCraftFailure(details: {
+  reason: string;
+  model?: string | undefined;
+  status?: number | undefined;
+  body?: string | undefined;
+  headers?: Headers | undefined;
+  endpoint?: string | undefined;
+}): void {
+  const headersJson = details.headers
+    ? JSON.stringify(Object.fromEntries(details.headers.entries()))
+    : "n/a (no HTTP response)";
+  console.error(
+    `[Step 1: CodeCraft Failure] ${details.reason}` +
+      ` | model=${details.model ?? "n/a"}` +
+      ` | status=${details.status ?? "n/a (no HTTP response)"}` +
+      ` | endpoint=${details.endpoint ?? codeCraftChatCompletionsUrl()}` +
+      ` | apiKeyCheck=${describeApiKeyPresence()}` +
+      ` | responseHeaders=${headersJson}` +
+      ` | errorBody=${details.body ? details.body.slice(0, 600) : "(empty)"}`,
+  );
+}
+
 interface VisionRequestArgs {
   model: string;
   apiKey: string;
@@ -782,6 +831,13 @@ async function requestVisionDiagnosis(args: VisionRequestArgs): Promise<Assistan
     const detail =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     const timedOut = /timeout|abort/i.test(detail);
+    logCodeCraftFailure({
+      reason: timedOut
+        ? `request failed — timeout after ${CODECRAFT_TIMEOUT_MS} ms (${detail})`
+        : `request failed — ${detail}`,
+      model,
+      endpoint: codeCraftChatCompletionsUrl(baseUrl),
+    });
     throw new CodeCraftVisionError(
       timedOut ? `timeout after ${CODECRAFT_TIMEOUT_MS} ms` : detail,
       { model, retryable: true },
@@ -795,12 +851,28 @@ async function requestVisionDiagnosis(args: VisionRequestArgs): Promise<Assistan
     } catch {
       bodyText = response.statusText;
     }
+    logCodeCraftFailure({
+      reason: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""} — upstream rejected the request`,
+      model,
+      status: response.status,
+      body: bodyText,
+      headers: response.headers,
+      endpoint: codeCraftChatCompletionsUrl(baseUrl),
+    });
     throw toVisionError(response.status, bodyText, model);
   }
 
   const payload = (await response.json().catch(() => null)) as ChatCompletionPayload | null;
   const text = extractMessageText(payload);
   if (!text) {
+    logCodeCraftFailure({
+      reason: "unusable 2xx answer — no message content",
+      model,
+      status: response.status,
+      headers: response.headers,
+      endpoint: codeCraftChatCompletionsUrl(baseUrl),
+      body: JSON.stringify(payload ?? null),
+    });
     throw new CodeCraftVisionError("empty response (no message content)", {
       model,
       retryable: true,
@@ -809,6 +881,14 @@ async function requestVisionDiagnosis(args: VisionRequestArgs): Promise<Assistan
 
   const verdict = extractJsonObject(text);
   if (!verdict || typeof verdict !== "object" || Array.isArray(verdict)) {
+    logCodeCraftFailure({
+      reason: "unusable 2xx answer — content is not a JSON diagnostic object",
+      model,
+      status: response.status,
+      headers: response.headers,
+      endpoint: codeCraftChatCompletionsUrl(baseUrl),
+      body: text,
+    });
     throw new CodeCraftVisionError(
       `response is not a JSON diagnostic object — ${text.slice(0, 160)}`,
       { model, retryable: true },
@@ -821,6 +901,14 @@ async function requestVisionDiagnosis(args: VisionRequestArgs): Promise<Assistan
     outputLanguage(context.profile),
   );
   if (!diagnosis) {
+    logCodeCraftFailure({
+      reason: "unusable 2xx answer — no diagnosis (image is not a plant, or no disease named)",
+      model,
+      status: response.status,
+      headers: response.headers,
+      endpoint: codeCraftChatCompletionsUrl(baseUrl),
+      body: text,
+    });
     throw new CodeCraftVisionError(
       "no usable diagnosis in the response (image is not a plant, or no disease named)",
       { model, retryable: false },
@@ -868,6 +956,12 @@ export async function analyzePlantImageWithCodeCraft(
 ): Promise<AssistantDiagnosis> {
   const apiKey = resolveCodeCraftApiKey();
   if (!apiKey) {
+    // Explicit API key presence check on the failure path — a missing or
+    // placeholder `CODECRAFT_API_KEY` is one of the most common reasons every
+    // request falls back to MobileNetV2 on a fresh Vercel deployment.
+    logCodeCraftFailure({
+      reason: "API key check failed — CODECRAFT_API_KEY missing or still the placeholder value; engine disabled before any request",
+    });
     throw new CodeCraftVisionError(
       "CODECRAFT_API_KEY is not configured (or still the placeholder value) — engine disabled",
     );
