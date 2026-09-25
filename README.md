@@ -205,10 +205,11 @@ src/
 │   │   ├── SuccessStep.tsx     # recap → dashboard
 │   │   ├── useAuthFlow.ts      # the state machine + SDK-ready handlers
 │   │   └── ui.tsx              # buttons, fields, strength meter, notice, badges
-│   └── dashboard/              # DashboardView shell, HeroCard, QuickActions, AccountSheet,
-│                               # WeatherCard, IrrigationCard, ScanCard, SatelliteCard,
-│                               # FieldTasksCard, FieldHeatmapCard, PerHectareFlowSheet,
-│                               # IrrigationWindowSheet, WilayaSelect, parts
+│   └── dashboard/              # DashboardView shell, HeroCard, QuickAccessGrid, QuickActions,
+│                               # AccountSheet, WeatherDetailModal + WeatherCard,
+│                               # CalculatorDetailModal + IrrigationCard, ScanCard,
+│                               # SatelliteCard, FieldTasksCard, FieldHeatmapCard,
+│                               # PerHectareFlowSheet, IrrigationWindowSheet, WilayaSelect, parts
 ├── lib/
 │   ├── content.ts              # onboarding copy (AR/FR)
 │   ├── wilayas.ts              # 58 wilayas + coords + climate/soil/crop baselines, fuzzy search
@@ -217,6 +218,8 @@ src/
 │   ├── use-lang.ts             # persisted AR/FR state, keeps <html lang/dir> in sync
 │   ├── auth/                   # types, gateway, validation, profile, copy
 │   ├── dashboard/copy.ts       # dashboard copy (AR/FR)
+│   ├── dashboard/format.ts     # Latin/numeric display formatting + `{token}` templates
+│   ├── dashboard/widgets.ts    # widget figures + the one advisory cascade (pure)
 │   ├── dashboard/flow.ts       # per-hectare chain exposed for the flow diagram
 │   └── dashboard/heatmap.ts    # deterministic zone model behind the heatmap
 ├── docs/firebase-adapter.md    # how to bind Firebase Auth
@@ -230,7 +233,7 @@ npx playwright install chromium   # one-time browser download
 npm run test:e2e                  # boots `next dev` automatically
 ```
 
-Two projects (Pixel 7 + Desktop Chrome, 66 tests) covering:
+Two projects (Pixel 7 + Desktop Chrome, 148 tests) covering:
 
 - **Onboarding** (`e2e/onboarding.spec.ts`): zero page scroll at 320/412 widths,
   48px+ targets, RTL mirroring, swipe semantics, dot jumps, AR⇄FR switching,
@@ -242,9 +245,16 @@ Two projects (Pixel 7 + Desktop Chrome, 66 tests) covering:
 - **Auth + dashboard** (`e2e/auth-flow.spec.ts`): field-level validation,
   password toggle + strength meter, phone validation, wrong/expired OTP, resend
   rate limit, changing the number, role requirement, wilaya search in Arabic and
-  French (accent-insensitive), the dashboard session guard, irrigation
-  reactivity, leaf scan, personalisation persistence, and a full register →
-  setup → dashboard walk.
+  French (accent-insensitive), the dashboard session guard, the quick-access
+  widgets → detail sheets, irrigation reactivity, leaf scan, personalisation
+  persistence, and a full register → setup → dashboard walk.
+- **Quick-access widgets** (`e2e/quick-access-widgets.spec.ts`): the grid sits
+  directly under the decision card and reprints its own figures, the weather
+  widget opens the complete forecast sheet (hourly strip, 7 days, environmental
+  badges, advisory), calculator edits reach the widget and the hero live and
+  survive reopen, both sheets dismiss by dragging the handle, layouts hold at
+  320/360/412 px without horizontal overflow and with 44px+ targets, and both
+  stay fully operable under `prefers-reduced-motion`.
 
 Set `PW_CHROMIUM_PATH=/path/to/chromium` to reuse an already-installed browser
 instead of downloading one (handy in sandboxes and slim CI images).
@@ -261,6 +271,15 @@ instead of downloading one (handy in sandboxes and slim CI images).
   both with the `.scroll-pad-top` / `.scroll-pad-bottom` contracts, and
   contextual tasks open in the shared bottom sheet
   (`components/app/Sheet.tsx`, focus-trapped + drag-to-dismiss).
+- **Quick-access widgets**: a 2-column grid sits directly under the hero
+  decision card. Each widget is a real `<button>` (`aria-haspopup="dialog"` +
+  `aria-expanded`) that opens the *complete* weather / irrigation view in the
+  shared sheet — nothing is recomputed for the compact form, the figures are
+  read from the same `WeatherSnapshot` / `IrrigationResult` the card renders
+  (`lib/dashboard/widgets.ts`), so a widget can never advertise a number the
+  card contradicts. Parcel inputs (crop, area, soil, system) live in one lifted
+  state, so an edit inside the calculator sheet updates the widget and the card
+  in the same frame and survives reopening.
 - **RTL/LTR**: AR⇄FR flips `dir` on the screen and on `<html>`. Physical values
   (carousel swipe vectors, enter/exit offsets, phone-country ordering, SVG HUD
   labels) are pinned LTR where the content is Latin/numeric.

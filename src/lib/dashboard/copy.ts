@@ -207,6 +207,28 @@ export interface DashboardCopy {
     /** Accessible label for a quick action: "انتقل إلى {target}". */
     goTo: string;
   };
+  /**
+   * Quick-access widgets: the 2-column grid directly under the decision card.
+   * Each widget carries its own live figures and opens the matching detail
+   * sheet (`WeatherDetailModal` / `CalculatorDetailModal`), which holds the
+   * full view. The trailing ↖/↗ arrow is drawn by the component, not stored.
+   */
+  widgets: {
+    weather: {
+      /** Short widget label; the sheet keeps the full `weather.title`. */
+      title: string;
+      /** Bottom callout that opens the full forecast sheet. */
+      cta: string;
+      /** Accessible name of the widget button. `{temp}` `{humidity}` `{wind}` */
+      openAria: string;
+    };
+    calculator: {
+      /** Bottom callout that opens the full calculator sheet. */
+      cta: string;
+      /** Accessible name of the widget button. `{crop}` `{area}` `{volume}` */
+      openAria: string;
+    };
+  };
   sections: {
     weather: string;
     field: string;
@@ -513,6 +535,17 @@ const AR: DashboardCopy = {
     irrigation: "حاسبة السقي",
     tasks: "مهام اليوم",
     goTo: "انتقل إلى {target}",
+  },
+  widgets: {
+    weather: {
+      title: "الطقس والتوقعات",
+      cta: "توقعات 7 أيام والاحتياج",
+      openAria: "فتح تفاصيل الطقس: الآن {temp}، رطوبة {humidity}، رياح {wind}.",
+    },
+    calculator: {
+      cta: "تعديل الحسابات والنظام",
+      openAria: "فتح حاسبة السقي: محصول {crop}، مساحة {area}، حاجة القطعة {volume}.",
+    },
   },
   sections: {
     weather: "الطقس والسقي",
@@ -832,6 +865,17 @@ const FR: DashboardCopy = {
     irrigation: "Calculateur d'irrigation",
     tasks: "Tâches du jour",
     goTo: "Aller à {target}",
+  },
+  widgets: {
+    weather: {
+      title: "Météo et prévisions",
+      cta: "Prévisions 7 jours et besoin",
+      openAria: "Ouvrir le détail météo : {temp} maintenant, humidité {humidity}, vent {wind}.",
+    },
+    calculator: {
+      cta: "Modifier les calculs et le système",
+      openAria: "Ouvrir le calculateur : culture {crop}, surface {area}, besoin de la parcelle {volume}.",
+    },
   },
   sections: {
     weather: "Météo et eau",

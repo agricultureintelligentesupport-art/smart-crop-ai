@@ -385,8 +385,22 @@ test.describe("member dashboard", () => {
   test("a signed-in member gets the full dashboard, not a placeholder", async ({ page }) => {
     await openDashboard(page);
     await expect(page.getByRole("heading", { level: 1 })).toContainText(/مرحباً/);
+
+    // The weather and calculator views are encapsulated in their sheets: the
+    // widgets under the decision card are the door to each full view.
+    await page.getByRole("button", { name: /^فتح تفاصيل الطقس/ }).click();
+    const weatherSheet = page.getByRole("dialog", { name: "الطقس والاحتياج المائي" });
+    await expect(weatherSheet).toBeVisible();
     await expect(page.getByRole("heading", { name: "الطقس والاحتياج المائي" })).toBeVisible();
+    await weatherSheet.getByRole("button", { name: "إغلاق" }).click();
+    await expect(weatherSheet).toBeHidden();
+
+    await page.getByRole("button", { name: /^فتح حاسبة السقي/ }).click();
+    const calculatorSheet = page.getByRole("dialog", { name: "حاسبة السقي" });
+    await expect(calculatorSheet).toBeVisible();
     await expect(page.getByRole("heading", { name: "حاسبة السقي" })).toBeVisible();
+    await calculatorSheet.getByRole("button", { name: "إغلاق" }).click();
+
     await expect(page.getByRole("heading", { name: "تشخيص صحة النبات" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "مؤشر الغطاء النباتي" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "مهام اليوم" })).toBeVisible();
@@ -394,23 +408,39 @@ test.describe("member dashboard", () => {
 
   test("irrigation calculator reacts to crop, area and system", async ({ page }) => {
     await openDashboard(page);
-    const perDay = page.getByText("لكل قطعة يومياً").locator("..").getByText(/m³/).first();
+
+    // Open the calculator sheet from its quick-access widget.
+    const widget = page.getByRole("button", { name: /^فتح حاسبة السقي/ });
+    await expect(widget).toHaveAttribute("aria-expanded", "false");
+    await widget.click();
+    await expect(widget).toHaveAttribute("aria-expanded", "true");
+    const sheet = page.getByRole("dialog", { name: "حاسبة السقي" });
+
+    const perDay = sheet.getByText("لكل قطعة يومياً").locator("..").getByText(/m³/).first();
     const before = await perDay.textContent();
 
-    await setArea(page.getByRole("slider", { name: "المساحة بالسقي" }), 9);
+    await setArea(sheet.getByRole("slider", { name: "المساحة بالسقي" }), 9);
     await expect(perDay).not.toHaveText(before ?? "");
 
     const dripValue = await perDay.textContent();
-    await page.getByRole("radio", { name: "بالرشّ" }).click();
+    await sheet.getByRole("radio", { name: "بالرشّ" }).click();
     await expect(perDay).not.toHaveText(dripValue ?? "");
 
     // Nudge buttons move the same value, and the whole dashboard follows it
     // (the parcel-area figure now surfaces in the field heatmap's zone line —
     // the hero's old static advice block was replaced by the AI task checklist).
-    await page.getByRole("button", { name: "المساحة بالسقي +" }).click();
+    await sheet.getByRole("button", { name: "المساحة بالسقي +" }).click();
     await expect(page.getByText(/في 9\.5 هكتار/).first()).toBeVisible();
-    await page.getByRole("button", { name: "المساحة بالسقي −" }).click();
+    await sheet.getByRole("button", { name: "المساحة بالسقي −" }).click();
     await expect(page.getByText(/في 9\.0 هكتار/).first()).toBeVisible();
+
+    // The widget behind the sheet already carries the new parcel figures.
+    await expect(widget).toContainText("9.0");
+    await sheet.getByRole("button", { name: "إغلاق" }).click();
+    await expect(page.getByRole("button", { name: /^فتح حاسبة السقي/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   test("leaf scan produces a diagnosis with field advice", async ({ page }) => {
@@ -470,7 +500,15 @@ test.describe("bilingual chrome", () => {
     await page.getByRole("button", { name: "الإعدادات" }).click();
     await page.getByRole("button", { name: "Français" }).click();
     await page.getByRole("button", { name: "Fermer" }).first().click();
+
+    // Widget labels, then the two sheets' full titles.
+    await expect(page.getByText("Météo et prévisions")).toBeVisible();
+    await expect(page.getByText("Prévisions 7 jours et besoin")).toBeVisible();
+    await expect(page.getByText("Modifier les calculs et le système")).toBeVisible();
+    await page.getByRole("button", { name: /^Ouvrir le détail météo/ }).click();
     await expect(page.getByRole("heading", { name: "Météo et besoin en eau" })).toBeVisible();
+    await page.getByRole("dialog", { name: "Météo et besoin en eau" }).getByRole("button", { name: "Fermer" }).click();
+    await page.getByRole("button", { name: /^Ouvrir le calculateur/ }).click();
     await expect(page.getByRole("heading", { name: "Calculateur d'irrigation" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Diagnostic de la feuille" })).toBeVisible();
   });
