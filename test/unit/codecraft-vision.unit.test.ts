@@ -187,6 +187,14 @@ test("sanitizeBaseUrl strips Markdown syntax, brackets, parentheses, trailing sl
   assert.equal(sanitizeBaseUrl(`${clean}///`), clean);
   // A pasted `/chat/completions` suffix (with trailing slashes) never doubles.
   assert.equal(sanitizeBaseUrl(`${clean}/chat/completions/`), clean);
+  // …in any casing, and even when the copy/paste carries it twice.
+  assert.equal(sanitizeBaseUrl(`${clean}/CHAT/Completions`), clean);
+  assert.equal(sanitizeBaseUrl(`${clean}/chat/completions/chat/completions//`), clean);
+  // A proxy base URL keeps its own path, gaining the endpoint exactly once.
+  assert.equal(
+    codeCraftChatCompletionsUrl(sanitizeBaseUrl("https://proxy.internal/cc/v1/chat/completions/")),
+    "https://proxy.internal/cc/v1/chat/completions",
+  );
 
   // No valid http(s) URL → the plain default, never markdown.
   assert.equal(sanitizeBaseUrl(""), CODECRAFT_BASE_URL_DEFAULT);

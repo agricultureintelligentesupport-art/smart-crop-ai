@@ -184,6 +184,12 @@ const HTML_ENTITY_TAIL_PATTERN = /&gt;.*$/;
 const TRAILING_SLASHES_PATTERN = /\/+$/;
 
 /**
+ * Strips a pasted `/chat/completions` endpoint suffix (with any trailing
+ * slashes) so `${baseUrl}/chat/completions` never doubles the path.
+ */
+const CHAT_COMPLETIONS_SUFFIX_PATTERN = /\/chat\/completions\/*$/i;
+
+/**
  * Sanitise a configured CodeCraft base URL:
  *
  *  1. the raw value (already trimmed by {@link readEnv}) is trimmed again;
@@ -201,11 +207,15 @@ const TRAILING_SLASHES_PATTERN = /\/+$/;
 export function sanitizeBaseUrl(raw: string): string {
   const match = BASE_URL_PATTERN.exec((raw ?? "").trim());
   if (!match) return CODECRAFT_BASE_URL_DEFAULT;
-  const cleaned = match[0]
+  let cleaned = match[0]
     .replace(HTML_ENTITY_TAIL_PATTERN, "")
-    .replace(TRAILING_SLASHES_PATTERN, "")
-    .replace(/\/chat\/completions$/i, "")
     .replace(TRAILING_SLASHES_PATTERN, "");
+  // Strip EVERY pasted `/chat/completions` suffix (a copy/paste can carry it
+  // more than once), then the slashes it leaves behind.
+  while (CHAT_COMPLETIONS_SUFFIX_PATTERN.test(cleaned)) {
+    cleaned = cleaned.replace(CHAT_COMPLETIONS_SUFFIX_PATTERN, "");
+  }
+  cleaned = cleaned.replace(TRAILING_SLASHES_PATTERN, "");
   return cleaned ? cleaned : CODECRAFT_BASE_URL_DEFAULT;
 }
 
