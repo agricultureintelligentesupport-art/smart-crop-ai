@@ -24,6 +24,7 @@ export default function Sheet({
   title,
   subtitle,
   lang,
+  size = "default",
   children,
 }: {
   open: boolean;
@@ -31,6 +32,12 @@ export default function Sheet({
   title: string;
   subtitle?: string;
   lang: Lang;
+  /**
+   * `tall` stretches the panel for data-heavy views (the weather and
+   * calculator sheets): still a bottom sheet with the same drag/close contract,
+   * just closer to full screen on a phone.
+   */
+  size?: "default" | "tall";
   children: ReactNode;
 }) {
   const panelRef = useRef<HTMLElement | null>(null);
@@ -111,9 +118,12 @@ export default function Sheet({
               if (info.offset.y > 120 || info.velocity.y > 850) onClose();
             }}
             onKeyDown={onKeyDown}
-            className="absolute inset-x-0 bottom-0 mx-auto flex max-h-[88dvh] w-full max-w-[560px] flex-col overflow-hidden rounded-t-[1.75rem] bg-white shadow-[0_-20px_60px_-30px_rgba(6,78,59,0.6)] outline-none"
+            className={`absolute inset-x-0 bottom-0 mx-auto flex w-full max-w-[560px] flex-col overflow-hidden rounded-t-[1.75rem] bg-white shadow-[0_-20px_60px_-30px_rgba(6,78,59,0.6)] outline-none ${
+              size === "tall" ? "max-h-[92dvh]" : "max-h-[88dvh]"
+            }`}
           >
             <div
+              data-sheet-handle
               onPointerDown={(event) => controls.start(event)}
               className="flex cursor-grab touch-none flex-col items-center pt-2.5 active:cursor-grabbing"
             >

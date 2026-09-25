@@ -8,7 +8,7 @@ import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
 import { useAuth } from "@/context/AuthContext";
-import { computeIrrigation } from "@/lib/agronomy";
+import { computeIrrigation, type IrrigationSystem } from "@/lib/agronomy";
 import { APP_SHELL } from "@/lib/app/copy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
@@ -20,15 +20,17 @@ import { CROPS, DEFAULT_WILAYA_CODE, SOILS, getWilaya, type Lang } from "@/lib/w
 import { useLang } from "@/lib/use-lang";
 import { useLiveWeather } from "@/lib/weather/useLiveWeather";
 import AccountSheet from "./AccountSheet";
+import CalculatorDetailModal from "./CalculatorDetailModal";
 import FieldHeatmapCard from "./FieldHeatmapCard";
 import HeroCard from "./HeroCard";
-import IrrigationCard from "./IrrigationCard";
 import IrrigationWindowSheet from "./IrrigationWindowSheet";
+import type { ParcelInput } from "./IrrigationCard";
 import PerHectareFlowSheet from "./PerHectareFlowSheet";
+import QuickAccessGrid from "./QuickAccessGrid";
 import SatelliteCard from "./SatelliteCard";
 import SettingsSheet from "./SettingsSheet";
 import ScanCard from "./ScanCard";
-import WeatherCard from "./WeatherCard";
+import WeatherDetailModal from "./WeatherDetailModal";
 import { SectionHeader } from "./parts";
 
 const MONTH_LOCALE: Record<Lang, string> = { ar: "ar-DZ", fr: "fr-DZ" };
@@ -68,6 +70,21 @@ export default function DashboardView() {
   const [openPerHectareFlow, setOpenPerHectareFlow] = useState(false);
   /** Parcel size in hectares: one input, consumed by every card. */
   const [areaHa, setAreaHa] = useState(2);
+  /**
+   * Parcel inputs (crop + soil + system) used to live inside `IrrigationCard`.
+   * They are lifted here so the hero decision card, the quick-access calculator
+   * widget and the calculator sheet all read the same parcel — an edit in the
+   * sheet updates the widget and the decision card in the same render.
+   *
+   * The record carries the wilaya it was chosen for: switching wilaya therefore
+   * falls back to that wilaya's own defaults (the old card's sync behaviour)
+   * without a state-copying effect.
+   */
+  const [parcelChoice, setParcelChoice] = useState<({ wilayaCode: string } & ParcelInput) | null>(null);
+  /** Weather detail sheet, opened from the "الطقس والتوقعات" quick widget. */
+  const [openWeatherDetail, setOpenWeatherDetail] = useState(false);
+  /** Calculator sheet, opened from the "حاسبة السقي" quick widget. */
+  const [openCalculatorDetail, setOpenCalculatorDetail] = useState(false);
 
   // Derived from the stored profile (server renders the default, so hydration
   // is stable and no effect has to copy state around).
@@ -95,17 +112,25 @@ export default function DashboardView() {
   // before, only the climate inputs can now be live.
   const liveWeather = useLiveWeather(wilayaCode);
   const weather = liveWeather.snapshot;
-  const crop = wilaya.crops[0];
+  // Parcel inputs: the user's own choice while it belongs to the current
+  // wilaya, otherwise that wilaya's defaults (the calculator's old reset rule).
+  const parcel =
+    parcelChoice && parcelChoice.wilayaCode === wilayaCode
+      ? parcelChoice
+      : { crop: wilaya.crops[0], soil: wilaya.soil, system: "drip" as IrrigationSystem };
+  const { crop, soil, system } = parcel;
+  const updateParcel = (patch: Partial<ParcelInput>) =>
+    setParcelChoice({ wilayaCode, crop, soil, system, ...patch });
   const irrigation = computeIrrigation({
     wilayaCode,
     crop,
     areaHa,
-    soil: wilaya.soil,
-    system: "drip",
+    soil,
+    system,
     weather,
   });
 
-  const soilLabel = SOILS[wilaya.soil][lang];
+  const soilLabel = SOILS[soil][lang];
   const month = new Intl.DateTimeFormat(MONTH_LOCALE[lang], { month: "long" }).format(new Date());
   // Guests render as "زائر" / "Invité"; a real identity always wins.
   const displayName = guestActive
@@ -246,44 +271,45 @@ export default function DashboardView() {
             </p>
           </header>
 
-          {/* Today's decision + the daily AI task checklist */}
-          <HeroCard
-            t={t}
-            irrigation={irrigation}
-            cropLabel={CROPS[crop][lang]}
-            wilayaLabel={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
-            tasks={dailyTasks.tasks}
-            taskDone={dailyTasks.done}
-            onToggleTask={dailyTasks.toggle}
-            tasksDoneCount={dailyTasks.doneCount}
-            tasksTotal={dailyTasks.total}
-            tasksAllDone={dailyTasks.allDone}
-            onOpenWindowDetail={() => setOpenWindowDetail(true)}
-            onOpenPerHectareFlow={() => setOpenPerHectareFlow(true)}
-            flowOpen={openPerHectareFlow}
-          />
+          {/* Today's decision + the daily AI task checklist, then the two
+              quick-access widgets that open the weather and calculator sheets.
+              The widgets are glued to the decision card (own flex group) so
+              they sit exactly `mt-4` under it. */}
+          <div className="flex flex-col">
+            <HeroCard
+              t={t}
+              irrigation={irrigation}
+              cropLabel={CROPS[crop][lang]}
+              wilayaLabel={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
+              tasks={dailyTasks.tasks}
+              taskDone={dailyTasks.done}
+              onToggleTask={dailyTasks.toggle}
+              tasksDoneCount={dailyTasks.doneCount}
+              tasksTotal={dailyTasks.total}
+              tasksAllDone={dailyTasks.allDone}
+              onOpenWindowDetail={() => setOpenWindowDetail(true)}
+              onOpenPerHectareFlow={() => setOpenPerHectareFlow(true)}
+              flowOpen={openPerHectareFlow}
+            />
 
-          {/* Weather + water calculator */}
-          <section id="section-weather" aria-label={t.sections.weather} className="flex scroll-mt-[4.5rem] flex-col">
-            <SectionHeader title={t.sections.weather} />
-            <div className="grid gap-3 lg:grid-cols-2">
-              <WeatherCard
+            <section
+              id="section-weather"
+              aria-label={t.sections.weather}
+              className="mt-4 scroll-mt-[4.5rem]"
+            >
+              <QuickAccessGrid
                 t={t}
-                lang={lang}
                 weather={weather}
-                source={liveWeather.source}
-                fetchedAt={liveWeather.fetchedAt}
-              />
-              <IrrigationCard
-                t={t}
-                lang={lang}
-                wilayaCode={wilayaCode}
+                irrigation={irrigation}
+                cropLabel={CROPS[crop][lang]}
                 areaHa={areaHa}
-                onAreaChange={setAreaHa}
-                weather={weather}
+                weatherOpen={openWeatherDetail}
+                calculatorOpen={openCalculatorDetail}
+                onOpenWeather={() => setOpenWeatherDetail(true)}
+                onOpenCalculator={() => setOpenCalculatorDetail(true)}
               />
-            </div>
-          </section>
+            </section>
+          </div>
 
           {/* Field health: satellite index + leaf diagnosis */}
           <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
@@ -323,8 +349,36 @@ export default function DashboardView() {
         />
       )}
 
+      {/* Weather details: the complete forecast view, opened by its widget. */}
+      <WeatherDetailModal
+        open={openWeatherDetail}
+        onClose={() => setOpenWeatherDetail(false)}
+        t={t}
+        lang={lang}
+        wilayaCode={wilayaCode}
+        weather={weather}
+        source={liveWeather.source}
+        fetchedAt={liveWeather.fetchedAt}
+      />
+
+      {/* Calculator: the complete calculator view, opened by its widget. Its
+          edits reach the hero card and the widget through the shared parcel. */}
+      <CalculatorDetailModal
+        open={openCalculatorDetail}
+        onClose={() => setOpenCalculatorDetail(false)}
+        t={t}
+        lang={lang}
+        wilayaCode={wilayaCode}
+        parcel={parcel}
+        onParcelChange={updateParcel}
+        areaHa={areaHa}
+        onAreaChange={setAreaHa}
+        weather={weather}
+      />
+
       {/* Irrigation-window detail: why this window + volume (real inputs only).
-          Same inputs as the hero's own numbers: wilaya crop, wilaya soil, drip. */}
+          Same inputs as the hero's own numbers: the selected crop, soil, system
+          and parcel size. */}
       <IrrigationWindowSheet
         open={openWindowDetail}
         onClose={() => setOpenWindowDetail(false)}
@@ -332,7 +386,8 @@ export default function DashboardView() {
         lang={lang}
         wilayaCode={wilayaCode}
         crop={crop}
-        soil={wilaya.soil}
+        soil={soil}
+        system={system}
         areaHa={areaHa}
         weather={weather}
         irrigation={irrigation}
@@ -348,7 +403,7 @@ export default function DashboardView() {
         wilayaName={lang === "ar" ? wilaya.nameAr : wilaya.nameFr}
         cropName={CROPS[crop][lang]}
         soilName={soilLabel}
-        systemName={t.irrigation.systems.drip}
+        systemName={t.irrigation.systems[system]}
         areaHa={areaHa}
         irrigation={irrigation}
         weather={weather}

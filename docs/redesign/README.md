@@ -40,10 +40,19 @@ src/components/app/
 ├── TabBar.tsx     # bottom tab bar (Link or button per tab)
 └── Sheet.tsx      # bottom sheet: drag-to-dismiss, focus trap, Escape handling
 src/components/dashboard/
-├── HeroCard.tsx     # today's decision (water volume, window, advice)
-├── QuickActions.tsx # thumb-zone section jumps
-└── AccountSheet.tsx # identity + personalisation + intro entry point
+├── HeroCard.tsx              # today's decision (water volume, window, advice)
+├── QuickAccessGrid.tsx       # the 2-column widget grid under the card
+├── WeatherDetailModal.tsx    # widget A → full forecast sheet (weather card)
+├── CalculatorDetailModal.tsx # widget B → full calculator sheet
+├── QuickActions.tsx          # thumb-zone section jumps
+└── AccountSheet.tsx          # identity + personalisation + intro entry point
 ```
+
+The two long inline sections (`الطقس والتوقعات` and `حاسبة السقي`) no longer
+sit in the page body: they collapsed into the 2-column quick-access grid under
+the decision card, and their *complete* views moved into the bottom sheets above
+— same components, same numbers, one more tap. Nothing was recomputed for the
+compact form (`lib/dashboard/widgets.ts` reads the hero's own snapshot/result).
 
 Surfaces, sliders, safe-area and scroll-padding contracts live in
 `src/app/globals.css` under "App shell". All new surfaces inherit the existing
@@ -65,3 +74,8 @@ Before/after pairs, captured headlessly at 412×915 (Pixel 7, RTL) unless noted:
 | `06-assistant-shell.png` | `/assistant` on the shared shell |
 | `07-desktop-centre-column.png` | Wide viewport: centred app column, floating tab bar |
 | `08-narrow-320.png` | 320×568: no horizontal overflow, no clipped chrome |
+| `09-quick-access-widgets.png` | The 2-column quick-access grid directly under the decision card |
+| `10-weather-sheet.png` | Weather widget → full forecast sheet (hourly, 7 days, badges, advisory) |
+| `11-calculator-sheet.png` | Calculator widget → full controls sheet (crop, area, soil, system, live results) |
+| `12-widgets-synced.png` | After edits in the sheet: widget B and the hero carry the same new numbers |
+| `13-widgets-desktop.png` | The same grid in the wide centred column (1280×900) |

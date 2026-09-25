@@ -1,14 +1,29 @@
 "use client";
 
 import { CloudRain, Droplets, Info, Sun, Thermometer, TriangleAlert, Waves, Wind } from "lucide-react";
-import { ET0_ADVISE_MM_DAY, HEAT_THRESHOLD_C, WIND_THRESHOLD_KPH, type WeatherSnapshot } from "@/lib/agronomy";
+import type { WeatherSnapshot } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
+import { fmt } from "@/lib/dashboard/format";
+import { weatherAdvice, weatherCondition } from "@/lib/dashboard/widgets";
 import type { Lang } from "@/lib/wilayas";
 import type { WeatherSource } from "@/lib/weather/useLiveWeather";
-import { Card, Chip, Metric } from "./parts";
+import { Chip, Metric } from "./parts";
 
-export const fmt = (value: number, digits = 0) =>
-  new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
+/**
+ * The complete weather view: current readings, the hourly strip, the 7-day
+ * forecast, the active advisory rule and the source note.
+ *
+ * It used to be a grouped dashboard card; the weather section is now the
+ * "الطقس والتوقعات" quick-access widget, so this full view fills
+ * `WeatherDetailModal`'s bottom sheet instead. Nothing was dropped in the
+ * move: the sheet's header carries the title/subtitle the card used to draw,
+ * and this file renders the same metrics, series and notes as before.
+ */
+
+/* `fmt` has lived in this module since the first dashboard and is imported by
+   five other surfaces — it now lives in `lib/dashboard/format.ts` and is
+   re-exported here so those imports (and the widget figures) share one formatter. */
+export { fmt };
 
 /** Rain chance as displayed text — `null` means the source has no probability. */
 const rainText = (value: number | null | undefined): string =>
@@ -29,10 +44,11 @@ export default function WeatherCard({
   /** Epoch ms of the successful live fetch (null in reference mode). */
   fetchedAt?: number | null;
 }) {
-  const { tempC, humidity, windKph, rainMmYear, et0, hours, days, wilaya } = weather;
-  const hot = tempC >= HEAT_THRESHOLD_C;
-  const windy = windKph >= WIND_THRESHOLD_KPH;
-  const advice = hot ? t.weather.adviceHeat : windy ? t.weather.adviceWind : et0 >= ET0_ADVISE_MM_DAY ? t.weather.adviceIrrigate : t.weather.adviceCalm;
+  const { tempC, humidity, windKph, rainMmYear, et0, hours, days } = weather;
+  const condition = weatherCondition(weather);
+  const hot = condition === "heat";
+  const windy = condition === "wind";
+  const advice = weatherAdvice(condition, t.weather);
 
   const lastUpdate =
     source === "live" && fetchedAt
@@ -42,17 +58,19 @@ export default function WeatherCard({
       : null;
 
   return (
-    <Card
-      title={t.weather.title}
-      subtitle={t.weather.subtitle.replace("{wilaya}", lang === "ar" ? wilaya.nameAr : wilaya.nameFr)}
-      icon={<Sun size={18} strokeWidth={2.4} aria-hidden />}
-      aside={
+    <div className="flex flex-col">
+      {/* Now strip — the temperature the sheet header no longer shows. */}
+      <div className="flex items-center justify-between gap-2">
         <Chip tone={hot ? "amber" : "emerald"} icon={<Thermometer size={12} strokeWidth={3} aria-hidden />}>
           <span dir="ltr">{fmt(tempC, 1)}°C</span>
         </Chip>
-      }
-    >
-      <div className="grid grid-cols-2 gap-2">
+        <span className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-800/65">
+          <Sun size={13} strokeWidth={2.6} aria-hidden />
+          {t.weather.now}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <Metric
           label={t.weather.humidity}
           value={`${fmt(humidity)}%`}
@@ -122,7 +140,9 @@ export default function WeatherCard({
 
       <p
         className={`mt-3 flex items-start gap-2 rounded-[1rem] px-3 py-2.5 text-[12px] font-bold leading-[1.7] ${
-          hot || windy ? "bg-amber-50 text-amber-900 ring-1 ring-amber-200" : "bg-emerald-50 text-emerald-900 ring-1 ring-emerald-100"
+          hot || windy
+            ? "bg-amber-50 text-amber-900 ring-1 ring-amber-200"
+            : "bg-emerald-50 text-emerald-900 ring-1 ring-emerald-100"
         }`}
       >
         <TriangleAlert size={14} strokeWidth={2.6} aria-hidden className="mt-[3px] shrink-0" />
@@ -144,6 +164,6 @@ export default function WeatherCard({
           {t.weather.baselineNote}
         </p>
       )}
-    </Card>
+    </div>
   );
 }

@@ -20,19 +20,15 @@ import type {
   DayPoint,
   Et0Breakdown,
   IrrigationResult,
+  IrrigationSystem,
   WeatherSnapshot,
 } from "@/lib/agronomy";
-import {
-  ET0_ADVISE_MM_DAY,
-  HEAT_THRESHOLD_C,
-  SYSTEM_EFFICIENCY,
-  WIND_THRESHOLD_KPH,
-  referenceEt0Detail,
-} from "@/lib/agronomy";
+import { referenceEt0Detail } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
+import { fillTemplate as fill, fmt } from "@/lib/dashboard/format";
+import { weatherCondition } from "@/lib/dashboard/widgets";
 import { CROPS, SOILS, getWilaya, type CropKey, type Lang, type SoilKey } from "@/lib/wilayas";
 import type { WeatherSource } from "@/lib/weather/useLiveWeather";
-import { fmt } from "./WeatherCard";
 
 /**
  * Irrigation-window detail sheet, opened from the "نافذة السقي" tile in the
@@ -61,6 +57,7 @@ export default function IrrigationWindowSheet({
   wilayaCode,
   crop,
   soil,
+  system,
   areaHa,
   weather,
   irrigation,
@@ -73,6 +70,8 @@ export default function IrrigationWindowSheet({
   wilayaCode: string;
   crop: CropKey;
   soil: SoilKey;
+  /** The active irrigation system (the hero decision's own efficiency). */
+  system: IrrigationSystem;
   areaHa: number;
   weather: WeatherSnapshot;
   irrigation: IrrigationResult;
@@ -85,7 +84,9 @@ export default function IrrigationWindowSheet({
   const wilayaName = lang === "ar" ? wilaya.nameAr : wilaya.nameFr;
   const cropName = CROPS[crop][lang];
   const soilName = SOILS[soil][lang];
-  const systemName = t.irrigation.systems.drip; // the hero decision is computed for the drip system
+  // The sheet follows the parcel the decision card is actually computed for —
+  // crop, soil and system are all editable in the calculator sheet.
+  const systemName = t.irrigation.systems[system];
 
   /* ---------------- Real inputs, exactly as the dashboard uses them ---------------- */
 
@@ -94,18 +95,11 @@ export default function IrrigationWindowSheet({
   const { netMmDay, litresPerHaDay, dailyM3, weeklyM3, kc, soilFactor, efficiency, grossMmDay } =
     irrigation;
 
-  // Same cascade WeatherCard uses to pick its advice (thresholds shared from agronomy.ts).
-  const hot = tempC >= HEAT_THRESHOLD_C;
-  const windy = windKph >= WIND_THRESHOLD_KPH;
-  const dry = weather.et0 >= ET0_ADVISE_MM_DAY;
-  const activeRule = hot ? "heat" : windy ? "wind" : dry ? "et0" : "calm";
+  // The app's one advisory cascade (heat → wind → ET₀ → calm), shared with the
+  // weather card, this sheet's rule list and the quick-access widget.
+  const activeRule = weatherCondition(weather);
 
-  const effPct = Math.round(SYSTEM_EFFICIENCY.drip * 100);
-
-  const fill = (template: string, values: Record<string, string | number>) =>
-    template.replace(/\{(\w+)\}/g, (match, key: string) =>
-      key in values ? String(values[key]) : match,
-    );
+  const effPct = Math.round(efficiency * 100);
 
   const stepEt0Formula = fill(d.stepEt0Formula, {
     temp: fmt(tempC),
@@ -331,7 +325,7 @@ export default function IrrigationWindowSheet({
                 label={t.weather.wind}
                 value={`${fmt(windKph)} km/h`}
                 trend={windTrend}
-                tone={windy ? "warn" : "default"}
+                tone={activeRule === "wind" ? "warn" : "default"}
                 icon={<Wind size={11} strokeWidth={2.8} aria-hidden />}
               />
               <TrendMetric

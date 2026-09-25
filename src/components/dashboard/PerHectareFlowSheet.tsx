@@ -49,9 +49,9 @@ interface FactorSpec {
   icon: LucideIcon;
 }
 
-/** Signed percentage with one decimal, e.g. `+2.4%` / `-16.2%`. */
+/** Signed percentage with one decimal, e.g. `+2.4%` / `−16.2%` (ratio in, percent out). */
 const signedPct = (ratio: number, digits = 1) =>
-  `${ratio >= 0 ? "+" : "−"}${fmt(Math.abs(ratio), digits)}%`;
+  `${ratio >= 0 ? "+" : "−"}${fmt(Math.abs(ratio) * 100, digits)}%`;
 
 /* ------------------------------------------------------------------ */
 /*  Connector — a measured arrow from a factor button to its term      */
