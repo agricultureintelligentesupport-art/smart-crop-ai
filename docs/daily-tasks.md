@@ -15,7 +15,7 @@ a scheduled AI pipeline and cached so it is always available — even offline.
 
 00:00  /api/cron/daily-tasks      phase 2 — AI GENERATION & PUBLISH
        └─ readSnapshot()          the 23:55 payload (re-collected when missed)
-       └─ generateDailyTaskSet()  Gemini → OpenAI prompt → 3–5 structured JSON
+       └─ generateDailyTaskSet()  OpenAI → Gemini prompt → 3–5 structured JSON
                                   tasks (id, title, subtitle, category,
                                   priority, titleFr, subtitleFr)
                                   └─ offline fallback: generateRuleTasks()
@@ -110,8 +110,8 @@ pinned and the rest wait behind the integrated handle.
 
 | Variable | Purpose |
 | --- | --- |
-| `GEMINI_API_KEY*` | Stage-1 LLM (same key pool as `/api/assistant`), model chain `gemini-1.5-flash` → `2.0-flash` → `2.5-flash`, `GEMINI_MODEL` overrides |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | Stage-2 LLM (`gpt-4o-mini` by default) |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Stage-1 LLM (PRIMARY, `gpt-4o-mini` by default) with JSON mode |
+| `GEMINI_API_KEY*` | Stage-2 LLM (FALLBACK, same key pool as `/api/assistant`), model chain `gemini-3.6-flash` → `2.5-flash` → `2.0-flash`, `GEMINI_MODEL` overrides |
 | `FIREBASE_DATABASE_URL`, `FIREBASE_DATABASE_AUTH` | optional RTDB REST persistence (`dailyTasks/…`, `dailySnapshots/…`); omit to keep everything client-side |
 | `DAILY_TASK_CONTEXTS` | JSON array of pinned parcels the midnight job publishes for (defaults to the app's default wilaya + lead crop) |
 | `CRON_SECRET` | protects the two cron endpoints |

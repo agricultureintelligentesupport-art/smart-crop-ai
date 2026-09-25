@@ -3,7 +3,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
 import { dynamic, POST } from "../../src/app/api/assistant/route";
 
-/** Stage-1 keys used across the suite (values are deliberately padded). */
+/** Provider keys used across the suite (values are deliberately padded). */
 const GEMINI_KEY = "test-gemini";
 const HF_KEY = "test-hf";
 /** Step 1 primary vision engine key (CodeCraft, OpenAI-compatible). */
@@ -12,17 +12,22 @@ const CODECRAFT_KEY = "test-codecraft";
 const CODECRAFT_CHAT_URL = "https://codecraftapi.com/v1/chat/completions";
 
 /**
- * Stage-1 AbortController window, mirrored from the route: 18 s for the
- * whole Google Gemini model chain (a full Arabic answer needs 10–15 s on a
- * cold Flash model — the former 9 s window aborted healthy generations).
+ * Stage-2 (Gemini fallback) AbortController window, mirrored from the route:
+ * 18 s for the whole Google Gemini model chain (a full Arabic answer needs
+ * 10–15 s on a cold Flash model — the former 9 s window aborted healthy
+ * generations).
  */
 const GEMINI_TIMEOUT_MS = 18_000;
 
-/** Stage-1 model chain, in order — must mirror the route's resolveGeminiModels(). */
+/**
+ * Stage-2 (Gemini fallback) model chain, in order — must mirror the route's
+ * resolveGeminiModels(): the current Flash generation first, then the older
+ * ids walked when a generation is retired.
+ */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-1.5-flash-latest",
-  "gemini-2.0-flash-exp",
+  "gemini-3.6-flash",
   "gemini-2.5-flash",
+  "gemini-2.0-flash-exp",
 ] as const;
 
 /**
@@ -86,7 +91,7 @@ function configureKeys({ gemini = true, huggingface = true } = {}) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Stage 1 (Google Gemini) mock helpers                                */
+/*  Stage 2 (Google Gemini — the FALLBACK LLM) mock helpers            */
 /* ------------------------------------------------------------------ */
 
 const isGeminiUrl = (url: string) =>
@@ -170,7 +175,7 @@ const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined =
   (body.contents?.[0]?.parts ?? []).find((part) => part.inlineData !== undefined)?.inlineData;
 
 /* ------------------------------------------------------------------ */
-/*  Stage 2 (HF LLM chat-completions) mock helpers                      */
+/*  Stage 1 (HF LLM chat-completions — the PRIMARY LLM) mock helpers   */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -186,7 +191,7 @@ const MOBILENET_MODEL =
 const LEAF_DETECTOR = "facebook/detr-resnet-50";
 
 /**
- * Stage 2 model chain, in order — must mirror the route's HF_LLM_MODELS:
+ * Stage 1 model chain, in order — must mirror the route's HF_LLM_MODELS:
  * open, non-gated, lightweight Qwen ids served by the Inference Providers
  * router (the gated Llama-3.2-3B / dead Mistral-7B ids are gone).
  */
@@ -331,19 +336,19 @@ for (const [name, geminiKey, hfKey] of MISSING_KEY_CASES) {
 test("keys are read per request, not when the route module loads", async () => {
   assert.equal((await POST(request())).status, 503);
 
-  // A Gemini-only deployment is a valid configuration: Stage 1 answers.
+  // A Gemini-only deployment is a valid configuration: with no Hugging Face
+  // token the primary LLM is skipped and the Gemini fallback answers.
   process.env.GEMINI_API_KEY = ` ${GEMINI_KEY} `;
   const upstream = mock.method(globalThis, "fetch", async (url: string) => {
-    assert.ok(isGeminiUrl(String(url)));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
     return geminiReply("Water in the morning.");
   });
   const response = await POST(request());
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    reply: "Water in the morning.",
-    diagnosis: null,
-    source: "llm",
-  });
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.reply, "Water in the morning.");
+  assert.equal(payload.diagnosis, null);
+  assert.equal(payload.source, "llm");
   assert.equal(upstream.mock.callCount(), 1);
 
   delete process.env.GEMINI_API_KEY;
@@ -352,11 +357,69 @@ test("keys are read per request, not when the route module loads", async () => {
 });
 
 /* ------------------------------------------------------------------ */
-/*  Stage 1 — Google Gemini primary LLM                                */
+/*  Chain priority — Hugging Face FIRST, Gemini only as the fallback    */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }", async () => {
+test("chain order: the Hugging Face primary LLM is called first and Gemini is never reached", async () => {
   configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    urls.push(String(url));
+    // Stage 1 — the PRIMARY LLM: the HF Inference Providers router, keyed
+    // with the Hugging Face token and the first Qwen id.
+    if (isChatUrl(String(url))) {
+      assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
+      assert.equal(requestedChatModel(init), LLM_FALLBACK_ORDER[0]);
+      return chatReply("إجابة النموذج الأساسي.");
+    }
+    // Stage 2 — Gemini must NOT be reached while the primary answers.
+    throw new Error(`Gemini must not run before the primary LLM fails: ${url}`);
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "إجابة النموذج الأساسي.");
+  // Exactly ONE upstream round-trip: the primary. No Gemini call at all.
+  assert.deepEqual(urls, [HF_ROUTER_CHAT_URL]);
+  assert.doesNotMatch(warningText(payload), /Gemini/);
+});
+
+test("chain order: Gemini is consulted ONLY after the primary LLM failed", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    // Stage 1 — the primary Hugging Face LLM is DOWN…
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    // …Stage 2 — only now is the Gemini fallback consulted.
+    return geminiReply("إجابة الاحتياط.");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "إجابة الاحتياط.");
+  // Primary first (503), then the Gemini fallback with gemini-3.6-flash.
+  assert.equal(urls.length, 2);
+  assert.equal(urls[0], HF_ROUTER_CHAT_URL);
+  assert.equal(
+    urls[1],
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_KEY}`,
+  );
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Stage 2 — Google Gemini fallback LLM                                */
+/* ------------------------------------------------------------------ */
+
+test("Stage 2 answers from gemini-3.6-flash with 200 { source: \"llm\" }", async () => {
+  // Gemini-only deployment: with no Hugging Face token the primary LLM stage
+  // is skipped, so the Gemini fallback is the stage that answers.
+  configureKeys({ huggingface: false });
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     calls.push({ url: String(url), init });
@@ -366,20 +429,21 @@ test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }"
 
   const response = await POST(request());
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    // Gemini's generated Arabic response, verbatim.
-    reply: "اسقِ الطماطم صباحاً عند القاعدة كل 3 أيام.",
-    diagnosis: null,
-    source: "llm",
-  });
+  const payload = (await response.json()) as AssistantPayload;
+  // Gemini's generated Arabic response, verbatim.
+  assert.equal(payload.reply, "اسقِ الطماطم صباحاً عند القاعدة كل 3 أيام.");
+  assert.equal(payload.diagnosis, null);
+  assert.equal(payload.source, "llm");
+  // The only degradation is the skipped primary LLM stage.
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
 
-  // A single round-trip: the primary LLM. Neither the fallback HF chain nor
-  // the vision model is touched when Stage 1 answers.
+  // A single round-trip: the fallback LLM. Neither the HF primary chain nor
+  // the vision model is touched when Stage 2 answers.
   assert.equal(calls.length, 1);
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -387,12 +451,15 @@ test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }"
   assert.ok(init.signal instanceof AbortSignal);
   assert.equal(init.signal?.aborted, false);
   assert.equal(new Headers(init.headers).get("Content-Type"), "application/json");
-  // The stable 1.5 primary predates thinking — NO thinkingConfig at all
-  // (either parameter shape would 400 on this generation).
-  assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig, undefined);
+  // Gemini 3.x reasons by default: `thinkingLevel: "low"` keeps it in fast,
+  // answer-first mode (the legacy numeric `thinkingBudget` is rejected on
+  // this generation).
+  assert.deepEqual(parseGeminiBody(init).generationConfig?.thinkingConfig, {
+    thinkingLevel: "low",
+  });
 });
 
-test("Stage 1 keeps the gemini-1.5-flash-latest endpoint when the API key rotates", async () => {
+test("Stage 2 keeps the gemini-3.6-flash endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -411,12 +478,12 @@ test("Stage 1 keeps the gemini-1.5-flash-latest endpoint when the API key rotate
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`,
     ),
   );
 });
 
-test("Stage 1 rotates comma-separated and dynamically numbered Gemini keys after HTTP 429", async () => {
+test("Stage 2 rotates comma-separated and dynamically numbered Gemini keys after HTTP 429", async () => {
   process.env.GEMINI_API_KEY = " key-one , , key-two ";
   process.env.GEMINI_API_KEY_2 = " key-three ";
   process.env.GEMINI_API_KEY_3 = " key-four ";
@@ -440,7 +507,7 @@ test("Stage 1 rotates comma-separated and dynamically numbered Gemini keys after
   assert.doesNotMatch(JSON.stringify(payload), /key-one|key-two|key-three|key-four/);
 });
 
-test("Stage 1 waits through every dynamically numbered Gemini key before using the HF fallback", async () => {
+test("Stage 2 waits through every dynamically numbered Gemini key before Stage 3 answers", async () => {
   process.env.GEMINI_API_KEY = "key-one,key-two";
   process.env.GEMINI_API_KEY_2 = "key-three";
   process.env.GEMINI_API_KEY_3 = "key-four";
@@ -451,18 +518,19 @@ test("Stage 1 waits through every dynamically numbered Gemini key before using t
       geminiKeys.push(requestedGeminiKey(String(url)) ?? "");
       return geminiHttpError(429, "Rate limit reached.");
     }
+    // The PRIMARY Hugging Face LLM is down as well — only Stage 3 is left.
     assert.ok(isChatUrl(String(url)));
-    return chatReply("إجابة من الاحتياطي.");
+    return new Response(null, { status: 503 });
   });
 
   const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
-  assert.equal(payload.reply, "إجابة من الاحتياطي.");
+  assert.equal(payload.source, "direct");
   assert.deepEqual(geminiKeys, ["key-one", "key-two", "key-three", "key-four"]);
   assert.match(warningText(payload), /all Gemini API keys failed/);
   assert.match(warningText(payload), /HTTP 429/);
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
 });
 
 test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merge trimmed, deduplicated and rotation-ordered", async () => {
@@ -568,14 +636,16 @@ test("Fallback B: every Gemini key exhausted → structured response built direc
   // …with the degradations reported as warnings, never an HTTP 500.
   assert.match(warningText(payload), /all Gemini API keys failed/);
   assert.match(warningText(payload), /HTTP 429/);
-  assert.match(warningText(payload), /Stage 2 LLM unavailable/);
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
   assert.match(warningText(payload), /Reply formatted locally/);
 });
 
-test("Stage 1 sends the concise Arabic system instruction, the query and the profile context", async () => {
+test("Stage 2 sends the concise Arabic system instruction, the query and the profile context", async () => {
   configureKeys();
   let body: GeminiRequestBody | undefined;
-  mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary Hugging Face LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     body = parseGeminiBody(init);
     return geminiReply();
   });
@@ -613,18 +683,21 @@ test("Stage 1 sends the concise Arabic system instruction, the query and the pro
     typeof body.generationConfig?.maxOutputTokens === "number" &&
       body.generationConfig.maxOutputTokens <= 2048,
   );
-  // Answer-first payload, generation-aware: the stable 1.5 primary gets NO
-  // thinkingConfig (the generation predates thinking; the parameter 400s).
-  assert.equal(body.generationConfig?.thinkingConfig, undefined);
+  // Answer-first payload, generation-aware: the Gemini 3.x fallback takes
+  // `thinkingLevel: "low"` (reasoning is on by default on this generation).
+  assert.deepEqual(body.generationConfig?.thinkingConfig, { thinkingLevel: "low" });
 });
 
-test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference (label, confidence, candidates) and answers hybrid", async () => {
+test("hybrid fallback path: Gemini receives the image + the MobileNetV2 reference (label, confidence, candidates) and answers hybrid", async () => {
   configureKeys();
   const urls: string[] = [];
   let geminiUser = "";
   let geminiImage: GeminiImagePart | undefined;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     urls.push(String(url));
+    // Stage 1 — the primary Hugging Face LLM is DOWN here, so the request
+    // walks on to the Gemini fallback with the very same user turn.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) {
       const body = parseGeminiBody(init);
       geminiUser = geminiUserText(body);
@@ -657,14 +730,15 @@ test("hybrid primary path: Gemini receives the image + the MobileNetV2 reference
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.reply, "أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
 
-  // Pipeline order: detect → classify → Gemini — one round-trip each.
-  assert.equal(urls.length, 3, `expected detect + classify + Gemini, got ${urls.length}`);
+  // Pipeline order: detect → classify → HF LLM (down) → Gemini.
+  assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.length}`);
   assert.ok(isDetectUrl(urls[0]));
   assert.match(urls[0], /facebook\/detr-resnet-50/);
   // Step 1 is the MobileNetV2 PlantVillage classifier — the sole default.
   assert.ok(isClassifyUrl(urls[1]));
   assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
-  assert.ok(isGeminiUrl(urls[2]));
+  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
+  assert.ok(isGeminiUrl(urls[3]));
   // The photo itself travels with the Gemini turn (inlineData part) —
   // no-leaf outcome above means the original frame is what Gemini inspects.
   assert.ok(geminiImage, "Gemini must receive the attached image as an inlineData part");
@@ -691,26 +765,30 @@ for (const [name, failure] of [
   ["an empty candidate list", () => geminiEmpty()],
   ["a safety block", () => geminiBlocked()],
 ] as const) {
-  test(`Stage 1 ${name} falls through to the Hugging Face LLM chain (source: llm)`, async () => {
+  test(`Stage 2 Gemini ${name} is non-fatal — 200 basic-mode when the primary is down too`, async () => {
     configureKeys();
     const calls: { url: string; init: RequestInit }[] = [];
     mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
       calls.push({ url: String(url), init });
+      // Stage 1 — the primary Hugging Face LLM fails first…
+      if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+      // …only then is the Gemini fallback consulted, and it fails too.
       if (isGeminiUrl(String(url))) return failure();
-      assert.ok(isChatUrl(String(url)));
-      return chatReply("اسقِ في الصباح الباكر.");
+      throw new Error(`unexpected upstream: ${url}`);
     });
 
     const response = await POST(request());
     assert.equal(response.status, 200);
     const payload = (await response.json()) as AssistantPayload;
-    assert.equal(payload.source, "llm");
-    assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
-    // Gemini was attempted first, then the HF chain's primary id.
-    assert.equal(requestedGeminiModel(calls[0].url), GEMINI_FALLBACK_ORDER[0]);
-    assert.equal(calls[1].url, HF_ROUTER_CHAT_URL);
-    assert.equal(requestedChatModel(calls[1].init), LLM_FALLBACK_ORDER[0]);
-    assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+    assert.equal(payload.source, "direct");
+    assert.equal(payload.diagnosis, null);
+    // The primary LLM ran FIRST, then the Gemini fallback's primary id.
+    assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
+    assert.equal(requestedChatModel(calls[0].init), LLM_FALLBACK_ORDER[0]);
+    assert.equal(requestedGeminiModel(calls[1].url), GEMINI_FALLBACK_ORDER[0]);
+    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+    assert.match(warningText(payload), /Reply formatted locally/);
   });
 }
 
@@ -731,46 +809,60 @@ for (const [name, status, body, expectedDetail] of [
   ["plain-text error", 502, "Bad gateway\nUpstream unavailable.", "HTTP 502 — Bad gateway"],
   ["empty error", 500, "", "HTTP 500"],
 ] as const) {
-  test(`Stage 1 logs the exact status and full ${name} while preserving fallback`, async () => {
+  test(`Stage 2 logs the exact status and full ${name} while preserving the Stage 3 fallback`, async () => {
     configureKeys();
     const errorLog = mock.method(console, "error", () => {});
     mock.method(globalThis, "fetch", async (url: string) => {
+      // The primary Hugging Face LLM is down → the Gemini fallback errors.
+      if (isChatUrl(String(url))) return new Response(null, { status: 503 });
       if (isGeminiUrl(String(url))) return new Response(body, { status });
-      return chatReply();
+      throw new Error(`unexpected upstream: ${url}`);
     });
 
     const response = await POST(request());
     assert.equal(response.status, 200);
     const payload = (await response.json()) as AssistantPayload;
-    assert.equal(payload.source, "llm");
+    assert.equal(payload.source, "direct");
     assert.ok(warningText(payload).includes(expectedDetail));
-    assert.equal(errorLog.mock.callCount(), 1);
-    assert.deepEqual(errorLog.mock.calls[0].arguments, ["[Gemini Error]", status, body]);
+    // The primary stage's own failure is logged first, then Google's exact,
+    // untruncated error envelope for the Gemini fallback attempt.
+    assert.ok(
+      errorLog.mock.calls.some(
+        (call) =>
+          call.arguments[0] === "[Gemini Error]" &&
+          call.arguments[1] === status &&
+          call.arguments[2] === body,
+      ),
+      `expected a [Gemini Error] ${status} log, got ${JSON.stringify(errorLog.mock.calls)}`,
+    );
   });
 }
 
-test("Stage 1 network failure falls through to the Hugging Face LLM chain", async () => {
+test("Stage 1 network failure falls through to the Gemini fallback chain", async () => {
   configureKeys();
   const upstream = mock.method(globalThis, "fetch", async (url: string) => {
-    if (isGeminiUrl(String(url))) throw new TypeError("fetch failed");
-    return chatReply("اسقِ في الصباح الباكر.");
+    if (isChatUrl(String(url))) throw new TypeError("fetch failed");
+    return geminiReply("اسقِ في الصباح الباكر.");
   });
   const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
   assert.match(warningText(payload), /fetch failed/);
-  // 1 Gemini attempt + 1 HF chain attempt.
+  // 1 primary HF attempt + 1 Gemini fallback attempt.
   assert.equal(upstream.mock.callCount(), 2);
 });
 
-test("Stage 1 timeout aborts the Gemini round-trip via AbortController after 18 s and falls through", async () => {
+test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 18 s and falls through", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   let geminiAborted = false;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     calls.push({ url: String(url), init });
+    // The primary Hugging Face LLM fails fast…
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) {
       // Never answers — the route's AbortController must cancel the round-trip.
       const signal = init.signal as AbortSignal;
@@ -782,7 +874,7 @@ test("Stage 1 timeout aborts the Gemini round-trip via AbortController after 18 
         });
       });
     }
-    return chatReply("اسقِ في الصباح الباكر.");
+    throw new Error(`unexpected upstream: ${url}`);
   });
 
   // Fast-forward the 18 s Stage-1 window instead of waiting for it.
@@ -797,7 +889,10 @@ test("Stage 1 timeout aborts the Gemini round-trip via AbortController after 18 
     mock.timers.tick(9_001);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(geminiAborted, false, "Gemini was aborted before the 18 s deadline");
-    assert.equal(calls.length, 1, "the fallback chain started before the 18 s deadline");
+    // The primary failed fast and the Gemini fallback round-trip is in
+    // flight — the former 9 s window must NOT abort it.
+    assert.equal(calls.length, 2, "the Gemini fallback started before the 18 s deadline");
+    assert.ok(isGeminiUrl(calls[1].url));
     // …only the 18 s deadline aborts the round-trip.
     mock.timers.tick(GEMINI_TIMEOUT_MS - 9_001 + 1);
     response = await pending;
@@ -808,31 +903,34 @@ test("Stage 1 timeout aborts the Gemini round-trip via AbortController after 18 
   assert.equal(geminiAborted, true);
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
-  assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.equal(payload.source, "direct");
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   assert.match(warningText(payload), /timeout after 18000 ms/);
-  // The fallback chain ran after the abort.
-  assert.equal(calls[1].url, HF_ROUTER_CHAT_URL);
-  assert.equal(requestedChatModel(calls[1].init), LLM_FALLBACK_ORDER[0]);
+  // The Gemini fallback ran after the primary failed — and nothing else did.
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
+  assert.ok(isGeminiUrl(calls[1].url));
 });
 
 /* ------------------------------------------------------------------ */
-/*  Stage 1 — Gemini model chain (retired-id 404 fallback)             */
+/*  Stage 2 — Gemini fallback model chain (retired-id 404 fallback)     */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 walks the Gemini chain: a 404 'model not found' on the primary falls back to the next model", async () => {
+test("Stage 2 walks the Gemini chain: a 404 'model not found' on the primary falls back to the next model", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
+    // The primary Hugging Face LLM is down → the Gemini fallback walks its
+    // own model chain and still answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
       return model === GEMINI_FALLBACK_ORDER[0]
         ? geminiModelNotFound(model)
         : geminiReply("اسقِ في الصباح الباكر.");
     }
-    // Stage 1 still answers — neither the HF chain nor Stage 3 may run.
     throw new Error(`unexpected upstream: ${url}`);
   });
 
@@ -842,16 +940,16 @@ test("Stage 1 walks the Gemini chain: a 404 'model not found' on the primary fal
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
   // The retired primary 404s → the next chain id answers.
-  assert.deepEqual(urls.map(requestedGeminiModel), [
-    GEMINI_FALLBACK_ORDER[0],
-    GEMINI_FALLBACK_ORDER[1],
-  ]);
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.deepEqual(
+    urls.filter((url) => isGeminiUrl(url)).map(requestedGeminiModel),
+    [GEMINI_FALLBACK_ORDER[0], GEMINI_FALLBACK_ORDER[1]],
+  );
+  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   assert.match(warningText(payload), /is not found for API version v1beta/);
-  assert.doesNotMatch(warningText(payload), /Stage 2 LLM unavailable/);
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
 });
 
-test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF chain answers", async () => {
+test("Stage 2 walks the whole Gemini chain when every model 404s, then Stage 3 answers", async () => {
   configureKeys();
   const geminiUrls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -859,20 +957,20 @@ test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF ch
       geminiUrls.push(String(url));
       return geminiModelNotFound(requestedGeminiModel(String(url)) ?? "unknown");
     }
+    // The primary Hugging Face LLM is down as well.
     assert.ok(isChatUrl(String(url)));
-    return chatReply("Water in the morning.");
+    return new Response(null, { status: 503 });
   });
 
   const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
-  assert.equal(payload.reply, "Water in the morning.");
-  // Every retired id is walked before degrading to Stage 2…
+  assert.equal(payload.source, "direct");
+  // Every retired id is walked before degrading to Stage 3…
   assert.deepEqual(geminiUrls.map(requestedGeminiModel), [...GEMINI_FALLBACK_ORDER]);
   // …and the non-fatal warning names the whole tried chain.
   const warning = warningText(payload);
-  assert.match(warning, /Stage 1 Gemini unavailable/);
+  assert.match(warning, /Stage 2 Gemini unavailable/);
   assert.match(warning, /no Gemini model could answer/);
   for (const model of GEMINI_FALLBACK_ORDER) {
     assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
@@ -880,7 +978,7 @@ test("Stage 1 walks the whole Gemini chain when every model 404s, then the HF ch
 });
 
 for (const status of [503, 500] as const) {
-  test(`Stage 1 rotates to the next Gemini key after HTTP ${status}`, async () => {
+  test(`Stage 2 rotates to the next Gemini key after HTTP ${status}`, async () => {
     process.env.GEMINI_API_KEY = "first-key,second-key";
     const calls: string[] = [];
     mock.method(globalThis, "fetch", async (url: string) => {
@@ -902,7 +1000,7 @@ for (const status of [503, 500] as const) {
   });
 }
 
-test("Stage 1: a 429 quota error fails fast without walking the Gemini model chain", async () => {
+test("Stage 2: a 429 quota error fails fast without walking the Gemini model chain", async () => {
   configureKeys();
   const geminiUrls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -910,15 +1008,16 @@ test("Stage 1: a 429 quota error fails fast without walking the Gemini model cha
       geminiUrls.push(String(url));
       return geminiHttpError(429, "Resource has been exhausted (e.g. check quota).");
     }
+    // The primary Hugging Face LLM is down as well.
     assert.ok(isChatUrl(String(url)));
-    return chatReply("اسقِ في الصباح الباكر.");
+    return new Response(null, { status: 503 });
   });
 
   const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  // The HF chain still answers — the failure is non-fatal…
-  assert.equal(payload.source, "llm");
+  // Stage 3 still answers — the failure is non-fatal…
+  assert.equal(payload.source, "direct");
   assert.match(warningText(payload), /HTTP 429/);
   // …but a quota error is an account problem, not a model problem: exactly
   // one Gemini attempt, no chain walk.
@@ -926,14 +1025,17 @@ test("Stage 1: a 429 quota error fails fast without walking the Gemini model cha
   assert.equal(requestedGeminiModel(geminiUrls[0]), GEMINI_FALLBACK_ORDER[0]);
 });
 
-test("Stage 1 sends each model generation its own thinking payload (none for 1.5/2.0, thinkingBudget for 2.5)", async () => {
+test("Stage 2 sends each model generation its own thinking payload (thinkingLevel for 3.x, thinkingBudget for 2.5, none for 2.0)", async () => {
   configureKeys();
   const bodies = new Map<string, GeminiRequestBody>();
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary Hugging Face LLM is down → the Gemini fallback walks its
+    // whole model chain here.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
       bodies.set(model, parseGeminiBody(init));
-      // 404 the 1.5/2.0 ids so the walk reaches the 2.5 model; it answers.
+      // 404 the 3.x/2.5 ids so the walk reaches the 2.0 model; it answers.
       const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
       return model === last
         ? geminiReply("اسقِ في الصباح الباكر.")
@@ -946,32 +1048,34 @@ test("Stage 1 sends each model generation its own thinking payload (none for 1.5
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as AssistantPayload).source, "llm");
 
-  // Stable 1.5/2.0: NO thinkingConfig at all — those generations predate
-  // thinking and 400 on either parameter shape…
-  for (const model of GEMINI_FALLBACK_ORDER.slice(0, -1)) {
-    const stable = bodies.get(model);
-    assert.ok(stable, `no request body captured for ${model}`);
-    assert.equal(stable.generationConfig?.thinkingConfig, undefined);
-  }
-  // …Gemini 2.5: numeric zero budget (reasoning skipped, answer-first).
-  const last = GEMINI_FALLBACK_ORDER[GEMINI_FALLBACK_ORDER.length - 1];
-  const gemini25 = bodies.get(last);
-  assert.ok(gemini25, `no request body captured for ${last}`);
-  assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingBudget, 0);
-  assert.equal(gemini25.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
+  // Gemini 3.x: `thinkingLevel: "low"` — the generation reasons by default
+  // and rejects the legacy numeric budget…
+  const flash36 = bodies.get(GEMINI_FALLBACK_ORDER[0]);
+  assert.ok(flash36, `no request body captured for ${GEMINI_FALLBACK_ORDER[0]}`);
+  assert.deepEqual(flash36.generationConfig?.thinkingConfig, { thinkingLevel: "low" });
+  // …Gemini 2.5: numeric zero budget (reasoning skipped, answer-first)…
+  const flash25 = bodies.get("gemini-2.5-flash");
+  assert.ok(flash25, "no request body captured for gemini-2.5-flash");
+  assert.equal(flash25.generationConfig?.thinkingConfig?.thinkingBudget, 0);
+  assert.equal(flash25.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
+  // …Gemini 2.0: NO thinkingConfig at all — the generation predates thinking
+  // and 400s on either parameter shape.
+  const flash20 = bodies.get("gemini-2.0-flash-exp");
+  assert.ok(flash20, "no request body captured for gemini-2.0-flash-exp");
+  assert.equal(flash20.generationConfig?.thinkingConfig, undefined);
 });
 
 /* ------------------------------------------------------------------ */
-/*  Stage 1 — GEMINI_MODEL primary override                             */
+/*  Stage 2 — GEMINI_MODEL override                                     */
 /* ------------------------------------------------------------------ */
 
-test("GEMINI_MODEL overrides the Stage-1 primary model id (trimmed, single round-trip)", async () => {
+test("GEMINI_MODEL overrides the Stage-2 model id (trimmed, single round-trip)", async () => {
   configureKeys();
-  // Pin the alternate stable id with its generous free-tier quota; the
-  // padding proves the value is trimmed before use.
+  // Pin an older stable id; the padding proves the value is trimmed.
   process.env.GEMINI_MODEL = " gemini-2.0-flash-exp ";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     urls.push(String(url));
     assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
     return geminiReply("اسقِ في الصباح الباكر.");
@@ -981,8 +1085,9 @@ test("GEMINI_MODEL overrides the Stage-1 primary model id (trimmed, single round
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
-  // Exactly one round-trip against the override — the default primary is
-  // skipped and the override is not duplicated as its own fallback.
+  // Exactly one Gemini round-trip against the override — the default
+  // gemini-3.6-flash id is skipped and the override is not duplicated as its
+  // own fallback.
   assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash-exp"]);
 });
 
@@ -991,6 +1096,7 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
   process.env.GEMINI_MODEL = "gemini-2.0-flash-exp";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     urls.push(String(url));
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
@@ -1011,14 +1117,15 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
     "gemini-2.0-flash-exp",
     "gemini-2.5-flash",
   ]);
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
+  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
 });
 
-test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash-latest default", async () => {
+test("a blank GEMINI_MODEL falls back to the gemini-3.6-flash default", async () => {
   configureKeys();
   process.env.GEMINI_MODEL = "   ";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     urls.push(String(url));
     assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
     return geminiReply("اسقِ في الصباح الباكر.");
@@ -1034,19 +1141,18 @@ test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash-latest defa
 /*  Deployment shapes — Gemini-only / Hugging-Face-only                 */
 /* ------------------------------------------------------------------ */
 
-test("Gemini-only deployment: Stage 1 answers and the HF fallback is never called", async () => {
+test("Gemini-only deployment: Stage 2 answers and the HF primary is never called", async () => {
   configureKeys({ huggingface: false });
   const upstream = mock.method(globalThis, "fetch", async (url: string) => {
-    assert.ok(isGeminiUrl(String(url)));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
     return geminiReply("اسقِ صباحاً.");
   });
   const response = await POST(request());
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    reply: "اسقِ صباحاً.",
-    diagnosis: null,
-    source: "llm",
-  });
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.reply, "اسقِ صباحاً.");
+  assert.equal(payload.diagnosis, null);
+  assert.equal(payload.source, "llm");
   assert.equal(upstream.mock.callCount(), 1);
 });
 
@@ -1061,9 +1167,10 @@ test("Gemini-only deployment: a Gemini failure degrades to Stage 3 and says the 
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   assert.match(payload.reply, /الوضع الأساسي/);
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
-  assert.match(warningText(payload), /Stage 2 LLM unavailable/);
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   assert.match(warningText(payload), /HUGGINGFACE_API_KEY is not configured/);
+  assert.match(warningText(payload), /GEMINI_API_KEY is not configured|HTTP 503/);
   assert.match(warningText(payload), /Reply formatted locally/);
 });
 
@@ -1071,12 +1178,12 @@ for (const [name, hfValue] of [
   ["unset", undefined],
   ["blank", "   "],
 ] as const) {
-  test(`no valid HF token (${name}): Stage 2 is skipped synchronously — no router request, no throw, no delay`, async () => {
+  test(`no valid HF token (${name}): Stage 1 is skipped synchronously — no router request, no throw, no delay`, async () => {
     process.env.GEMINI_API_KEY = GEMINI_KEY;
     if (hfValue !== undefined) process.env.HUGGINGFACE_API_KEY = hfValue;
     const upstream = mock.method(globalThis, "fetch", async (url: string) => {
       if (isGeminiUrl(String(url))) return geminiHttpError(503, "The model is overloaded.");
-      throw new Error(`Stage 2 must not be attempted without a token: ${url}`);
+      throw new Error(`Stage 1 must not be attempted without a token: ${url}`);
     });
     const errorLog = mock.method(console, "error", () => {});
 
@@ -1097,21 +1204,21 @@ for (const [name, hfValue] of [
     // Exactly one upstream call — Gemini. Nothing went to Hugging Face.
     assert.equal(upstream.mock.callCount(), 1);
     assert.ok(upstream.mock.calls.every((call) => isGeminiUrl(String(call.arguments[0]))));
-    // The skip is a graceful degradation, not an error: no `[Stage 2: HF LLM
+    // The skip is a graceful degradation, not an error: no `[Stage 1: HF LLM
     // Error]` line, and no safety-net exception.
     assert.ok(
       errorLog.mock.calls.every(
-        (call) => !/Stage 2|Safety Net/.test(String(call.arguments[0])),
+        (call) => !/Stage 1: HF LLM Error|Safety Net/.test(String(call.arguments[0])),
       ),
     );
     const warning = warningText(payload);
-    assert.match(warning, /Stage 2 LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
+    assert.match(warning, /Stage 1 HF LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
     assert.match(warning, /HF_TOKEN unset too/);
     assert.match(warning, /Reply formatted locally/);
   });
 }
 
-test("Gemini-only deployment: an image request skips the vision step and still answers from Gemini", async () => {
+test("Gemini-only deployment: an image request skips the vision step and still answers from the Gemini fallback", async () => {
   process.env.GEMINI_API_KEY = GEMINI_KEY;
   let geminiImage: GeminiImagePart | undefined;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -1124,15 +1231,15 @@ test("Gemini-only deployment: an image request skips the vision step and still a
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.diagnosis, null);
-  // Fallback A: without an HF key MobileNetV2 never runs — Gemini still
-  // receives the raw image and inspects it independently.
+  // Fallback A: without an HF key MobileNetV2 never runs — the Gemini
+  // fallback still receives the raw image and inspects it independently.
   assert.ok(geminiImage, "the raw image must still reach Gemini");
   assert.equal(geminiImage?.data, "aW1hZ2U=");
   assert.match(warningText(payload), /Step 1 vision unavailable/);
   assert.match(warningText(payload), /HUGGINGFACE_API_KEY is not configured/);
 });
 
-test("Hugging-Face-only deployment: Stage 1 is skipped by config and the HF chain answers", async () => {
+test("Hugging-Face-only deployment: the HF primary answers and Gemini is skipped by config", async () => {
   process.env.HUGGINGFACE_API_KEY = HF_KEY;
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -1147,8 +1254,9 @@ test("Hugging-Face-only deployment: Stage 1 is skipped by config and the HF chai
   assert.ok(calls.every((call) => isChatUrl(call.url)));
   assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
   assert.equal(requestedChatModel(calls[0].init), LLM_FALLBACK_ORDER[0]);
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
-  assert.match(warningText(payload), /GEMINI_API_KEY is not configured/);
+  // The primary answered, so the Gemini fallback is never consulted — no
+  // request, and no Gemini degradation is reported to the client.
+  assert.doesNotMatch(warningText(payload), /Gemini/);
 });
 
 test("HF_TOKEN (Hugging Face's own variable name) is honoured as an alias of HUGGINGFACE_API_KEY", async () => {
@@ -1166,7 +1274,7 @@ test("HF_TOKEN (Hugging Face's own variable name) is honoured as an alias of HUG
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "Water in the morning.");
-  // …and Stage 2 authenticates the router call with the trimmed alias value.
+  // …and Stage 1 authenticates the router call with the trimmed alias value.
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
   assert.equal(new Headers(calls[0].init.headers).get("Authorization"), "Bearer hf_alias_token");
@@ -1191,21 +1299,25 @@ test("Hugging-Face-only deployment: an image request keeps the vision diagnosis 
 });
 
 /* ------------------------------------------------------------------ */
-/*  Stage 2 — Hugging Face fallback chain (model selection)             */
+/*  Stage 1 — Hugging Face primary chain (model selection)              */
 /* ------------------------------------------------------------------ */
 
-/** Gemini always fails here, so every assertion targets the HF chain. */
-function mockGeminiDownThen(fetchImpl: (url: string, init: RequestInit) => Promise<Response>) {
+/**
+ * The primary Hugging Face LLM answers here, so the Gemini fallback is never
+ * consulted. Gemini is kept down anyway: a regression that put Gemini back in
+ * front of the primary would surface as a wrong answer, not a hang.
+ */
+function mockHfLlmPrimary(fetchImpl: (url: string, init: RequestInit) => Promise<Response>) {
   return mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) return geminiHttpError(503, "The model is overloaded.");
     return fetchImpl(String(url), init);
   });
 }
 
-test("Stage 2 calls the official Inference Providers router with a Bearer token and the model id in the body", async () => {
+test("Stage 1 calls the official Inference Providers router with a Bearer token and the model id in the body", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
-  mockGeminiDownThen(async (url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     return chatReply("Water in the morning.");
   });
@@ -1233,10 +1345,10 @@ test("Stage 2 calls the official Inference Providers router with a Bearer token 
   assert.ok(typeof body.max_tokens === "number" && body.max_tokens <= 1000);
 });
 
-test("Stage 2 walks the HF chain: 404 model-not-found on the primary id falls back to the next", async () => {
+test("Stage 1 walks the HF chain: 404 model-not-found on the primary id falls back to the next", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     models.push(requestedChatModel(init));
     if (models.length === 1) return llmModelNotFound(LLM_FALLBACK_ORDER[0]);
     return chatReply("Water in the morning.");
@@ -1249,10 +1361,10 @@ test("Stage 2 walks the HF chain: 404 model-not-found on the primary id falls ba
   assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
 });
 
-test("Stage 2 walks the HF chain: legacy 400 model-not-supported (string envelope) falls back to the next id", async () => {
+test("Stage 1 walks the HF chain: legacy 400 model-not-supported (string envelope) falls back to the next id", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     models.push(requestedChatModel(init));
     if (models.length === 1) return llmProviderUnsupported();
     return chatReply("Water in the morning.");
@@ -1263,10 +1375,10 @@ test("Stage 2 walks the HF chain: legacy 400 model-not-supported (string envelop
   assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
 });
 
-test("Stage 2 walks the HF chain: the router's 400 { error: { code: model_not_supported } } object envelope falls back to the next id", async () => {
+test("Stage 1 walks the HF chain: the router's 400 { error: { code: model_not_supported } } object envelope falls back to the next id", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     const model = requestedChatModel(init);
     models.push(model);
     if (models.length === 1) return llmRouterModelNotSupported(String(model));
@@ -1278,16 +1390,15 @@ test("Stage 2 walks the HF chain: the router's 400 { error: { code: model_not_su
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "Water in the morning.");
   assert.deepEqual(models, [LLM_FALLBACK_ORDER[0], LLM_FALLBACK_ORDER[1]]);
-  // The walk is a non-fatal warning inside the route (console), not a
-  // client-visible one — the client only sees the Stage 1 degradation.
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
-  assert.doesNotMatch(warningText(payload), /Stage 2 LLM unavailable/);
+  // The primary LLM answered, so the Gemini fallback never ran: no Gemini
+  // degradation is reported to the client at all.
+  assert.doesNotMatch(warningText(payload), /Gemini/);
 });
 
-test("Stage 2: every model unsupported by the router degrades to 200 basic-mode listing the whole chain and the error code", async () => {
+test("Stage 1: every model unsupported by the router degrades to 200 basic-mode listing the whole chain and the error code", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     const model = requestedChatModel(init);
     models.push(model);
     return llmRouterModelNotSupported(String(model));
@@ -1309,10 +1420,10 @@ test("Stage 2: every model unsupported by the router degrades to 200 basic-mode 
   }
 });
 
-test("Stage 2: every model unsupported by the provider (legacy string envelope) degrades to 200 basic-mode listing the whole chain", async () => {
+test("Stage 1: every model unsupported by the provider (legacy string envelope) degrades to 200 basic-mode listing the whole chain", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     models.push(requestedChatModel(init));
     return llmProviderUnsupported();
   });
@@ -1329,9 +1440,9 @@ test("Stage 2: every model unsupported by the provider (legacy string envelope) 
   }
 });
 
-test("Stage 2: an unrelated 400 (bad request) fails fast without walking the model chain", async () => {
+test("Stage 1: an unrelated 400 (bad request) fails fast without walking the model chain", async () => {
   configureKeys();
-  const upstream = mockGeminiDownThen(async () =>
+  const upstream = mockHfLlmPrimary(async () =>
     Response.json({ error: "Invalid payload: messages field is required." }, { status: 400 }),
   );
   const response = await POST(request());
@@ -1347,10 +1458,10 @@ test("Stage 2: an unrelated 400 (bad request) fails fast without walking the mod
   );
 });
 
-test("Stage 2: all models not found degrades to 200 basic-mode listing every id tried", async () => {
+test("Stage 1: all models not found degrades to 200 basic-mode listing every id tried", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     const model = requestedChatModel(init);
     models.push(model);
     return llmModelNotFound(String(model));
@@ -1367,10 +1478,10 @@ test("Stage 2: all models not found degrades to 200 basic-mode listing every id 
   }
 });
 
-test("Stage 2: a model that returns no text falls through to the next id", async () => {
+test("Stage 1: a model that returns no text falls through to the next id", async () => {
   configureKeys();
   const models: (string | undefined)[] = [];
-  mockGeminiDownThen(async (_url: string, init: RequestInit) => {
+  mockHfLlmPrimary(async (_url: string, init: RequestInit) => {
     models.push(requestedChatModel(init));
     return models.length < LLM_FALLBACK_ORDER.length
       ? Response.json({ choices: [] })
@@ -1414,9 +1525,9 @@ for (const [name, status, body] of [
     },
   ],
 ] as const) {
-  test(`Stage 2: a ${name} is an account problem — fails fast to Stage 3 without walking the chain`, async () => {
+  test(`Stage 1: a ${name} is an account problem — fails fast to Stage 3 without walking the chain`, async () => {
     configureKeys();
-    const upstream = mockGeminiDownThen(async () => Response.json(body, { status }));
+    const upstream = mockHfLlmPrimary(async () => Response.json(body, { status }));
     const response = await POST(request());
     // Fail-proof: still a 200 basic-mode reply, never a 500.
     assert.equal(response.status, 200);
@@ -1433,9 +1544,9 @@ for (const [name, status, body] of [
   });
 }
 
-test("Stage 2: a transient 503 on the primary id does not walk the chain", async () => {
+test("Stage 1: a transient 503 on the primary id does not walk the chain", async () => {
   configureKeys();
-  const upstream = mockGeminiDownThen(async () => new Response(null, { status: 503 }));
+  const upstream = mockHfLlmPrimary(async () => new Response(null, { status: 503 }));
   const response = await POST(request());
   // Fail-proof: transient 503s degrade to the basic-mode reply, not an HTTP 500.
   assert.equal(response.status, 200);
@@ -1450,18 +1561,20 @@ test("Stage 2: a transient 503 on the primary id does not walk the chain", async
   );
 });
 
-test("Stage 2 sends the same system prompt, query and Step 1 context the primary LLM received", async () => {
+test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini fallback receives", async () => {
   configureKeys();
   let chatBody: ChatRequestBody | undefined;
   let geminiUser = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) {
       geminiUser = geminiUserText(parseGeminiBody(init));
-      return geminiHttpError(503, "overloaded");
+      return geminiReply();
     }
     if (isChatUrl(String(url))) {
       chatBody = parseChatBody(init);
-      return chatReply();
+      // An account-level failure: the primary stage fails fast (no model
+      // walk) and the Gemini fallback takes over with the same turn.
+      return Response.json({ error: "Invalid credentials" }, { status: 401 });
     }
     if (isDetectUrl(String(url))) return Response.json([]);
     // Step 1 — MobileNetV2 PlantVillage (sole default classifier).
@@ -1490,7 +1603,9 @@ test("Stage 2 sends the same system prompt, query and Step 1 context the primary
   assert.match(system.content, /باللغة العربية/);
   assert.match(system.content, /عملي/);
   assert.equal(user.role, "user");
-  // Same user turn as Stage 1: query + Step 1 label/confidence + candidates.
+  // The Gemini fallback received EXACTLY the same user turn as the primary
+  // HF stage: query + Step 1 label/confidence + candidates.
+  assert.ok(geminiUser, "the Gemini fallback must have been consulted");
   assert.equal(user.content, geminiUser);
   assert.match(user.content, /Tomato___Early_blight/);
   assert.match(user.content, /95%/);
@@ -1529,8 +1644,8 @@ test("zero-failure: both LLM stages down after a successful Step 1 returns 200 w
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
   // Failures are reported as non-fatal warnings, not a 500.
-  assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
-  assert.match(warningText(payload), /Stage 2 LLM unavailable/);
+  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
@@ -1554,7 +1669,7 @@ test("zero-failure: gated-model 403s walk the whole HF chain, then answer with d
 
 test("zero-failure: healthy diagnosis gets a direct reassurance card with prevention tips", async () => {
   configureKeys();
-  mockGeminiDownThen(async (url: string) =>
+  mockHfLlmPrimary(async (url: string) =>
     isChatUrl(url)
       ? llmProviderUnsupported()
       : Response.json([{ label: "Tomato___healthy", score: 0.97 }]),
@@ -1572,7 +1687,7 @@ test("zero-failure: healthy diagnosis gets a direct reassurance card with preven
 
 test("zero-failure: low-confidence diagnosis asks for a clearer photo in the direct card", async () => {
   configureKeys();
-  mockGeminiDownThen(async (url: string) =>
+  mockHfLlmPrimary(async (url: string) =>
     isChatUrl(url)
       ? new Response(null, { status: 503 })
       : Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]),
@@ -1601,7 +1716,8 @@ for (const failure of ["http", "network", "empty"] as const) {
     // Non-greeting question → polite basic-mode explanation, not a config error.
     assert.match(payload.reply, /الوضع الأساسي/);
     assert.notEqual(payload.reply, "API keys missing on server");
-    assert.match(warningText(payload), /Stage 2 LLM unavailable/);
+    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   });
 }
 
@@ -1625,13 +1741,14 @@ for (const greeting of ["هلا", "مرحبا", "السلام عليكم", "أه
     // …and asks how it can help with the farm/crops.
     assert.match(payload.reply, /نساعدك/);
     assert.match(payload.reply, /ضيعتك|محصولك/);
-    assert.match(warningText(payload), /Stage 2 LLM unavailable/);
+    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   });
 }
 
 test("zero-failure: text-only LLM outage answers a farm question with the polite basic-mode fallback", async () => {
   configureKeys();
-  mockGeminiDownThen(async () => llmGated());
+  mockHfLlmPrimary(async () => llmGated());
   const response = await POST(textRequest("كيف أسقي الطماطم في بسكرة؟"));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
@@ -1646,7 +1763,7 @@ test("zero-failure: text-only LLM outage answers a farm question with the polite
 
 test("zero-failure: a long message is never mistaken for a greeting", async () => {
   configureKeys();
-  mockGeminiDownThen(async () => new Response(null, { status: 503 }));
+  mockHfLlmPrimary(async () => new Response(null, { status: 503 }));
   const response = await POST(
     textRequest("السلام عليكم، عندي بقع صفراء على أوراق الطماطم منذ أسبوع وبدأت تنتشر للبيت البلاستيكي المجاور فماذا أفعل"),
   );
@@ -1680,7 +1797,7 @@ test("final safety net: an unexpected internal exception still answers 200 direc
 /*  Zero-failure strategy — graceful vision degradation                 */
 /* ------------------------------------------------------------------ */
 
-test("zero-failure: HF vision failure degrades to Stage 1 with a Step 1 warning (never 500)", async () => {
+test("zero-failure: HF vision failure degrades to the LLM stages with a Step 1 warning (never 500)", async () => {
   configureKeys();
   let geminiCalls = 0;
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -1688,7 +1805,7 @@ test("zero-failure: HF vision failure degrades to Stage 1 with a Step 1 warning 
       geminiCalls += 1;
       return geminiReply("Water in the morning.");
     }
-    // Step 1 fails on every vision model → Stage 1 must still answer the text.
+    // Step 1 fails on every vision model → an LLM stage must still answer.
     return new Response(null, { status: 503 });
   });
   const response = await POST(request(true));
@@ -1724,7 +1841,8 @@ test("zero-failure: HF 503 model-loading plus every LLM down answers 200 asking 
   const warning = warningText(payload);
   assert.match(warning, /Step 1 vision unavailable/);
   assert.match(warning, /loading/i);
-  assert.match(warning, /Stage 2 LLM unavailable/);
+  assert.match(warning, /Stage 1 HF LLM unavailable/);
+  assert.match(warning, /Stage 2 Gemini unavailable/);
 });
 
 test("strict pipeline: HF parses the returned array to extract the primary class and confidence", async () => {
@@ -1755,7 +1873,7 @@ test("strict pipeline: HF parses the returned array to extract the primary class
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.source, "hybrid");
-  // Stage 2 runs on the primary HF LLM via the router's chat-completions endpoint…
+  // Stage 1 (the primary HF LLM) runs via the router's chat-completions endpoint…
   assert.equal(llmUrl, HF_ROUTER_CHAT_URL);
   assert.equal(llmModel, LLM_FALLBACK_ORDER[0]);
   // …and the Step 1 verdict (label + confidence) is passed straight into the prompt.
@@ -1817,6 +1935,9 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   let classifyContentType: string | null = null;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     urls.push(String(url));
+    // Stage 1 — the primary HF LLM is DOWN here, so the Gemini fallback is
+    // the stage that answers (the assertions below only watch Step 0/1).
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("الاقتصاص حسّن الدقة.");
     if (isDetectUrl(String(url))) {
       assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
@@ -1832,15 +1953,16 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Pipeline order: detect → classify → LLM.
-  assert.equal(urls.length, 3);
+  // Pipeline order: detect → classify → HF LLM (down) → Gemini fallback.
+  assert.equal(urls.length, 4);
   assert.ok(isDetectUrl(urls[0]));
   // The PRIMARY detector is the COCO facebook/detr-resnet-50 — the obsolete
   // fine-tuned PlantDoc checkpoint is gone from the default chain.
   assert.match(urls[0], /facebook\/detr-resnet-50/);
   assert.doesNotMatch(urls[0], /detr-finetuned-plantdoc/);
   assert.ok(isClassifyUrl(urls[1]));
-  assert.ok(isGeminiUrl(urls[2]));
+  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
+  assert.ok(isGeminiUrl(urls[3]));
 
   // The classifier saw the re-encoded CROP, never the original frame.
   assert.notEqual(classifyBody, LEAF_JPEG_B64);
@@ -1860,6 +1982,8 @@ test("Step 0 with no usable detection keeps the full frame for Step 1", async ()
   configureKeys();
   let classifyBody = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("الصورة كاملة.");
     if (isDetectUrl(String(url))) return Response.json([]);
     assert.ok(isClassifyUrl(String(url)));
@@ -1883,6 +2007,8 @@ test("Step 0 outage (detector loading) degrades to the full frame with a warning
   configureKeys();
   let classifyBody = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("المصابيح باردة.");
     if (isDetectUrl(String(url))) return Response.json({ error: "Model is loading" }, { status: 503 });
     assert.ok(isClassifyUrl(String(url)));
@@ -1902,6 +2028,8 @@ test("Step 0 outage (detector loading) degrades to the full frame with a warning
 test("Step 0 label filter: only plant/leaf boxes are accepted (a person box never crops)", async () => {
   configureKeys();
   mock.method(globalThis, "fetch", async (url: string) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("تم.");
     if (isDetectUrl(String(url))) {
       // The higher-scoring "person" box (full frame) must be REJECTED by the
@@ -1929,6 +2057,8 @@ test("Step 0 walks the HF_LEAF_DETECT_MODELS override chain when the primary id 
   process.env.HF_LEAF_DETECT_MODELS = "first/leaf-detector,second/leaf-detector";
   const detectUrls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("تم.");
     // Custom override ids are not necessarily "detr" — any router URL that is
     // not the classifier is a detection call.
@@ -1967,6 +2097,8 @@ test("HF_LEAF_DETECT_MODELS overrides the Step 0 detector chain", async () => {
   process.env.HF_LEAF_DETECT_MODELS = "custom/leaf-detector";
   const detectUrls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("تم.");
     if (/router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) && !isClassifyUrl(String(url))) {
       detectUrls.push(String(url));
@@ -2102,6 +2234,9 @@ test("Step 1 primary: CodeCraft diagnoses the leaf and its findings feed the EXI
       codecraftBody = parseCodeCraftBody(init);
       return codecraftVerdict();
     }
+    // Stage 1 — the primary HF LLM is DOWN here, so the Gemini fallback is
+    // the stage that answers (the MobileNetV2 backup engine is not needed).
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) {
       geminiBody = parseGeminiBody(init);
       return geminiReply("علاج فوري.");
@@ -2115,11 +2250,13 @@ test("Step 1 primary: CodeCraft diagnoses the leaf and its findings feed the EXI
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Pipeline order: Step 0 crop → Step 1 CodeCraft (primary) → Stage 1 Gemini.
-  assert.equal(urls.length, 3);
+  // Pipeline order: Step 0 crop → Step 1 CodeCraft (primary) → Stage 1 HF LLM
+  // (down) → Stage 2 Gemini.
+  assert.equal(urls.length, 4);
   assert.ok(isDetectUrl(urls[0]));
   assert.equal(urls[1], CODECRAFT_CHAT_URL);
-  assert.ok(isGeminiUrl(urls[2]));
+  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
+  assert.ok(isGeminiUrl(urls[3]));
 
   // OpenAI-compatible round-trip: Bearer key, vision model, the photo itself.
   assert.equal(codecraftAuth, `Bearer ${CODECRAFT_KEY}`);
@@ -2167,6 +2304,8 @@ test("Step 1 fallback: CodeCraft HTTP 402 (payment) fails over to MobileNetV2 + 
     if (isClassifyUrl(String(url))) {
       return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
     }
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
     throw new Error(`unexpected upstream: ${url}`);
   });
@@ -2175,9 +2314,12 @@ test("Step 1 fallback: CodeCraft HTTP 402 (payment) fails over to MobileNetV2 + 
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
 
-  // The backup engine ran: detect → codecraft → classify → gemini.
-  assert.equal(urls.length, 4);
+  // The backup engine ran: detect → codecraft → classify → HF LLM (down) →
+  // Gemini fallback.
+  assert.equal(urls.length, 5);
   assert.ok(isClassifyUrl(urls[2]));
+  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
+  assert.ok(isGeminiUrl(urls[4]));
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(payload.source, "hybrid");
   // The failover is recorded for the operator — and never shown as an error.
@@ -2201,6 +2343,8 @@ test("Step 1 fallback: a CodeCraft timeout fails over to MobileNetV2 + Gemini", 
       classifyCalled = true;
       return Response.json([{ label: "Tomato___Late_blight", score: 0.88 }]);
     }
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
     throw new Error(`unexpected upstream: ${url}`);
   });
@@ -2229,6 +2373,8 @@ test("Step 1 fallback: a non-JSON CodeCraft answer fails over to MobileNetV2", a
       classifyCalled = true;
       return Response.json([{ label: "Tomato___healthy", score: 0.91 }]);
     }
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("النبتة سليمة.");
     throw new Error(`unexpected upstream: ${url}`);
   });
@@ -2246,6 +2392,8 @@ test("Step 1: an unconfigured CodeCraft key leaves the pipeline byte-for-byte un
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isDetectUrl(String(url))) return leafDetection();
     if (isClassifyUrl(String(url))) {
       return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
@@ -2257,7 +2405,7 @@ test("Step 1: an unconfigured CodeCraft key leaves the pipeline byte-for-byte un
   const response = await POST(imageRequest(LEAF_JPEG_B64));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(urls.length, 3);
+  assert.equal(urls.length, 4);
   assert.ok(!urls.some(isCodeCraftUrl), "no CodeCraft request without a key");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.doesNotMatch(warningText(payload), /CodeCraft/);
@@ -2274,6 +2422,8 @@ test("Step 1: the documented placeholder key keeps the CodeCraft engine disabled
       classifyCalled = true;
       return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
     }
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isGeminiUrl(String(url))) return geminiReply("علاج.");
     throw new Error(`unexpected upstream: ${url}`);
   });
@@ -2294,6 +2444,8 @@ test("Step 1: CODECRAFT_BASE_URL overrides the endpoint (slashes and a pasted pa
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
     if (/proxy\.internal\/cc\/v1\/chat\/completions$/.test(String(url))) return codecraftVerdict();
+    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     if (isDetectUrl(String(url))) return leafDetection();
     if (isGeminiUrl(String(url))) return geminiReply("علاج.");
     throw new Error(`unexpected upstream: ${url}`);

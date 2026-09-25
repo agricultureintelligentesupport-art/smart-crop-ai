@@ -7,7 +7,7 @@
  *   1. reads the 23:55 context snapshot (`/api/cron/daily-snapshot`) — or
  *      collects a fresh one when that run was missed, so the day is never
  *      left unpublished;
- *   2. sends the context payload to the LLM provider (Gemini → OpenAI) for
+ *   2. sends the context payload to the LLM provider (OpenAI → Gemini) for
  *      3–5 tailored daily farming tasks as structured JSON — falling back to
  *      the local rule-based generator whenever the AI stage is offline;
  *   3. publishes the set indexed by date (`dailyTasks/{YYYY-MM-DD}/{contextKey}`

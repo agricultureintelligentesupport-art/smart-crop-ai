@@ -16,7 +16,7 @@ largest source of misdiagnosis in the pipeline.
 | Step 0 · detection | Server (route) | `facebook/detr-resnet-50` (COCO DETR-ResNet-50, plant/leaf-labelled boxes only; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
 | Step 1 · classification | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`) | Free tier. |
-| Stages 1–3 · LLM chain | Server (route) | Gemini (image + MobileNetV2 reference) → HF router LLMs → built-in formatter | Existing behaviour. |
+| Stages 1–3 · LLM chain | Server (route) | HF router LLMs (PRIMARY) → Gemini `gemini-3.6-flash` (FALLBACK, image + MobileNetV2 reference) → built-in formatter | Existing behaviour. |
 
 The obsolete fine-tuned PlantDoc detector
 (`suryanshgoel/detr-finetuned-plantdoc`) and the 400-prone vision cascade

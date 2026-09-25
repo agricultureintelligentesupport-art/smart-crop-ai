@@ -6,11 +6,13 @@
  * `priority`, `titleFr`, `subtitleFr`). Provider chain mirrors the assistant
  * route's resilience philosophy, minus the vision stages:
  *
- *   Stage 1 — Google Gemini (`GEMINI_MODEL`, default `gemini-1.5-flash`, then
- *             `gemini-2.0-flash` → `gemini-2.5-flash` on a retired-id 404),
- *             keyed with the full `GEMINI_API_KEY*` pool (rotated on quota).
- *   Stage 2 — OpenAI-compatible chat endpoint (`OPENAI_API_KEY`,
+ *   Stage 1 — OpenAI-compatible chat endpoint (`OPENAI_API_KEY`,
  *             `OPENAI_MODEL`, default `gpt-4o-mini`) with JSON mode.
+ *   Stage 2 — Google Gemini (`GEMINI_MODEL`, default `gemini-3.6-flash`, then
+ *             `gemini-2.5-flash` → `gemini-2.0-flash` on a retired-id 404),
+ *             keyed with the full `GEMINI_API_KEY*` pool (rotated on quota) —
+ *             the SECONDARY FALLBACK: it only runs when the primary OpenAI
+ *             stage is unconfigured or could not answer.
  *
  * Every response is parsed defensively (`extractTasksJson` +
  * `normalizeTasks`) — malformed or too-thin output returns `null` and the
@@ -37,10 +39,13 @@ export type FetchLike = (
 
 export const AI_TIMEOUT_MS = 15_000;
 
-/** Model chain for Gemini — a retired primary 404s onto its successor. */
+/**
+ * Model chain for Gemini — a retired primary 404s onto its successor.
+ * Ordered from the newest generation to the oldest.
+ */
 export function resolveGeminiModels(): string[] {
   const override = (process.env.GEMINI_MODEL ?? "").trim();
-  const chain = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"];
+  const chain = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
   return override ? [override, ...chain.filter((m) => m !== override)] : chain;
 }
 
@@ -244,25 +249,39 @@ async function postJson(
   }
 }
 
-/** Gemini `generateContent` payload — JSON response mode, chain-aware. */
+/**
+ * Gemini `generateContent` payload — JSON response mode, chain-aware: the
+ * answer-first thinking configuration is generation-specific (a wrong
+ * parameter is a hard 400).
+ *   • Gemini 3.x reasons by default and takes `thinkingLevel` (the legacy
+ *     numeric `thinkingBudget` is rejected on this generation);
+ *   • Gemini 2.5 takes a numeric `thinkingBudget` (`0` = skip the reasoning
+ *     pass, answer-first);
+ *   • the 1.5/2.0 generations predate thinking entirely and must receive NO
+ *     `thinkingConfig` at all.
+ */
 function geminiBody(model: string, prompt: string): unknown {
   const base: Record<string, unknown> = {
     systemInstruction: { parts: [{ text: TASK_SYSTEM_PROMPT }] },
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: { responseMimeType: "application/json", temperature: 0.5 },
   };
-  // `thinkingConfig` exists only on the 2.5+ generations (a wrong parameter is
-  // a hard 400 on 1.5/2.0).
-  if (model.includes("2.5") || model.includes("3.")) {
-    (base.generationConfig as Record<string, unknown>).thinkingConfig = { thinkingBudget: 0 };
+  if (/^gemini-3/.test(model)) {
+    (base.generationConfig as Record<string, unknown>).thinkingConfig = {
+      thinkingLevel: "low",
+    };
+  } else if (model.includes("2.5")) {
+    (base.generationConfig as Record<string, unknown>).thinkingConfig = {
+      thinkingBudget: 0,
+    };
   }
   return base;
 }
 
 /**
- * Stage 1 — Google Gemini. Walks models × keys; a 404/model-not-found moves to
- * the next model id, quota (429) rotates to the next key. Returns `null` on
- * any failure.
+ * Stage 2 (FALLBACK) — Google Gemini. Walks models × keys; a
+ * 404/model-not-found moves to the next model id, quota (429) rotates to the
+ * next key. Returns `null` on any failure.
  */
 export async function generateWithGemini(
   prompt: string,
@@ -292,7 +311,7 @@ export async function generateWithGemini(
   return null;
 }
 
-/** Stage 2 — OpenAI-compatible chat completions with JSON mode. */
+/** Stage 1 (PRIMARY) — OpenAI-compatible chat completions with JSON mode. */
 export async function generateWithOpenAI(
   prompt: string,
   cfg: { key: string; model: string },
@@ -322,8 +341,11 @@ export async function generateWithOpenAI(
 }
 
 /**
- * Runs the provider chain for one context. `null` = no AI stage produced a
- * usable set → the caller MUST fall back to `generateRuleTasks`. Never throws.
+ * Runs the provider chain for one context — PRIMARY first, Gemini second:
+ * OpenAI (when `OPENAI_API_KEY` is configured) is attempted before the
+ * Gemini fallback, which only runs when the primary is unconfigured or could
+ * not produce a usable task set. `null` = no AI stage produced a usable set →
+ * the caller MUST fall back to `generateRuleTasks`. Never throws.
  */
 export async function generateAiTasks(
   ctx: DailyContext,
@@ -333,12 +355,13 @@ export async function generateAiTasks(
   if (!fetchImpl) return null;
   const prompt = buildTaskPrompt(ctx);
   try {
-    const gemini = await generateWithGemini(prompt, resolveGeminiApiKeys(), fetchImpl, timeoutMs);
-    if (gemini) return gemini;
     const openai = resolveOpenAi();
     if (openai) {
-      return await generateWithOpenAI(prompt, openai, fetchImpl, timeoutMs);
+      const primary = await generateWithOpenAI(prompt, openai, fetchImpl, timeoutMs);
+      if (primary) return primary;
     }
+    const gemini = await generateWithGemini(prompt, resolveGeminiApiKeys(), fetchImpl, timeoutMs);
+    if (gemini) return gemini;
   } catch {
     /* defensive: the chain must never reject */
   }

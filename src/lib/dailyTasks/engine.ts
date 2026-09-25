@@ -3,7 +3,7 @@
  *
  *   23:55  collectDailyContext()   → full context snapshot (weather + ET₀ +
  *                                   volumes + crop/stage/soil/wilaya)
- *   00:00  generateDailyTaskSet()  → AI (Gemini / OpenAI) task JSON, with the
+ *   00:00  generateDailyTaskSet()  → AI (OpenAI / Gemini) task JSON, with the
  *                                   local rule-based generator as the
  *                                   never-fail fallback
  *          publishTaskSet()        → indexed by date (`YYYY-MM-DD`) in RTDB
@@ -37,7 +37,7 @@ export interface GenerationResult {
 }
 
 /**
- * Builds the day's task set for one context: AI first (Gemini → OpenAI),
+ * Builds the day's task set for one context: AI first (OpenAI → Gemini),
  * rule-based fallback last. Guaranteed to return 3–5 valid tasks — the rule
  * engine is deterministic and pure. Never throws.
  */

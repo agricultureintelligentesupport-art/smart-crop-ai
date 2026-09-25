@@ -5,7 +5,7 @@
  *   POST `{ wilayaCode, crop, soil, areaHa, system, date? }`
  *        → collects the full context snapshot (Open-Meteo 24 h forecast →
  *          ET₀ + net irrigation m³ + watering window + crop/stage/soil/wilaya)
- *        → AI generation (Gemini → OpenAI) with the rule-based fallback,
+ *        → AI generation (OpenAI → Gemini) with the rule-based fallback,
  *        → publishes the set under `dailyTasks/{YYYY-MM-DD}/{contextKey}`
  *        → returns `{ date, context, tasks, source, generatedAt, warnings }`.
  *
