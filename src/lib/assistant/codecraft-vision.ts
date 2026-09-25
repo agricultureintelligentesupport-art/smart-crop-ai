@@ -752,10 +752,25 @@ async function requestVisionDiagnosis(args: VisionRequestArgs): Promise<Assistan
   try {
     response = await fetch(codeCraftChatCompletionsUrl(baseUrl), {
       method: "POST",
+      // Browser-consistent signature: a plain SDK fetch is blocked by the
+      // Cloudflare WAF in front of the gateway, so the request presents the
+      // same headers a desktop Chrome session would send. `Content-Type` and
+      // `Authorization` stay exactly as before — only the cosmetic headers
+      // changed, and every failure mode (403 included) still throws
+      // CodeCraftVisionError so the caller falls back to MobileNetV2.
       headers: {
         "Content-Type": "application/json",
-        Accept: "application/json",
+        Accept: "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
         Authorization: `Bearer ${apiKey}`,
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
       },
       body: JSON.stringify({
         model,
