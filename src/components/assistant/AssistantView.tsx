@@ -27,6 +27,7 @@ import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
+import { analyzeImageClientSideCodeCraft } from "@/lib/assistant/codecraft-client";
 import type {
   AssistantPreprocessing,
   AssistantResponseBody,
@@ -245,14 +246,39 @@ export default function AssistantView() {
 
       let errorMessage = t.chat.error;
       try {
+        const context = buildContext();
+
+        // Best-effort CLIENT-SIDE CodeCraft pre-check (direct browser fetch,
+        // 8 s hard deadline). It resolves to a diagnosis or to `null` — it
+        // never throws by contract, but the inner catch is belt-and-braces:
+        // on ANY failure (CORS block, timeout, network, quota) we ignore it
+        // and fall through to the standard /api/assistant POST below, which
+        // runs the untouched server pipeline as the primary fail-safe.
+        let clientDiagnosis: AssistantDiagnosis | null = null;
+        if (image) {
+          try {
+            clientDiagnosis = await analyzeImageClientSideCodeCraft(
+              image.data,
+              image.mimeType,
+              { lang, profile: context },
+            );
+          } catch {
+            clientDiagnosis = null;
+          }
+        }
+
         const res = await fetch("/api/assistant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: text,
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
-            context: buildContext(),
+            context,
             history,
+            // Rides along for a valid pre-check verdict only; the route
+            // ignores it today and the server-side vision pipeline still
+            // produces the diagnosis that wins in the response.
+            ...(clientDiagnosis ? { clientDiagnosis } : {}),
           }),
         });
         if (!res.ok) {
@@ -286,7 +312,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, messages, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, lang, messages, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {

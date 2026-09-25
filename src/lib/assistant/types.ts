@@ -68,6 +68,15 @@ export interface AssistantRequestBody {
   image?: AssistantImagePayload;
   context?: AssistantContext;
   history?: AssistantHistoryTurn[];
+  /**
+   * Best-effort BROWSER pre-check verdict (client-side CodeCraft direct
+   * fetch — see `@/lib/assistant/codecraft-client`). Purely informational:
+   * the server-side pipeline runs untouched as the PRIMARY failsafe (its
+   * own Step 1 dual-engine vision always produces the diagnosis shipped in
+   * the response). The current route does not read this field; it is
+   * carried forward-compatible and never required.
+   */
+  clientDiagnosis?: AssistantDiagnosis | null;
 }
 
 /** One raw candidate from the vision classifier. */

@@ -85,8 +85,11 @@ const FALLBACK_CONFIDENCE = 0.7;
  * Placeholder values ship in `.env.local` and `.env.example`. Treating them
  * as "not configured" keeps the engine off until a real key is pasted —
  * instead of burning a 20 s round-trip on a doomed request every time.
+ * Exported so the browser pre-check (`codecraft-client.ts`) applies the
+ * exact same "placeholder = disabled" contract to
+ * `NEXT_PUBLIC_CODECRAFT_API_KEY`.
  */
-const PLACEHOLDER_KEY_PATTERN =
+export const PLACEHOLDER_KEY_PATTERN =
   /^(your[_-]?key[_-]?here|changeme|change[_-]?me|replace[_-]?me|xxx+|<[^>]*>|\{\{.*\}\})$/i;
 
 /**
@@ -242,8 +245,10 @@ export function resolveCodeCraftVisionModels(): string[] {
  * CodeCraft is asked for DATA, not prose: the assistant's persona, tone and
  * formatting live in the shared system prompt of `/api/assistant`
  * (unchanged) and are applied by the LLM stage that writes the reply.
+ * Exported so the browser pre-check (`codecraft-client.ts`) sends the exact
+ * same structured-extraction instruction — one schema, one source of truth.
  */
-const VISION_SYSTEM_PROMPT = `You are a plant pathology vision module. You inspect a single photo of a crop leaf or plant and return STRUCTURED DIAGNOSTIC DATA as one JSON object. You never write reports, greetings, or prose outside the JSON.`;
+export const VISION_SYSTEM_PROMPT = `You are a plant pathology vision module. You inspect a single photo of a crop leaf or plant and return STRUCTURED DIAGNOSTIC DATA as one JSON object. You never write reports, greetings, or prose outside the JSON.`;
 
 /** Output language for the Arabic-first assistant (French on request). */
 function outputLanguage(profile?: AssistantContext | null): "ar" | "fr" {
@@ -253,8 +258,10 @@ function outputLanguage(profile?: AssistantContext | null): "ar" | "fr" {
 /**
  * Builds the text part that accompanies the image: the requested JSON schema,
  * the farming context (crop, wilaya, role) and the output language.
+ * Exported so the browser pre-check (`codecraft-client.ts`) asks for the
+ * identical verdict shape the server engine normalises.
  */
-function buildVisionPrompt(profile?: AssistantContext | null): string {
+export function buildVisionPrompt(profile?: AssistantContext | null): string {
   const lang = outputLanguage(profile);
   const langName = lang === "fr" ? "French" : "Modern Standard Arabic (فصحى مبسطة)";
   const contextParts: string[] = [];
@@ -431,7 +438,7 @@ function tryParseBalancedObject(source: string): unknown | null {
 /* ------------------------------------------------------------------ */
 
 /** The (loose) shape CodeCraft is asked to answer with. */
-interface CodeCraftVerdict {
+export interface CodeCraftVerdict {
   is_plant?: unknown;
   crop?: unknown;
   crop_ar?: unknown;
