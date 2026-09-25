@@ -576,7 +576,7 @@ async function runCodeCraftVisionStage(
  * quota bucket); the fallback ids below still catch a retired or mistyped
  * override.
  */
-const GEMINI_MODEL_DEFAULT = "gemini-1.5-flash-latest";
+const GEMINI_MODEL_DEFAULT = "gemini-3.6-flash";
 
 /**
  * Stage 1 model chain entry. `thinking` carries the per-generation

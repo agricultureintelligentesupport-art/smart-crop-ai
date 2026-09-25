@@ -50,7 +50,7 @@ export const CODECRAFT_BASE_URL_DEFAULT = "https://codecraftapi.com/v1";
  * (a 404 or an unknown-model 400 on the primary walks to it). Override the
  * whole chain with `CODECRAFT_VISION_MODEL` (comma-separated ids).
  */
-export const CODECRAFT_VISION_MODELS = ["gpt-4o", "gpt-4o-mini"] as const;
+export const CODECRAFT_VISION_MODELS = ["gemini-3.6-flash", "gpt-4o-mini"] as const;
 
 /**
  * Per-model deadline. Vision round-trips on a full-resolution leaf photo are

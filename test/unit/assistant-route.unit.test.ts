@@ -20,7 +20,7 @@ const GEMINI_TIMEOUT_MS = 18_000;
 
 /** Stage-1 model chain, in order — must mirror the route's resolveGeminiModels(). */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-1.5-flash-latest",
+  "gemini-3.6-flash",
   "gemini-2.0-flash-exp",
   "gemini-2.5-flash",
 ] as const;
@@ -125,7 +125,7 @@ const geminiHttpError = (status: number, message: string) =>
 
 /**
  * Google's 404 for a retired / mistyped model id — the exact production
- * failure signature (`models/gemini-1.5-flash-latest is not found for API version
+ * failure signature (`models/gemini-3.6-flash is not found for API version
  * v1beta…`) that must walk the Gemini model chain.
  */
 const geminiModelNotFound = (model: string) =>
@@ -355,7 +355,7 @@ test("keys are read per request, not when the route module loads", async () => {
 /*  Stage 1 — Google Gemini primary LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }", async () => {
+test("Stage 1 answers from gemini-3.6-flash with 200 { source: \"llm\" }", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -379,7 +379,7 @@ test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }"
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -392,7 +392,7 @@ test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }"
   assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig, undefined);
 });
 
-test("Stage 1 keeps the gemini-1.5-flash-latest endpoint when the API key rotates", async () => {
+test("Stage 1 keeps the gemini-3.6-flash endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -411,7 +411,7 @@ test("Stage 1 keeps the gemini-1.5-flash-latest endpoint when the API key rotate
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`,
     ),
   );
 });
@@ -1014,7 +1014,7 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
   assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
 });
 
-test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash-latest default", async () => {
+test("a blank GEMINI_MODEL falls back to the gemini-3.6-flash default", async () => {
   configureKeys();
   process.env.GEMINI_MODEL = "   ";
   const urls: string[] = [];
@@ -2123,7 +2123,7 @@ test("Step 1 primary: CodeCraft diagnoses the leaf and its findings feed the EXI
 
   // OpenAI-compatible round-trip: Bearer key, vision model, the photo itself.
   assert.equal(codecraftAuth, `Bearer ${CODECRAFT_KEY}`);
-  assert.equal(codecraftBody.model, "gpt-4o");
+  assert.equal(codecraftBody.model, "gemini-3.6-flash");
   assert.match(codeCraftImageUrl(codecraftBody), /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/);
 
   // SAME contract as MobileNetV2 — the UI card, the source and the crop

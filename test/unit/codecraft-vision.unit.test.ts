@@ -195,19 +195,19 @@ test("sanitizeBaseUrl strips Markdown syntax, brackets, parentheses, trailing sl
   assert.equal(sanitizeBaseUrl("(no url here)"), CODECRAFT_BASE_URL_DEFAULT);
 });
 
-test("model chain: default gpt-4o → gpt-4o-mini, overridable and deduplicated", () => {
-  assert.deepEqual(resolveCodeCraftVisionModels(), ["gpt-4o", "gpt-4o-mini"]);
+test("model chain: default gemini-3.6-flash → gpt-4o-mini, overridable and deduplicated", () => {
+  assert.deepEqual(resolveCodeCraftVisionModels(), ["gemini-3.6-flash", "gpt-4o-mini"]);
   process.env.CODECRAFT_VISION_MODEL = " gpt-4o-mini , custom/vision , gpt-4o-mini ";
   assert.deepEqual(resolveCodeCraftVisionModels(), ["gpt-4o-mini", "custom/vision"]);
   process.env.CODECRAFT_VISION_MODEL = "  ";
-  assert.deepEqual(resolveCodeCraftVisionModels(), ["gpt-4o", "gpt-4o-mini"]);
+  assert.deepEqual(resolveCodeCraftVisionModels(), ["gemini-3.6-flash", "gpt-4o-mini"]);
 });
 
 /* ------------------------------------------------------------------ */
 /*  Request shape (OpenAI chat-completions format)                     */
 /* ------------------------------------------------------------------ */
 
-test("sends an OpenAI-compatible vision request: bearer auth, gpt-4o, data-URL image", async () => {
+test("sends an OpenAI-compatible vision request: bearer auth, gemini-3.6-flash, data-URL image", async () => {
   process.env.CODECRAFT_API_KEY = ` ${CODECRAFT_KEY} `;
   const capture: RequestCapture[] = [];
   mockCodeCraft(() => chatCompletion(verdictJson()), { capture });
@@ -217,7 +217,7 @@ test("sends an OpenAI-compatible vision request: bearer auth, gpt-4o, data-URL i
   assert.equal(capture.length, 1);
   assert.equal(capture[0]?.url, CODECRAFT_URL);
   assert.equal(capture[0]?.auth, `Bearer ${CODECRAFT_KEY}`);
-  assert.equal(capture[0]?.body.model, "gpt-4o");
+  assert.equal(capture[0]?.body.model, "gemini-3.6-flash");
 
   const messages = capture[0]?.body.messages ?? [];
   assert.equal(messages.length, 2);
@@ -271,7 +271,7 @@ test("maps the verdict onto the shared diagnosis contract (label, Arabic, severi
   assert.equal(diagnosis.diseaseAr, "اللفحة المبكرة");
   assert.equal(diagnosis.healthy, false);
   assert.equal(Math.round(diagnosis.confidence * 100), 92);
-  assert.equal(diagnosis.model, "codecraft/gpt-4o");
+  assert.equal(diagnosis.model, "codecraft/gemini-3.6-flash");
   assert.equal(diagnosis.engine, "codecraft");
   // CodeCraft's extra structured findings ride along.
   assert.equal(diagnosis.severity, "متوسطة");
@@ -382,13 +382,13 @@ test("a 404 unknown model walks the chain to gpt-4o-mini", async () => {
     const body = JSON.parse(String(init.body ?? "{}")) as { model?: string };
     models.push(body.model ?? "");
     if (models.length === 1) {
-      return Response.json({ error: "Model gpt-4o not found" }, { status: 404 });
+      return Response.json({ error: "Model gemini-3.6-flash not found" }, { status: 404 });
     }
     return chatCompletion(verdictJson());
   });
 
   const diagnosis = await analyzePlantImageWithCodeCraft(LEAF_B64, context());
-  assert.deepEqual(models, ["gpt-4o", "gpt-4o-mini"]);
+  assert.deepEqual(models, ["gemini-3.6-flash", "gpt-4o-mini"]);
   assert.equal(diagnosis.model, "codecraft/gpt-4o-mini");
 });
 
