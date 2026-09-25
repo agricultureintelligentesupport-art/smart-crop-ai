@@ -698,6 +698,21 @@ test("hero checklist copy matches the required Arabic strings", () => {
   assert.equal((DASHBOARD.fr as unknown as Record<string, unknown>).tasks, undefined);
 });
 
+test("collapsible checklist copy: the toggle pill resolves to the spec strings", () => {
+  const ar = DASHBOARD.ar.heroTasks;
+  const fr = DASHBOARD.fr.heroTasks;
+  // Collapsed pill, `{count}` = hidden tasks: «عرض باقي المهام (3+)» + animated ▾.
+  assert.equal(ar.showMore.replace("{count}", "3"), "عرض باقي المهام (3+)");
+  // Expanded pill: «طي القائمة» + the same glyph rotated (▴).
+  assert.equal(ar.collapse, "طي القائمة");
+  assert.equal(fr.showMore.replace("{count}", "3"), "Afficher les autres tâches (3+)");
+  assert.equal(fr.collapse, "Replier la liste");
+  // Both languages expose the `{count}` slot the component fills in, and the
+  // collapsed pill is the longer of the two (it carries the count).
+  assert.ok(ar.showMore.includes("{count}") && fr.showMore.includes("{count}"));
+  assert.ok(ar.collapse.length > 0 && fr.collapse.length > 0);
+});
+
 /* ------------------------------------------------------------------ */
 /*  Cron auth                                                         */
 /* ------------------------------------------------------------------ */

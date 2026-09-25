@@ -41,6 +41,34 @@ refresh-proof, and rolls over with the date. A progress bar + the
 footer carries the publish stamp
 `✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00`.
 
+## Collapsible checklist (mobile space)
+
+`HeroTasksChecklist` renders **collapsed by default**: the section header and
+the day's first task — always the generator's highest-priority one — plus a
+faint `mt-2 h-3` row sliver under it, masked with a bottom gradient
+(`mask-image: linear-gradient(to bottom, #000, transparent)`). At 360–414 px
+that keeps the hero decision card roughly one task tall instead of four, so the
+calculator and the field cards stay near the fold.
+
+- **Toggle**: a full-width glass pill (≥ 44 px tall) at the bottom of the card.
+  Collapsed it reads `عرض باقي المهام (3+) ▾` (`{count}` = hidden tasks, live
+  from `tasks.length - 1`); expanded it reads `طي القائمة ▴`. The chevron is the
+  `▾` glyph rotated 180° with a spring — no icon swap, so the shape morphs.
+  `aria-expanded` + `aria-controls` point at the animated wrapper (which stays
+  mounted in both states, so the reference never dangles).
+- **Motion**: the revealed block animates `height: 0 → auto` with
+  `duration: 0.3` and `AnimatePresence`; rows fade/slide in with a small
+  stagger (≤ 120 ms) and carry `layout`, so the sections below the hero are
+  pushed down smoothly. Under `prefers-reduced-motion` the height step is
+  replaced by a 120 ms fade (the `layout` prop is dropped) and `initial` is
+  suppressed — no travel, no stagger.
+- **State**: the open/closed flag is component-local (`useState`) — collapsed is
+  the default on every visit, so the card never grows back on its own. Checked
+  state is untouched by either state: it lives in the per-day done map above,
+  so a task keeps its tick through collapse, expand, reload and the day's cache
+  resolution. Task data, order and the card's numbers are never recomputed by
+  the toggle.
+
 ## API
 
 - `POST /api/daily-tasks` — body `{ wilayaCode, crop, soil, areaHa, system, date? }`

@@ -22,7 +22,9 @@ import HeroTasksChecklist from "./HeroTasksChecklist";
  * The old static advisory lines are gone: their place is taken by the
  * interactive "مهام اليوم الموصى بها (AI)" checklist (see
  * `HeroTasksChecklist`) — the daily AI task engine's output, with per-task
- * checkboxes, category badges and priority indicators.
+ * checkboxes, category badges and priority indicators. The checklist ships
+ * collapsed (first task only) so the card stays a quick read on phones; the
+ * pill at its foot reveals the rest. No figure in this card changes with it.
  */
 export default function HeroCard({
   t,

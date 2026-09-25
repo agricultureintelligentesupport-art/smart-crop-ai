@@ -318,6 +318,14 @@ export interface DashboardCopy {
     checkAria: string;
     /** Card footer — the AI publish stamp of the daily workflow. */
     updatedAi: string;
+    /**
+     * Collapsible checklist (mobile space saver): the pill under the first
+     * task. `{count}` = how many tasks are hidden («عرض باقي المهام (3+) ▾»).
+     * The chevron itself is an animated glyph, not part of the string.
+     */
+    showMore: string;
+    /** Expanded twin of `showMore` — the pill collapses the list again. */
+    collapse: string;
   };
   footer: {
     disclaimer: string;
@@ -605,6 +613,8 @@ const AR: DashboardCopy = {
     priorities: { high: "عالية", normal: "عادية" },
     checkAria: "تعليم المهمة كمنجزة: {title}",
     updatedAi: "✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00",
+    showMore: "عرض باقي المهام ({count}+)",
+    collapse: "طي القائمة",
   },
   footer: {
     disclaimer: "كل الأرقام تقديرية لدعم القرار ولا تعوّض القياس الميداني أو تشخيص مهندس زراعي.",
@@ -927,6 +937,8 @@ const FR: DashboardCopy = {
     priorities: { high: "Haute", normal: "Normale" },
     checkAria: "Marquer la tâche comme accomplie : {title}",
     updatedAi: "✨ Mises à jour par l'IA - aujourd'hui 00:00",
+    showMore: "Afficher les autres tâches ({count}+)",
+    collapse: "Replier la liste",
   },
   footer: {
     disclaimer: "Toutes les valeurs sont des estimations d'aide à la décision, sans remplacer la mesure terrain ni l'avis d'un agronome.",
