@@ -20,8 +20,8 @@ const GEMINI_TIMEOUT_MS = 18_000;
 
 /** Stage-1 model chain, in order — must mirror the route's resolveGeminiModels(). */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-1.5-flash",
-  "gemini-2.0-flash",
+  "gemini-1.5-flash-latest",
+  "gemini-2.0-flash-exp",
   "gemini-2.5-flash",
 ] as const;
 
@@ -125,7 +125,7 @@ const geminiHttpError = (status: number, message: string) =>
 
 /**
  * Google's 404 for a retired / mistyped model id — the exact production
- * failure signature (`models/gemini-1.5-flash is not found for API version
+ * failure signature (`models/gemini-1.5-flash-latest is not found for API version
  * v1beta…`) that must walk the Gemini model chain.
  */
 const geminiModelNotFound = (model: string) =>
@@ -355,7 +355,7 @@ test("keys are read per request, not when the route module loads", async () => {
 /*  Stage 1 — Google Gemini primary LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async () => {
+test("Stage 1 answers from gemini-1.5-flash-latest with 200 { source: \"llm\" }", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -379,7 +379,7 @@ test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -392,7 +392,7 @@ test("Stage 1 answers from gemini-1.5-flash with 200 { source: \"llm\" }", async
   assert.equal(parseGeminiBody(init).generationConfig?.thinkingConfig, undefined);
 });
 
-test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", async () => {
+test("Stage 1 keeps the gemini-1.5-flash-latest endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -411,7 +411,7 @@ test("Stage 1 keeps the gemini-1.5-flash endpoint when the API key rotates", asy
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${key}`,
     ),
   );
 });
@@ -969,7 +969,7 @@ test("GEMINI_MODEL overrides the Stage-1 primary model id (trimmed, single round
   configureKeys();
   // Pin the alternate stable id with its generous free-tier quota; the
   // padding proves the value is trimmed before use.
-  process.env.GEMINI_MODEL = " gemini-2.0-flash ";
+  process.env.GEMINI_MODEL = " gemini-2.0-flash-exp ";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -983,18 +983,18 @@ test("GEMINI_MODEL overrides the Stage-1 primary model id (trimmed, single round
   assert.equal(payload.source, "llm");
   // Exactly one round-trip against the override — the default primary is
   // skipped and the override is not duplicated as its own fallback.
-  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash"]);
+  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash-exp"]);
 });
 
 test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", async () => {
   configureKeys();
-  process.env.GEMINI_MODEL = "gemini-2.0-flash";
+  process.env.GEMINI_MODEL = "gemini-2.0-flash-exp";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
-      return model === "gemini-2.0-flash"
+      return model === "gemini-2.0-flash-exp"
         ? geminiModelNotFound(model)
         : geminiReply("اسقِ في الصباح الباكر.");
     }
@@ -1008,13 +1008,13 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
   // The retired override 404s → the next fallback id answers (the override
   // is deduplicated out of the fallback list, so no doubled attempt).
   assert.deepEqual(urls.map(requestedGeminiModel), [
-    "gemini-2.0-flash",
+    "gemini-2.0-flash-exp",
     "gemini-2.5-flash",
   ]);
   assert.match(warningText(payload), /Stage 1 Gemini unavailable/);
 });
 
-test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash default", async () => {
+test("a blank GEMINI_MODEL falls back to the stable gemini-1.5-flash-latest default", async () => {
   configureKeys();
   process.env.GEMINI_MODEL = "   ";
   const urls: string[] = [];
@@ -2302,6 +2302,29 @@ test("Step 1: CODECRAFT_BASE_URL overrides the endpoint (slashes and a pasted pa
   const response = await POST(imageRequest(LEAF_JPEG_B64));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
+  assert.equal(urls[1], "https://proxy.internal/cc/v1/chat/completions");
+  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
+  assert.equal(payload.source, "hybrid");
+});
+
+test("Step 1: a Markdown-wrapped CODECRAFT_BASE_URL is sanitised before the request", async () => {
+  configureKeys();
+  configureCodeCraft();
+  process.env.CODECRAFT_BASE_URL =
+    "[CodeCraft](https://proxy.internal/cc/v1)";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    urls.push(String(url));
+    if (/proxy\.internal\/cc\/v1\/chat\/completions$/.test(String(url))) return codecraftVerdict();
+    if (isDetectUrl(String(url))) return leafDetection();
+    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  // Only the inner URL survives Markdown brackets/parentheses + no doubled path.
   assert.equal(urls[1], "https://proxy.internal/cc/v1/chat/completions");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(payload.source, "hybrid");
