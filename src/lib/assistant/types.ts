@@ -76,6 +76,15 @@ export interface DiagnosisCandidate {
   score: number;
 }
 
+/**
+ * Which vision engine produced a {@link AssistantDiagnosis}.
+ *   • `plantvillage-hf` — Hugging Face MobileNetV2 PlantVillage classifier;
+ *   • `codecraft`       — CodeCraft vision API (gpt-4o / gpt-4o-mini).
+ * Optional: diagnoses produced before the CodeCraft engine existed carry no
+ * engine tag, and every consumer treats the field as informational only.
+ */
+export type AssistantVisionEngine = "plantvillage-hf" | "codecraft";
+
 /** Structured result of the PlantVillage vision step. */
 export interface AssistantDiagnosis {
   /** Raw model label, e.g. "Tomato___Late_blight". */
@@ -91,6 +100,27 @@ export interface AssistantDiagnosis {
   model: string;
   /** Top candidates (max 3), highest first. */
   candidates: DiagnosisCandidate[];
+
+  /* ------------------------------------------------------------------ */
+  /*  Optional enrichment — additive, never required by any consumer.    */
+  /*  Emitted by the CodeCraft vision engine, which reports more than a   */
+  /*  plain label: severity and an immediate treatment plan.             */
+  /* ------------------------------------------------------------------ */
+
+  /** Vision engine that produced this diagnosis. */
+  engine?: AssistantVisionEngine;
+  /** Severity wording in the user's language ("متوسطة", "moyenne"…). */
+  severity?: string | null;
+  /** Share of the plant/leaf already affected, in [0, 100]. */
+  severityPercent?: number | null;
+  /** Symptoms the engine observed on the photo. */
+  symptoms?: string[] | null;
+  /** Immediate treatment steps, in priority order. */
+  treatment?: string[] | null;
+  /** Prevention measures for the next seasons. */
+  prevention?: string[] | null;
+  /** Short free-form agronomic remark. */
+  notes?: string | null;
 }
 
 export type AssistantSource =
