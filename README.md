@@ -125,17 +125,23 @@ can now be live.
   progress, diagnosis with confidence, severity and numbered field steps.
 - **Vegetation index**: NDVI reading, 8-week sparkline, stress share.
 - **Daily AI tasks (hero checklist)**: the hero decision card's lower half is
-  the interactive **"مهام اليوم الموصى بها (AI)"** checklist — it replaces the
-  old static advice lines and the standalone tasks card. Each task carries an
-  animated check + strike-through, a category badge (💧 سقي / 🛡️ وقاية /
-  🚜 تسميد/صيانة) and a High/Normal priority indicator; a progress bar and a
-  `🎉` mini-badge celebrate a fully checked day, and the card footer carries
-  the AI publish stamp (`✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم
-  00:00`). Sets are generated daily by the 23:55 → 00:00 scheduled workflow
+  the interactive **"✨ مهام اليوم الذكية"** tray — it replaces the old static
+  advice lines and the standalone tasks card. The whole hero is ONE container
+  with two zones (metrics, then the tray) joined by a single hairline; no nested
+  cards, no inner boxes. The tray ships **collapsed** (the first,
+  highest-priority task stays on screen; the rest wait behind the integrated
+  glass handle `عرض باقي المهام (n+) ⚡`), so the card stays a quick read on
+  phones — tapping the handle springs the height open and flips it to
+  `طي القائمة`. Each task row is borderless: animated check + strike-through,
+  a quiet category tint (💧 سقي / 🛡️ وقاية / 🚜 تسميد/صيانة) and a High/Normal
+  priority chip; the header row carries the live counter and a thin progress
+  rail, the `🎉` badge celebrates a fully checked day, and the card footer
+  carries the AI publish stamp (`✨ تم تحديث المهام بواسطة الذكاء الاصطناعي -
+  اليوم 00:00`). Sets are generated daily by the 23:55 → 00:00 scheduled workflow
   (`/api/cron/daily-snapshot` + `/api/cron/daily-tasks`, AI with a never-empty
   rule-based fallback) and cached per `YYYY-MM-DD` in LocalStorage (and RTDB
-  when configured); checked state survives refreshes for the day. See
-  [`docs/daily-tasks.md`](docs/daily-tasks.md).
+  when configured); checked state survives collapses and refreshes for the day.
+  See [`docs/daily-tasks.md`](docs/daily-tasks.md).
 
 Values are labelled as decision-support estimates, not measurements.
 

@@ -683,9 +683,12 @@ test("publish/read round-trip without RTDB is a safe no-op", async () => {
 /*  Copy pins (the spec's exact UI strings)                           */
 /* ------------------------------------------------------------------ */
 
-test("hero checklist copy matches the required Arabic strings", () => {
+test("hero task tray copy matches the required Arabic strings", () => {
   const ar = DASHBOARD.ar.heroTasks;
-  assert.equal(ar.title, "مهام اليوم الموصى بها (AI)");
+  // Crisp header row: the sparkle title + the count (the long description was
+  // removed with the card-in-card redesign).
+  assert.equal(ar.title, "✨ مهام اليوم الذكية");
+  assert.equal(ar.progress.replace("{done}", "0").replace("{total}", "5"), "0/5 منجزة");
   assert.equal(ar.updatedAi, "✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00");
   assert.equal(ar.categories.irrigation, "💧 سقي");
   assert.equal(ar.categories.protection, "🛡️ وقاية");
@@ -696,6 +699,25 @@ test("hero checklist copy matches the required Arabic strings", () => {
   // The static advice block and the old standalone tasks card copy are gone.
   assert.equal((DASHBOARD.ar as unknown as Record<string, unknown>).advice, undefined);
   assert.equal((DASHBOARD.fr as unknown as Record<string, unknown>).tasks, undefined);
+});
+
+test("collapsible tray handle resolves to the spec strings", () => {
+  const ar = DASHBOARD.ar.heroTasks;
+  const fr = DASHBOARD.fr.heroTasks;
+  // Collapsed handle, `{count}` = hidden tasks: «عرض باقي المهام (3+)» + the ⚡
+  // and animated ─→ ⌄ chevron the component appends.
+  assert.equal(ar.showMore.replace("{count}", "3"), "عرض باقي المهام (3+)");
+  // Expanded pill: «طي القائمة» + the same glyph rotated (▴).
+  assert.equal(ar.collapse, "طي القائمة");
+  assert.equal(fr.showMore.replace("{count}", "3"), "Afficher les autres tâches (3+)");
+  assert.equal(fr.collapse, "Replier la liste");
+  // Both languages expose the `{count}` slot the component fills in, and the
+  // collapsed handle is the longer of the two (it carries the count).
+  assert.ok(ar.showMore.includes("{count}") && fr.showMore.includes("{count}"));
+  assert.ok(ar.collapse.length > 0 && fr.collapse.length > 0);
+  // The redesign dropped the descriptive subtitle key entirely (no dead copy).
+  assert.equal((ar as unknown as Record<string, unknown>).subtitle, undefined);
+  assert.equal((fr as unknown as Record<string, unknown>).subtitle, undefined);
 });
 
 /* ------------------------------------------------------------------ */

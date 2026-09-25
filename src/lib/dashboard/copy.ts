@@ -304,9 +304,9 @@ export interface DashboardCopy {
    * the old static advice lines and the standalone tasks card).
    */
   heroTasks: {
+    /** Tray header row — the crisp `✨ …` title (no long description). */
     title: string;
-    subtitle: string;
-    /** `{done}` `{total}` — progress counter beside the bar. */
+    /** `{done}` `{total}` — counter beside the thin progress rail. */
     progress: string;
     /** `{done}` `{total}` — celebratory badge when every task is checked. */
     allDone: string;
@@ -318,6 +318,14 @@ export interface DashboardCopy {
     checkAria: string;
     /** Card footer — the AI publish stamp of the daily workflow. */
     updatedAi: string;
+    /**
+     * Collapsible checklist (mobile space saver): the pill under the first
+     * task. `{count}` = how many tasks are hidden («عرض باقي المهام (3+)»).
+     * The ⚡ glyph and the chevron are rendered by the component, not stored.
+     */
+    showMore: string;
+    /** Expanded twin of `showMore` — the pill collapses the list again. */
+    collapse: string;
   };
   footer: {
     disclaimer: string;
@@ -597,14 +605,15 @@ const AR: DashboardCopy = {
     note: "يحاكي هذا الرسم طبقة الأقمار الصناعية؛ المصدر الحقيقي يُربط عبر Sentinel-2.",
   },
   heroTasks: {
-    title: "مهام اليوم الموصى بها (AI)",
-    subtitle: "خطة يومية يولّدها الذكاء الاصطناعي من طقس قطعتك ومحصولها.",
-    progress: "{done}/{total} مهام منجزة",
+    title: "✨ مهام اليوم الذكية",
+    progress: "{done}/{total} منجزة",
     allDone: "{done}/{total} اكتملت مهام اليوم 🎉",
     categories: { irrigation: "💧 سقي", protection: "🛡️ وقاية", fertilization: "🚜 تسميد/صيانة" },
     priorities: { high: "عالية", normal: "عادية" },
     checkAria: "تعليم المهمة كمنجزة: {title}",
     updatedAi: "✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00",
+    showMore: "عرض باقي المهام ({count}+)",
+    collapse: "طي القائمة",
   },
   footer: {
     disclaimer: "كل الأرقام تقديرية لدعم القرار ولا تعوّض القياس الميداني أو تشخيص مهندس زراعي.",
@@ -915,9 +924,8 @@ const FR: DashboardCopy = {
     note: "Ce graphique simule la couche satellite ; la source réelle arrive via Sentinel-2.",
   },
   heroTasks: {
-    title: "Tâches du jour recommandées (AI)",
-    subtitle: "Plan quotidien généré par l'IA à partir de la météo et de la culture de votre parcelle.",
-    progress: "{done}/{total} tâches accomplies",
+    title: "✨ Tâches du jour intelligentes",
+    progress: "{done}/{total} accomplies",
     allDone: "{done}/{total} tâches du jour accomplies 🎉",
     categories: {
       irrigation: "💧 Irrigation",
@@ -927,6 +935,8 @@ const FR: DashboardCopy = {
     priorities: { high: "Haute", normal: "Normale" },
     checkAria: "Marquer la tâche comme accomplie : {title}",
     updatedAi: "✨ Mises à jour par l'IA - aujourd'hui 00:00",
+    showMore: "Afficher les autres tâches ({count}+)",
+    collapse: "Replier la liste",
   },
   footer: {
     disclaimer: "Toutes les valeurs sont des estimations d'aide à la décision, sans remplacer la mesure terrain ni l'avis d'un agronome.",

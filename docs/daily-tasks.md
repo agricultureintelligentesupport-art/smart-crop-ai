@@ -41,6 +41,59 @@ refresh-proof, and rolls over with the date. A progress bar + the
 footer carries the publish stamp
 `✨ تم تحديث المهام بواسطة الذكاء الاصطناعي - اليوم 00:00`.
 
+## Seamless hero architecture (one container, two zones)
+
+The hero decision card is **one** master container — `app-hero`: a
+`rounded-3xl` deep-emerald → teal gradient (`#065f46 → #064e3b → #042f2e`) with
+one soft light source top-corner, a hairline inner highlight, a light emerald
+glow underneath and the faded row texture. Nothing inside it is a card:
+
+| Zone | Contents | Surface |
+| --- | --- | --- |
+| 1 · metrics | `110.0 m³` headline, `5.0 mm` / `55,100 L/ha`, the window tile and the per-hectare tile | translucent washes — `bg-white/5 border-white/10`, hover to `bg-white/10 border-white/20` |
+| seam | one hairline `<div data-hero-seam class="my-3 border-t border-white/10">` | no second radius, no second card |
+| 2 · task tray | header row, task rows, expand handle, publish stamp | no fill, no ring, no border of its own |
+
+`HeroTasksChecklist` therefore renders a plain `<section>` (labelled by its own
+`✨ مهام اليوم الذكية` heading) and each task row is a borderless wash
+(`bg-white/10 hover:bg-white/15`, radius only). The e2e spec asserts this
+structurally: the tray computes `background: rgba(0,0,0,0)` + `box-shadow: none`
++ zero border widths, every row is borderless, and there is exactly one 1px
+seam inside the card.
+
+## Task tray: compact header + collapsible rows
+
+Header row (one line, both edges used):
+
+- start edge: `✨ مهام اليوم الذكية` — the sparkle is part of the string; the old
+  descriptive subtitle key was deleted with the nested-card layout;
+- end edge: the live counter (`0/5 منجزة`, or `4/4 اكتملت مهام اليوم 🎉` when the
+  day is complete) plus a minimal `h-1.5 w-16` rail (`bg-white/20` track,
+  emerald fill, `role="progressbar"` carries the same label).
+
+Rows: checkbox → title + quiet category tint → priority chip on the trailing
+edge (solid amber `عالية`, ghost `عادية`). Rows are **not** nested cards.
+
+Collapsed by default: the day's first — always highest-priority — task is
+pinned and the rest wait behind the integrated handle.
+
+- **Handle**: `bg-white/10 backdrop-blur-md hover:bg-white/20`, hairline
+  `border-white/15` glass pill attached to the tray's foot (`≥ 44 px` touch
+  target). Collapsed it reads `عرض باقي المهام (3+) ⚡` + a `ChevronDown` that
+  rotates on open; expanded only the chevron/label swap, so the pill reads
+  `طي القائمة`. `{count}` is live from `tasks.length - 1`; `aria-expanded` +
+  `aria-controls` point at the animated wrapper, which stays mounted in both
+  states so the reference never dangles.
+- **Motion**: `AnimatePresence` height `0 → auto` with the tray's one spring
+  (`stiffness: 300, damping: 30`); revealed rows fade/slide in with a small
+  stagger (≤ 120 ms). Under `prefers-reduced-motion` the height step becomes a
+  120 ms fade and `initial`/stagger are suppressed.
+- **State**: the open/closed flag is component-local (`useState`) — collapsed is
+  the default on every visit. Checked state is untouched by either state: it
+  lives in the per-day done map above, so a task keeps its tick through
+  collapse, expand, reload and the day's cache resolution. Task data, order and
+  the card's numbers are never recomputed by the toggle.
+
 ## API
 
 - `POST /api/daily-tasks` — body `{ wilayaCode, crop, soil, areaHa, system, date? }`
