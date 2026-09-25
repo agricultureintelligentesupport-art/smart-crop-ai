@@ -10,6 +10,7 @@ import {
   resolveCodeCraftApiKey,
   resolveCodeCraftBaseUrl,
   resolveCodeCraftVisionModels,
+  sanitizeBaseUrl,
   toAssistantDiagnosis,
   toPlantVillageLabel,
   tryAnalyzePlantImageWithCodeCraft,
@@ -166,6 +167,32 @@ test("base URL: documented default, override, and normalisation", () => {
   // Blank override → documented default.
   process.env.CODECRAFT_BASE_URL = "   ";
   assert.equal(resolveCodeCraftBaseUrl(), CODECRAFT_BASE_URL_DEFAULT);
+});
+
+test("sanitizeBaseUrl strips Markdown syntax, brackets, parentheses, trailing slashes and &gt;", () => {
+  const clean = "https://codecraftapi.com/v1";
+
+  // Markdown link syntax: only the inner URL survives.
+  assert.equal(sanitizeBaseUrl(`[CodeCraft](${clean})`), clean);
+  assert.equal(sanitizeBaseUrl(`[${clean}](${clean})`), clean);
+  // Square brackets and parentheses around a bare URL.
+  assert.equal(sanitizeBaseUrl(`[${clean}]`), clean);
+  assert.equal(sanitizeBaseUrl(`(${clean})`), clean);
+  // The rendered `&gt;` tail of a &gt;-escaped copy/paste is dropped.
+  assert.equal(sanitizeBaseUrl(`${clean}&gt;`), clean);
+  assert.equal(sanitizeBaseUrl(`${clean}&gt; extra text`), clean);
+
+  // Trailing slashes are removed.
+  assert.equal(sanitizeBaseUrl(`${clean}/`), clean);
+  assert.equal(sanitizeBaseUrl(`${clean}///`), clean);
+  // A pasted `/chat/completions` suffix (with trailing slashes) never doubles.
+  assert.equal(sanitizeBaseUrl(`${clean}/chat/completions/`), clean);
+
+  // No valid http(s) URL → the plain default, never markdown.
+  assert.equal(sanitizeBaseUrl(""), CODECRAFT_BASE_URL_DEFAULT);
+  assert.equal(sanitizeBaseUrl("   "), CODECRAFT_BASE_URL_DEFAULT);
+  assert.equal(sanitizeBaseUrl("[CodeCraft API]"), CODECRAFT_BASE_URL_DEFAULT);
+  assert.equal(sanitizeBaseUrl("(no url here)"), CODECRAFT_BASE_URL_DEFAULT);
 });
 
 test("model chain: default gpt-4o → gpt-4o-mini, overridable and deduplicated", () => {

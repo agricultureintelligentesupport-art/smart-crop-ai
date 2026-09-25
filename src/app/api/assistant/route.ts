@@ -71,8 +71,8 @@
  *         detection succeeded, the full frame otherwise.
  *         Env override: `HF_VISION_MODEL` (single id) replaces the default.
  *
- *   Stage 1 — Google Gemini (`gemini-1.5-flash` — overridable with
- *     `GEMINI_MODEL` — then `gemini-2.0-flash` → `gemini-2.5-flash` when an
+ *   Stage 1 — Google Gemini (`gemini-1.5-flash-latest` — overridable with
+ *     `GEMINI_MODEL` — then `gemini-2.0-flash-exp` → `gemini-2.5-flash` when an
  *     id is retired) — PRIMARY LLM: REST call to
  *     https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=$GEMINI_API_KEY
  *     authenticated with the server-only Gemini key pool: `GEMINI_API_KEY`
@@ -82,10 +82,10 @@
  *     Arabic ~200-word answer regularly needs 10–15 s on a cold Flash model,
  *     so the previous 9 s window aborted healthy generations and pushed
  *     traffic onto the weaker fallbacks). The primary defaults to the stable
- *     `gemini-1.5-flash` id — its free tier carries the generous
+ *     `gemini-1.5-flash-latest` id — its free tier carries the generous
  *     ~1,500 RPD / 15 RPM allowance, while the preview generations
  *     (`gemini-3.5-flash`…) are throttled to ~20 RPD — and `GEMINI_MODEL`
- *     pins a different primary (e.g. `gemini-2.0-flash`) without a code
+ *     pins a different primary (e.g. `gemini-2.0-flash-exp`) without a code
  *     change. Google still retires model generations on a fast cadence, so
  *     the model ids form a chain: a 404 / model-not-found walks to the next
  *     id within the remaining budget, while key/safety/network/timeout
@@ -570,13 +570,13 @@ async function runCodeCraftVisionStage(
  * The stable Gemini id Stage 1 defaults to. The preview generations
  * (`gemini-3.5-flash` and friends) are throttled to a strict ~20 RPD
  * free-tier quota, which normal usage exhausts almost immediately; the
- * stable `gemini-1.5-flash` id carries the generous free-tier allowance
+ * stable `gemini-1.5-flash-latest` id carries the generous free-tier allowance
  * (~1,500 RPD / 15 RPM). `GEMINI_MODEL` overrides the primary at request
- * time (e.g. to pin `gemini-2.0-flash`, which shares the same free-tier
+ * time (e.g. to pin `gemini-2.0-flash-exp`, which shares the same free-tier
  * quota bucket); the fallback ids below still catch a retired or mistyped
  * override.
  */
-const GEMINI_MODEL_DEFAULT = "gemini-1.5-flash";
+const GEMINI_MODEL_DEFAULT = "gemini-1.5-flash-latest";
 
 /**
  * Stage 1 model chain entry. `thinking` carries the per-generation
@@ -597,7 +597,7 @@ interface GeminiModel {
  * never kills the stage while a successor can still answer.
  */
 const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
-  { id: "gemini-2.0-flash" },
+  { id: "gemini-2.0-flash-exp" },
   { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
 ];
 
@@ -1151,7 +1151,7 @@ function geminiText(payload: GeminiPayload | null): string {
 /**
  * Message fragments Google returns when the *model id* is the problem rather
  * than the request: a retired or mistyped id answers
- * `404 — models/gemini-1.5-flash is not found for API version v1beta, or is
+ * `404 — models/gemini-1.5-flash-latest is not found for API version v1beta, or is
  * not supported for generateContent`. Together with an HTTP 404 these are the
  * only Stage-1 failures that walk the Gemini model chain — invalid keys
  * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
@@ -1297,7 +1297,7 @@ interface GeminiResult {
  * POSTs to
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
  * walking the per-request chain from {@link resolveGeminiModels} in order —
- * starting at `gemini-1.5-flash` (or the `GEMINI_MODEL` override).
+ * starting at `gemini-1.5-flash-latest` (or the `GEMINI_MODEL` override).
  *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
@@ -2164,8 +2164,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const userContent = buildUserContent(message, context, diagnosis, Boolean(classifyImage), isFirstTurn);
 
   // ---- Stage 1: Google Gemini (PRIMARY LLM) -------------------------
-  // gemini-1.5-flash or the GEMINI_MODEL override (→ 2.0-flash → 2.5-flash
-  // on a retired-id 404) via
+  // gemini-1.5-flash-latest or the GEMINI_MODEL override (→ 2.0-flash-exp →
+  // 2.5-flash on a retired-id 404) via
   // the Generative Language REST API, keyed with the full Gemini key pool
   // (GEMINI_API_KEY + GEMINI_API_KEYS + numbered GEMINI_API_KEY_N — rotated
   // on 429 / RESOURCE_EXHAUSTED / quota) and bounded by a shared 18 s

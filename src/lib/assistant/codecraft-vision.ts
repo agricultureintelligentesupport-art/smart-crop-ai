@@ -168,22 +168,52 @@ export function resolveCodeCraftApiKey(): string | null {
 }
 
 /**
- * Normalise a configured base URL: no trailing slashes, and a
- * `/chat/completions` suffix (if pasted by mistake) is stripped so the
- * endpoint is never doubled.
+ * Extracts the first valid `http`/`https` URL from a (possibly messy)
+ * configured value. The match anchors on `http(s)://` and runs until the
+ * first whitespace, closing parenthesis `)`, closing bracket `]` or the
+ * angle `>` of an autolink — so Markdown link syntax (`[text](url)`,
+ * `[url]`, `(url)`, `<url>`) never contributes to the result. A copied
+ * HTML-escaped `&gt;` tail is dropped separately below.
  */
-function normalizeBaseUrl(raw: string): string {
-  let url = raw.trim().replace(/\/+$/, "");
-  url = url.replace(/\/chat\/completions$/i, "");
-  return url.replace(/\/+$/, "");
+const BASE_URL_PATTERN = /https?:\/\/[^\s\)\]>]+/;
+
+/** Strips a copied HTML `&gt;` entity (and anything after it) from the end. */
+const HTML_ENTITY_TAIL_PATTERN = /&gt;.*$/;
+
+/** Strips a run of trailing slashes (`/+$`). */
+const TRAILING_SLASHES_PATTERN = /\/+$/;
+
+/**
+ * Sanitise a configured CodeCraft base URL:
+ *
+ *  1. the raw value (already trimmed by {@link readEnv}) is trimmed again;
+ *  2. a valid `http`/`https` URL is extracted — Markdown brackets `[]`,
+ *     parentheses `()` and autolink/`&gt;` wrappers never end up in the
+ *     result;
+ *  3. any trailing slashes (`/+$`) are removed;
+ *  4. the plain literal {@link CODECRAFT_BASE_URL_DEFAULT}
+ *     (`https://codecraftapi.com/v1` — no markdown brackets or parentheses)
+ *     is used as the fallback when the value holds no valid URL.
+ *
+ * A pasted `/chat/completions` suffix is also stripped so the endpoint is
+ * never doubled.
+ */
+export function sanitizeBaseUrl(raw: string): string {
+  const match = BASE_URL_PATTERN.exec((raw ?? "").trim());
+  if (!match) return CODECRAFT_BASE_URL_DEFAULT;
+  const cleaned = match[0]
+    .replace(HTML_ENTITY_TAIL_PATTERN, "")
+    .replace(TRAILING_SLASHES_PATTERN, "")
+    .replace(/\/chat\/completions$/i, "")
+    .replace(TRAILING_SLASHES_PATTERN, "");
+  return cleaned ? cleaned : CODECRAFT_BASE_URL_DEFAULT;
 }
 
-/** Base URL actually used: `CODECRAFT_BASE_URL` or the documented default. */
+/** Base URL actually used: `CODECRAFT_BASE_URL` or the plain default. */
 export function resolveCodeCraftBaseUrl(): string {
   const raw = readEnv("CODECRAFT_BASE_URL");
   if (!raw) return CODECRAFT_BASE_URL_DEFAULT;
-  const normalized = normalizeBaseUrl(raw);
-  return normalized || CODECRAFT_BASE_URL_DEFAULT;
+  return sanitizeBaseUrl(raw);
 }
 
 /** `https://codecraftapi.com/v1` → `https://codecraftapi.com/v1/chat/completions`. */
@@ -844,7 +874,7 @@ export async function analyzePlantImageWithCodeCraft(
   }
 
   const image = normalizeImageInput(imageBase64, context.mimeType ?? "image/jpeg");
-  const baseUrl = context.baseUrl?.trim() ? normalizeBaseUrl(context.baseUrl) : resolveCodeCraftBaseUrl();
+  const baseUrl = context.baseUrl?.trim() ? sanitizeBaseUrl(context.baseUrl) : resolveCodeCraftBaseUrl();
   const models = resolveCodeCraftVisionModels();
   const failures: string[] = [];
 
