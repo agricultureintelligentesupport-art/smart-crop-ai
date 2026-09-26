@@ -32,6 +32,11 @@
  *     outcome is reported in the new `preprocessing` response field (crop
  *     window as a normalised `[xMin, yMin, xMax, yMax]` tuple) and in
  *     `warnings[]` when the stage could not run at all.
+ *     USER-GUIDED CROP BYPASS: when the client already isolated the leaf
+ *     in the interactive pre-submit cropper and sends
+ *     `image.isUserCropped: true`, Step 0 is skipped entirely (status
+ *     `user-cropped`) and the farmer's exact tensor routes straight to
+ *     Step 1 — no detection round-trip, no server re-crop.
  *     Vercel-friendly by design: no model weights ever touch the function
  *     (the detector runs on Hugging Face's free serverless CPU tier) and
  *     sharp adds only a few tens of ms of decode/crop work; the whole stage
@@ -461,6 +466,21 @@ async function runLeafDetectionStage(
   warnings: string[],
 ): Promise<{ preprocessing: AssistantPreprocessing; image: AssistantImagePayload }> {
   const original: AssistantImagePayload = { data: image.data, mimeType: image.mimeType };
+
+  // User-Guided Crop BYPASS: the farmer already isolated the leaf in the
+  // pre-submit interactive cropper (stroke/box + Smart Snap) and confirmed
+  // the preview, so the server-side detector is skipped entirely — the
+  // user's selection is authoritative and this exact tensor travels to
+  // Step 1 with NO detection round-trip and NO server re-crop.
+  if (image.isUserCropped === true) {
+    console.log(
+      "[Step 0: UserCrop Bypass] image.isUserCropped=true — detection skipped, Step 1 receives the user's exact crop.",
+    );
+    return {
+      preprocessing: { status: "user-cropped", detector: null, box: null, durationMs: 0 },
+      image: original,
+    };
+  }
 
   if (!huggingfaceKey) {
     // Same configuration gap Step 1 reports; Step 0 stays silent in
@@ -2104,8 +2124,11 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Step 0: leaf Detection & Cropping (when image attached). An open-source
   // object detector localises the leaf, the photo is cropped with sharp and
   // ONLY the crop continues down the pipeline — background noise (hands,
-  // soil, pots) can no longer reach the disease classifier. Non-fatal by
-  // construction: every failure degrades to the untouched original frame.
+  // soil, pots) can no longer reach the disease classifier. A user-confirmed
+  // crop (`image.isUserCropped: true`, drawn in the pre-submit cropper)
+  // BYPASSES this stage — the farmer's own selection is authoritative.
+  // Non-fatal by construction: every failure degrades to the untouched
+  // original frame.
   let preprocessing: AssistantPreprocessing | null = null;
   /** What actually reaches Step 1: the Step 0 crop or the original image. */
   let classifyImage: AssistantImagePayload | null = image ?? null;

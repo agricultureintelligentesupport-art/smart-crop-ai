@@ -31,6 +31,15 @@ export interface AssistantImagePayload {
   data: string;
   /** e.g. "image/jpeg". */
   mimeType: string;
+  /**
+   * User-Guided Crop flag: `true` when the client already isolated the leaf
+   * in the interactive cropper (drawn stroke / bounding box + smart snap)
+   * and confirmed it in the pre-submit preview. The route then BYPASSES the
+   * Step 0 server-side detector entirely and routes this exact tensor
+   * straight to Step 1 (MobileNetV2) — the farmer's own selection is
+   * authoritative, so no server crop may override it.
+   */
+  isUserCropped?: boolean;
 }
 
 /**
@@ -46,6 +55,10 @@ export interface AssistantPreprocessing {
    *                 threshold, so the automated Smart Fallback Crop (HSV
    *                 green-dominant box, else a centre-focused 80 % crop)
    *                 trimmed desks/hands/walls before the classifier;
+   * user-cropped  — the farmer isolated the leaf in the interactive
+   *                 pre-submit cropper (`image.isUserCropped`); Step 0
+   *                 detection is BYPASSED and this exact tensor goes
+   *                 straight to the classifier;
    * no-leaf       — no detector box AND even the fallback crop was
    *                 impossible (degenerate frame) — the original image was
    *                 used (legacy status, normally unreachable);
@@ -54,7 +67,13 @@ export interface AssistantPreprocessing {
    * skipped       — no Hugging Face token is configured, so detection cannot
    *                 run (mirrors the Step 1 skip).
    */
-  status: "cropped" | "smart-fallback" | "no-leaf" | "unavailable" | "skipped";
+  status:
+    | "cropped"
+    | "smart-fallback"
+    | "user-cropped"
+    | "no-leaf"
+    | "unavailable"
+    | "skipped";
   /** Detector model id, when a detection call was attempted. */
   detector: string | null;
   /**

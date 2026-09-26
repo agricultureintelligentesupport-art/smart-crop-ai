@@ -87,16 +87,36 @@ to 4 decimals) in `preprocessing.box`.
 | Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, original classified. |
 | Payload is not object-detection-shaped | Treated as "this id can't serve detection" → next id in the chain. |
 | No detection above threshold / useless box | **Smart Fallback Crop** → `status: "smart-fallback"` (a **normal** outcome — no warning): the green-mask or centre-focused 80 % crop is classified instead of the raw frame. |
+| `image.isUserCropped: true` (pre-submit cropper confirmed) | **User-Guided Crop bypass** → `status: "user-cropped"`: Step 0 detection is skipped entirely and the farmer's exact tensor (byte-identical) goes straight to Step 1. |
 | Even the fallback crop impossible (degenerate frame) | Legacy `status: "no-leaf"` (normal — no warning), original classified. |
 
 The outcome travels to the client in `AssistantResponseBody.preprocessing`
-(`cropped | smart-fallback | no-leaf | unavailable | skipped`, detector id,
+(`cropped | smart-fallback | user-cropped | no-leaf | unavailable | skipped`, detector id,
 normalised `[xMin, yMin, xMax, yMax]` crop box, wall
 time). The assistant UI shows a two-phase thinking label
 ("تحديد الورقة واقتصاص الخلفية…" → "تحليل الصورة وتشخيص المرض…") while the
 longer pipeline runs, and a small ✂️ note on the answer when a crop was
-applied (detected or automatic fallback) — the farmer always knows what
-happened to their photo.
+applied (detected, automatic fallback or user-guided) — the farmer always
+knows what happened to their photo.
+
+## Interactive User-Guided Crop (pre-submit, client-side)
+
+Attaching/capturing a photo opens the **interactive cropper modal**
+(`ImageCropModal.tsx`) *before* anything is sent:
+
+1. **Draw a stroke or drag a bounding box** over the leaf (pointer/touch,
+   `touch-action: none`, 44 px targets, RTL chrome).
+2. **Smart Snap** (`src/lib/assistant/user-crop.ts`, pure + unit-tested):
+   the path's bounding box auto-expands outward while the probe band just
+   outside each edge is ≥ 30 % HSV-green — the selection hugs the foliage
+   and stops at desks/hands/walls. A bare tap is widened to a minimum
+   12 % box first.
+3. **Cropped Leaf Preview** ("معاينة الورقة المحددة") renders the exact
+   isolated tensor that will be evaluated, with two actions:
+   **إعادة التحديد / Redo Crop** (resets the canvas) and
+   **تأكيد وإرسال للتحليل / Confirm & Analyze** (proceeds with the query).
+4. Confirm sends the crop with `image.isUserCropped: true` → the server
+   bypasses Step 0 and routes it directly to MobileNetV2 (Step 1).
 
 ## Why not client-side detection?
 
@@ -121,11 +141,12 @@ self-hosted endpoint, and `leaf-detect.ts` is already reusable client-side
 ## Local verification
 
 ```bash
-npm run test:unit    # includes test/unit/leaf-detect.unit.test.ts and the
+npm run test:unit    # includes test/unit/leaf-detect.unit.test.ts,
+                     # user-crop.unit.test.ts (Smart Snap maths) and the
                      # Step 0 route suites (crop reaches the classifier,
                      # smart fallback crop (green mask + centre 80 %),
-                     # outage degrades, chain walk, env override, keyless
-                     # skip)
+                     # isUserCropped bypass, outage degrades, chain
+                     # walk, env override, keyless skip)
 npm run lint
 npm run build
 ```

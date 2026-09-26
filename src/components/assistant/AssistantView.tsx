@@ -40,6 +40,7 @@ import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { APP_SHELL } from "@/lib/app/copy";
 import { useLang } from "@/lib/use-lang";
 import DiagnosisCard from "./DiagnosisCard";
+import ImageCropModal, { type CroppedLeafImage } from "./ImageCropModal";
 import Markdown from "./Markdown";
 
 /* ------------------------------------------------------------------ */
@@ -52,6 +53,8 @@ interface PendingImage {
   /** Raw base64 (no prefix) sent to the API. */
   data: string;
   mimeType: string;
+  /** Set once the farmer confirmed the interactive crop (Step 0 bypass). */
+  isUserCropped?: boolean;
 }
 
 interface ChatMessage {
@@ -126,6 +129,11 @@ export default function AssistantView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  /**
+   * Image waiting in the pre-submit cropper: attaching/capturing a photo
+   * opens the interactive modal FIRST, and only a confirmed crop leaves it.
+   */
+  const [croppingImage, setCroppingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
   /** Whether the in-flight request carries a photo (drives the thinking label). */
   const [busyWithImage, setBusyWithImage] = useState(false);
@@ -240,8 +248,10 @@ export default function AssistantView() {
       setBusy(true);
       setBusyWithImage(image !== null);
       // Photo requests start over at the detection phase of the thinking
-      // indicator (Step 0 → classification), every single time.
-      setVisionPhase(0);
+      // indicator (Step 0 → classification), every single time — except a
+      // user-confirmed crop, which BYPASSES Step 0 server-side, so the
+      // label starts at the classification phase right away.
+      setVisionPhase(image?.isUserCropped ? 1 : 0);
 
       let errorMessage = t.chat.error;
       try {
@@ -250,7 +260,15 @@ export default function AssistantView() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: text,
-            image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
+            image: image
+              ? {
+                  data: image.data,
+                  mimeType: image.mimeType,
+                  // User-Guided Crop: the server skips Step 0 detection and
+                  // routes this exact tensor straight to MobileNetV2.
+                  ...(image.isUserCropped ? { isUserCropped: true } : {}),
+                }
+              : undefined,
             context: buildContext(),
             history,
           }),
@@ -308,13 +326,24 @@ export default function AssistantView() {
       }
       try {
         setComposerError(null);
-        setPendingImage(await prepareImage(file));
-        textareaRef.current?.focus();
+        // Attach → interactive cropper opens BEFORE anything is sent; only
+        // a confirmed crop reaches the composer/query.
+        setCroppingImage(await prepareImage(file));
       } catch {
         setComposerError(t.composer.imageUnreadable);
       }
     },
     [t.composer.imageTooLarge, t.composer.imageUnreadable],
+  );
+
+  /** Confirm & Analyze: keep the crop attached and proceed with the query. */
+  const onCropConfirm = useCallback(
+    (cropped: CroppedLeafImage) => {
+      setCroppingImage(null);
+      setPendingImage(cropped);
+      void send(draft, cropped);
+    },
+    [draft, send],
   );
 
   const onChip = useCallback(
@@ -444,6 +473,15 @@ export default function AssistantView() {
                     >
                       <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-amber-600" />
                       {t.chat.cropFallback}
+                    </p>
+                  )}
+                  {msg.author === "assistant" && msg.preprocessing?.status === "user-cropped" && (
+                    <p
+                      className="mb-2 flex items-start gap-1.5 rounded-2xl bg-teal-50/80 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-teal-800 ring-1 ring-teal-200/70"
+                      title={t.cropper.title}
+                    >
+                      <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-teal-600" />
+                      {t.chat.cropUser}
                     </p>
                   )}
                   {msg.author === "assistant" && msg.preprocessing?.status === "no-leaf" && (
@@ -606,6 +644,19 @@ export default function AssistantView() {
       </footer>
 
       <TabBar active="assistant" lang={lang} />
+
+      {/* Pre-submit interactive leaf cropper (opens on attach/capture). */}
+      <AnimatePresence>
+        {croppingImage && (
+          <ImageCropModal
+            key="leaf-crop-modal"
+            image={croppingImage}
+            copy={t.cropper}
+            onCancel={() => setCroppingImage(null)}
+            onConfirm={onCropConfirm}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

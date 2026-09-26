@@ -2085,6 +2085,49 @@ test("Step 0 Smart Fallback Crop follows the green-dominant region, not the fram
   assert.doesNotMatch(warningText(payload), /Step 0/);
 });
 
+test("Step 0 bypass: isUserCropped skips detection — the user's exact pixels reach MobileNetV2", async () => {
+  configureKeys();
+  const detectUrls: string[] = [];
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) return geminiReply("تم تحليل قصتك.");
+    if (isDetectUrl(String(url))) {
+      detectUrls.push(String(url));
+      return leafDetection();
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(
+    new NextRequest("http://localhost/api/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "شخّص هذا القص",
+        image: { data: LEAF_JPEG_B64, mimeType: "image/jpeg", isUserCropped: true },
+      }),
+    }),
+  );
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & {
+    preprocessing?: PreprocessingLike;
+  };
+  // Step 0 never ran — not a single detector round-trip.
+  assert.deepEqual(detectUrls, []);
+  // The EXACT user tensor (byte-identical — no server re-encode/re-crop)
+  // is what the classifier received.
+  assert.equal(classifyBody, LEAF_JPEG_B64);
+  assert.equal(payload.preprocessing?.status, "user-cropped");
+  assert.equal(payload.preprocessing?.detector, null);
+  assert.equal(payload.preprocessing?.box, null);
+  // The bypass is a normal outcome, not a pipeline warning.
+  assert.doesNotMatch(warningText(payload), /Step 0/);
+  assert.equal(payload.source, "hybrid");
+});
+
 test("Step 0 outage (detector loading) degrades to the full frame with a warning", async () => {
   configureKeys();
   let classifyBody = "";
