@@ -145,7 +145,7 @@ can now be live.
 
 Values are labelled as decision-support estimates, not measurements.
 
-## The leaf diagnosis pipeline (Detection & Cropping → dual-engine classification)
+## The leaf diagnosis pipeline (Detection & Cropping → MobileNetV2 classification)
 
 `/api/assistant` processes an attached photo through a staged, fail-proof
 vision pipeline before the LLM stages run:
@@ -163,32 +163,21 @@ photo (base64)
   │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
   │    frame — the outcome lands in `preprocessing` on the API response.
   │
-  ├─ Step 1 · PRIMARY vision engine — CodeCraft (OpenAI-compatible)
-  │    POST {CODECRAFT_BASE_URL}/chat/completions (default
-  │    https://codecraftapi.com/v1), model gpt-4o → gpt-4o-mini, through the
-  │    dedicated service `src/lib/assistant/codecraft-vision.ts`
-  │    (`analyzePlantImageWithCodeCraft(imageBase64, context)`). It returns
-  │    STRUCTURED diagnostic data — disease name, severity, immediate
-  │    treatment, prevention, symptoms — normalised into the SAME
-  │    `AssistantDiagnosis` contract as the classifier below, so the agent's
-  │    persona, system prompt, tone and response format are untouched: the
-  │    findings simply become the reference diagnosis the LLM stage writes
-  │    the reply from.
-  │    Server-only secrets (CODECRAFT_API_KEY / CODECRAFT_BASE_URL — no
-  │    NEXT_PUBLIC_ prefix); a missing OR placeholder key disables the engine
-  │    instantly, without a request.
-  │
-  ├─ Step 1 · FALLBACK vision engine — PlantVillage classifier, MobileNetV2
+  ├─ Step 1 · vision classification — PlantVillage classifier, MobileNetV2
   │    (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification, the
-  │    single clean default; overridable with HF_VISION_MODEL) on the same
-  │    free router; receives ONLY the Step 0 crop when detection succeeded,
-  │    the full frame otherwise. Runs whenever CodeCraft is unconfigured or
-  │    failed (invalid/unpaid key, HTTP 401/402/403/429, timeout, network
-  │    error, non-JSON answer, "not a plant") — silently, behind a try/catch:
-  │    the user never sees an error, a broken UI or a code exception.
+  │    single clean default; overridable with HF_VISION_MODEL) on the free
+  │    Hugging Face router; receives ONLY the Step 0 crop when detection
+  │    succeeded, the full frame otherwise. STREAMLINED: the former CodeCraft
+  │    vision engine (the OpenAI-compatible gateway at codecraftapi.com) was
+  │    REMOVED from the chain — its WAF 403 stalls and the extra network
+  │    round-trip only added latency, so every photo now goes DIRECTLY to
+  │    MobileNetV2 with no intermediate vision call. A vision outage stays
+  │    non-fatal: the degradation is logged in `warnings[]` and the request
+  │    continues to the LLM stages.
   │
   └─ Stages 1–3 · Stage 1 = PRIMARY LLM — the Hugging Face Inference
-     Providers router (open Qwen chain, Bearer HUGGINGFACE_API_KEY / HF_TOKEN)
+     Providers router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507,
+     Bearer HUGGINGFACE_API_KEY / HF_TOKEN)
      → Stage 2 = FALLBACK LLM — Google Gemini (gemini-3.6-flash → 2.5-flash →
      2.0-flash-exp on a retired-id 404), reached ONLY when the primary HF
      stage failed, timed out or has no token. Gemini inspects the image itself
@@ -200,11 +189,11 @@ photo (base64)
      GEMINI_API_KEY_N — rotated on 429 / RESOURCE_EXHAUSTED / quota.
 ```
 
-Vision is therefore DUAL-ENGINE: CodeCraft (gpt-4o class) is tried first and
-the pre-existing Hugging Face + Gemini path is the safety net. The swap is
-invisible to the agent: both engines emit the same `AssistantDiagnosis`, and
-the extra CodeCraft findings (severity, immediate treatment) are appended to
-the very same reference block the LLM has always received.
+Vision is therefore SINGLE-ENGINE: every photo is classified by the
+known-good MobileNetV2 PlantVillage checkpoint and the diagnosis is handed to
+the dual-tiered LLM chain — Hugging Face first (Qwen/Qwen3-4B-Instruct-2507),
+Google Gemini as the seamless fallback. The CodeCraft gateway and its
+`CODECRAFT_*` environment variables are gone; leftover values are ignored.
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
 
