@@ -118,6 +118,64 @@ const geminiReply = (text = "اسقِ في الصباح الباكر عند ال
     ],
   });
 
+/* ------------------------------------------------------------------ */
+/*  Step 1 image analysis — Gemini JSON + MobileNetV2 classification    */
+/* ------------------------------------------------------------------ */
+
+/** A complete, well-formed `AnalysisData` object (Gemini's happy path). */
+const ANALYSIS_FIXTURE = {
+  plant_type: "الطماطم",
+  disease_detected: true,
+  disease_name: "اللفحة المتأخرة",
+  confidence: 0.82,
+  affected_parts: ["الأوراق السفلية"],
+  severity: "medium",
+  symptoms_observed: ["بقع بنية داكنة", "ذبول الحواف"],
+  notes: "الإصابة متقدمة على الأوراق السفلية.",
+} as const;
+
+/** Merge overrides into the healthy `AnalysisData` fixture. */
+const analysisFixture = (overrides: Record<string, unknown> = {}) => ({
+  ...ANALYSIS_FIXTURE,
+  ...overrides,
+});
+
+/**
+ * A `models.generateContent` answer carrying a JSON `AnalysisData` object —
+ * what Gemini returns for the Step 1 image analysis under
+ * `responseMimeType: "application/json"`.
+ */
+const geminiAnalysis = (data: unknown = ANALYSIS_FIXTURE) =>
+  Response.json({
+    candidates: [
+      {
+        content: { role: "model", parts: [{ text: JSON.stringify(data) }] },
+        finishReason: "STOP",
+      },
+    ],
+  });
+
+/** A Gemini answer whose text is NOT a usable `AnalysisData` object. */
+const geminiAnalysisRaw = (text: string) =>
+  Response.json({
+    candidates: [
+      { content: { role: "model", parts: [{ text }] }, finishReason: "STOP" },
+    ],
+  });
+
+/** MobileNetV2's raw PlantVillage classification payload. */
+const mobilenetReply = (
+  label = "Tomato___Late_blight",
+  score = 0.91,
+  extra: { label: string; score: number }[] = [],
+) =>
+  Response.json([{ label, score }, ...extra]);
+
+/** Mirrors a text reply that is grounded in `ANALYSIS_FIXTURE`. */
+const GROUNDED_REPLY =
+  "اللفحة المتأخرة ظهرت بوضوح على أوراق الطماطم السفلية. أنصح برشّ مبيد نحاسي وإزالة الأوراق المصابة مع السقي عند القاعدة.";
+
+
 /** Answer with no usable text (e.g. token budget exhausted by reasoning). */
 const geminiEmpty = () =>
   Response.json({ candidates: [{ content: { parts: [] }, finishReason: "STOP" }] });
@@ -162,6 +220,8 @@ interface GeminiRequestBody {
     temperature?: number;
     topP?: number;
     maxOutputTokens?: number;
+    responseMimeType?: string;
+    responseSchema?: { required?: string[]; type?: string };
     thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: string };
   };
 }
@@ -172,12 +232,23 @@ const parseGeminiBody = (init: RequestInit): GeminiRequestBody =>
 const geminiSystemText = (body: GeminiRequestBody) =>
   (body.systemInstruction?.parts ?? []).map((part) => part.text ?? "").join("");
 
-const geminiUserText = (body: GeminiRequestBody) =>
-  (body.contents?.[0]?.parts ?? []).map((part) => part.text ?? "").join("");
+/** The text of the LAST user turn (history turns precede it). */
+const geminiUserText = (body: GeminiRequestBody) => {
+  const turn = body.contents?.[body.contents.length - 1];
+  return (turn?.parts ?? []).map((part) => part.text ?? "").join("");
+};
 
-/** The inlineData image part the hybrid pipeline attaches to the Gemini turn. */
-const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined =>
-  (body.contents?.[0]?.parts ?? []).find((part) => part.inlineData !== undefined)?.inlineData;
+/**
+ * The inlineData image part. ONLY the Step 1 image-analysis call may attach
+ * one — the Step 3 text fallback is a formatter and must receive no pixels.
+ */
+const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined => {
+  for (const turn of body.contents ?? []) {
+    const found = (turn.parts ?? []).find((part) => part.inlineData !== undefined)?.inlineData;
+    if (found) return found;
+  }
+  return undefined;
+};
 
 /* ------------------------------------------------------------------ */
 /*  Stage 1 (HF LLM chat-completions — the PRIMARY LLM) mock helpers   */
@@ -293,6 +364,7 @@ interface DiagnosisLike {
   labelAr: string;
   healthy: boolean;
   confidence: number;
+  severity?: string | null;
   candidates: { label: string; score: number }[];
 }
 
@@ -300,6 +372,9 @@ interface AssistantPayload {
   reply: string;
   diagnosis: DiagnosisLike | null;
   source: string;
+  analysisSource?: string | null;
+  textSource?: string | null;
+  preprocessing?: { status: string; box: [number, number, number, number] | null } | null;
   warnings?: string[];
 }
 
@@ -414,7 +489,7 @@ test("chain order: Gemini is consulted ONLY after the primary LLM failed", async
     urls[1],
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${GEMINI_KEY}`,
   );
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
 });
 
 /* ------------------------------------------------------------------ */
@@ -440,7 +515,7 @@ test("Stage 2 answers from gemini-3.6 with 200 { source: \"llm\" }", async () =>
   assert.equal(payload.diagnosis, null);
   assert.equal(payload.source, "llm");
   // The only degradation is the skipped primary LLM stage.
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable — HUGGINGFACE_API_KEY is not configured/);
 
   // A single round-trip: the fallback LLM. Neither the HF primary chain nor
   // the vision model is touched when Stage 2 answers.
@@ -535,7 +610,7 @@ test("Stage 2 waits through every dynamically numbered Gemini key before Stage 3
   assert.deepEqual(geminiKeys, ["key-one", "key-two", "key-three", "key-four"]);
   assert.match(warningText(payload), /all Gemini API keys failed/);
   assert.match(warningText(payload), /HTTP 429/);
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
 });
 
 test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merge trimmed, deduplicated and rotation-ordered", async () => {
@@ -573,77 +648,482 @@ test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merg
   assert.doesNotMatch(JSON.stringify(payload), /alpha|gamma|beta|delta/);
 });
 
-test("Fallback A: MobileNetV2 failure → Gemini inspects the raw image independently (image still attached)", async () => {
+/* ------------------------------------------------------------------ */
+/*  STEP 1 — IMAGE ANALYSIS: Gemini PRIMARY → MobileNetV2 FALLBACK      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The full happy path: Gemini analyses the photo and the Hugging Face text
+ * model narrates it. MobileNetV2 must never be reached — the fallback is
+ * strictly conditional.
+ */
+test("Step 1: Gemini analyses the image FIRST and MobileNetV2 is never called", async () => {
   configureKeys();
-  let geminiImage: GeminiImagePart | undefined;
-  let geminiUser = "";
+  const urls: string[] = [];
+  let analysisBody: GeminiRequestBody | undefined;
+  let chatUser = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    if (isGeminiUrl(String(url))) {
-      const body = parseGeminiBody(init);
-      geminiImage = geminiImagePart(body);
-      geminiUser = geminiUserText(body);
-      return geminiReply("الورقة تبدو مصابة باللفحة المبكرة.");
+    const target = String(url);
+    urls.push(target);
+    if (isChatUrl(target)) {
+      chatUser = (parseChatBody(init).messages ?? []).at(-1)?.content ?? "";
+      return chatReply(GROUNDED_REPLY);
     }
-    // Step 0 + Step 1 both 503 (models loading) — no MobileNetV2 verdict at
-    // all, yet Gemini must STILL receive the raw image and diagnose it.
-    return Response.json({ error: "Model is loading", estimated_time: 12 }, { status: 503 });
+    if (isGeminiUrl(target)) {
+      analysisBody = parseGeminiBody(init);
+      return geminiAnalysis();
+    }
+    // Step 0 detector finds nothing usable → the full frame continues.
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  // Gemini ran the image analysis and the HF text model narrated it.
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.textSource, "huggingface");
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.diagnosis?.labelAr, "اللفحة المتأخرة");
+  assert.equal(payload.diagnosis?.healthy, false);
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 82);
+  assert.equal(payload.reply, GROUNDED_REPLY);
+
+  // Gemini is the FIRST image model: it is called before any HF vision URL,
+  // and the MobileNetV2 classifier endpoint is never touched at all.
+  const geminiIndex = urls.findIndex(isGeminiUrl);
+  assert.ok(geminiIndex >= 0, "Gemini must run the image analysis");
+  assert.equal(
+    urls.findIndex(isClassifyUrl),
+    -1,
+    `MobileNetV2 must not run when Gemini succeeded: ${urls.join(", ")}`,
+  );
+
+  // The analysis is pinned to structured JSON output.
+  assert.equal(analysisBody?.generationConfig?.responseMimeType, "application/json");
+  assert.ok(analysisBody?.generationConfig?.responseSchema);
+  assert.deepEqual(analysisBody?.generationConfig?.responseSchema?.required, [
+    "plant_type",
+    "disease_detected",
+    "disease_name",
+    "confidence",
+    "affected_parts",
+    "severity",
+    "symptoms_observed",
+    "notes",
+  ]);
+  // Gemini gets the RAW photo — the crop is for the narrow classifier only.
+  assert.equal(geminiImagePart(analysisBody!)?.data, LEAF_JPEG_B64);
+
+  // The text stage is handed ANALYSIS_DATA, not pixels.
+  assert.match(chatUser, /اللفحة المتأخرة/);
+  assert.match(chatUser, /الأوراق السفلية/);
+  assert.doesNotMatch(chatUser, /Tomato___/);
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
+});
+
+/**
+ * The single trigger for the MobileNetV2 fallback: the Gemini image analysis
+ * FAILED. Its raw `{ label, score }` is mapped into the same schema, so the
+ * diagnosis card and the text stage see an identical shape.
+ */
+test("Step 1 fallback: a failed Gemini analysis hands over to MobileNetV2", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  let chatUser = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    urls.push(target);
+    if (isChatUrl(target)) {
+      chatUser = (parseChatBody(init).messages ?? []).at(-1)?.content ?? "";
+      return chatReply(GROUNDED_REPLY);
+    }
+    // Gemini refuses / cannot process the image.
+    if (isGeminiUrl(target)) return geminiBlocked();
+    if (isDetectUrl(target)) return Response.json([]);
+    return mobilenetReply("Tomato___Late_blight", 0.93, [
+      { label: "Tomato___Early_blight", score: 0.04 },
+    ]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  // The fallback ran, and the provenance flipped.
+  assert.equal(payload.analysisSource, "mobilenet");
+  assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
+  assert.equal(payload.diagnosis?.labelAr, "الطماطم — اللفحة المتأخرة");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 93);
+  // Runner-up classifications survive for the card.
+  assert.equal(payload.diagnosis?.candidates.length, 2);
+  // The text stage is source-agnostic: it sees the same schema either way.
+  assert.match(chatUser, /اللفحة المتأخرة/);
+  assert.doesNotMatch(chatUser, /Tomato___/);
+  assert.match(warningText(payload), /Step 1 Gemini image analysis failed/);
+  // Order: detect → Gemini (primary, failed) → MobileNetV2 (fallback) → chat.
+  assert.ok(urls.findIndex(isGeminiUrl) < urls.findIndex(isClassifyUrl));
+});
+
+/** Every Gemini failure mode that MUST hand over to MobileNetV2. */
+for (const [name, failure] of [
+  ["a network error", () => { throw new TypeError("fetch failed"); }],
+  ["an HTTP 500", () => new Response(null, { status: 500 })],
+  ["an invalid API key", () => geminiHttpError(400, "API key not valid.")],
+  ["a safety block / refusal", () => geminiBlocked()],
+  ["an empty candidate list", () => geminiEmpty()],
+  ["free text instead of JSON", () => geminiAnalysisRaw("الورقة مصابة باللفحة المتأخرة.")],
+  ["a truncated JSON object", () => geminiAnalysisRaw('{"plant_type":"الطماطم","disease_det')],
+  ["a JSON object missing required fields", () => geminiAnalysisRaw('{"plant_type":"الطماطم","confidence":0.9}')],
+  ["a JSON array instead of an object", () => geminiAnalysisRaw('[{"plant_type":"الطماطم"}]')],
+] as const) {
+  test(`Step 1 fallback: ${name} falls back to MobileNetV2`, async () => {
+    configureKeys();
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      const target = String(url);
+      urls.push(target);
+      if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+      if (isGeminiUrl(target)) return failure();
+      if (isDetectUrl(target)) return Response.json([]);
+      return mobilenetReply("Tomato___Late_blight", 0.9);
+    });
+
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.analysisSource, "mobilenet", "MobileNetV2 must take over");
+    assert.ok(urls.findIndex(isGeminiUrl) >= 0, "Gemini must be tried first");
+    assert.ok(urls.findIndex(isClassifyUrl) >= 0, "MobileNetV2 must run as the fallback");
+  });
+}
+
+/**
+ * The orchestrator has NO confidence threshold: a low-confidence Gemini
+ * verdict is legitimate data. It must be used as-is, and must NOT trigger the
+ * MobileNetV2 fallback.
+ */
+test("Step 1: a LOW-confidence Gemini analysis is NOT a failure — no MobileNetV2 fallback", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    urls.push(target);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(target)) {
+      return geminiAnalysis(analysisFixture({ confidence: 0.11 }));
+    }
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  // The low score is passed straight through…
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 11);
+  // …and MobileNetV2 was never consulted.
+  assert.equal(
+    urls.findIndex(isClassifyUrl),
+    -1,
+    "a low confidence must NOT trigger the MobileNetV2 fallback",
+  );
+  assert.doesNotMatch(warningText(payload), /MobileNetV2/);
+});
+
+/** An out-of-range or unparseable confidence is clamped, never a failure. */
+test("Step 1: an out-of-range confidence is clamped and still passes through", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    urls.push(target);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(target)) return geminiAnalysis(analysisFixture({ confidence: 1.4 }));
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const payload = (await (await POST(imageRequest(LEAF_JPEG_B64))).json()) as AssistantPayload;
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.diagnosis?.confidence, 1);
+  assert.equal(urls.findIndex(isClassifyUrl), -1);
+});
+
+/** A healthy verdict is a real, non-failure outcome. */
+test("Step 1: a healthy Gemini verdict passes through without a disease name", async () => {
+  configureKeys();
+  let chatUser = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isChatUrl(target)) {
+      chatUser = (parseChatBody(init).messages ?? []).at(-1)?.content ?? "";
+      return chatReply("الورقة خضراء سليمة ولا يبدو عليها أي مرض. اسقِ عند القاعدة وراقبها أسبوعياً.");
+    }
+    if (isGeminiUrl(target)) {
+      return geminiAnalysis(
+        analysisFixture({
+          disease_detected: false,
+          disease_name: "",
+          confidence: 0.6,
+          severity: "none",
+        }),
+      );
+    }
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const payload = (await (await POST(imageRequest(LEAF_JPEG_B64))).json()) as AssistantPayload;
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.diagnosis?.healthy, true);
+  assert.equal(payload.diagnosis?.severity, null);
+  // A name can never leak through a "no disease" verdict.
+  assert.doesNotMatch(chatUser, /اللفحة المتأخرة/);
+  assert.match(chatUser, /لم تُرصد إصابة مرضية/);
+});
+
+/* ------------------------------------------------------------------ */
+/*  STEP 4 — FINAL FALLBACK (both image models failed)                 */
+/* ------------------------------------------------------------------ */
+
+test("Step 4: both image models fail → a polite retry message and NO text model is called", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    urls.push(target);
+    if (isGeminiUrl(target)) return new Response(null, { status: 503 });
+    if (isChatUrl(target)) throw new Error("Step 4 must not call any text model");
+    if (isDetectUrl(target)) return Response.json([]);
+    return new Response(null, { status: 503 });
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  // No analysis, no text model, no fabricated diagnosis.
+  assert.equal(payload.diagnosis, null);
+  assert.equal(payload.analysisSource, null);
+  assert.equal(payload.textSource, null);
+  assert.equal(payload.source, "direct");
+  assert.equal(
+    urls.filter(isChatUrl).length,
+    0,
+    "the Step 4 rule forbids calling a text model with empty analysis data",
+  );
+  // A clear, polite message asking for a better photo.
+  assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
+  assert.match(payload.reply, /مُضاءة جيداً/);
+  assert.match(payload.reply, /قريبة/);
+  assert.match(warningText(payload), /Image analysis unavailable/);
+});
+
+test("Step 4: the final fallback also fires when the MobileNetV2 fallback is unconfigured", async () => {
+  // Gemini is configured but its analysis fails, and no Hugging Face token
+  // exists (a blank HF_TOKEN alias counts as unconfigured) — so neither
+  // image model can answer and the request lands on STEP 4.
+  process.env.GEMINI_API_KEY = GEMINI_KEY;
+  process.env.HF_TOKEN = " ";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    urls.push(target);
+    if (isGeminiUrl(target)) return new Response(null, { status: 503 });
+    throw new Error(`unexpected upstream request: ${target}`);
   });
 
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  // Gemini answered from its own inspection — no diagnosis attached…
-  assert.equal(payload.source, "llm");
-  assert.equal(payload.diagnosis, null);
-  // …but the raw image STILL travelled to Gemini as an inlineData part…
-  assert.ok(geminiImage, "Fallback A must still send the raw image to Gemini");
-  assert.equal(geminiImage?.mimeType, "image/jpeg");
-  assert.equal(geminiImage?.data, "aW1hZ2U=");
-  // …with the instruction to diagnose the image independently (no reference).
-  assert.match(geminiUser, /لا تتوفر نتيجة فحص آلي مسبقة للصورة/);
-  assert.match(geminiUser, /افحص الصورة المرفقة مباشرة/);
-  // The vision outage is a non-fatal warning, never a 500.
-  assert.match(warningText(payload), /Step 1 vision unavailable/);
+  assert.equal(payload.analysisSource, null);
+  assert.equal(payload.textSource, null);
+  assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
+  // Only the Gemini analysis attempt was made — the classifier was skipped
+  // by configuration and no text model ran.
+  assert.equal(urls.filter((url) => isClassifyUrl(url)).length, 0);
+  assert.equal(urls.filter((url) => isChatUrl(url)).length, 0);
+  assert.match(warningText(payload), /MobileNetV2 unavailable/);
 });
 
-test("Fallback B: every Gemini key exhausted → structured response built directly from MobileNetV2's findings", async () => {
-  // Vision works (HF key set) but BOTH Gemini keys are quota-exhausted and
-  // Stage 2 is down too — the built-in formatter must answer from the
-  // MobileNetV2 diagnosis with a valid structured payload.
-  process.env.GEMINI_API_KEY = "key-one,key-two";
+/* ------------------------------------------------------------------ */
+/*  STEP 2 → STEP 3 — text generation and its format-only fallback      */
+/* ------------------------------------------------------------------ */
+
+test("Step 2 → Step 3: when the HF text model fails, Gemini formats the same ANALYSIS_DATA with no image", async () => {
+  configureKeys();
+  const urls: string[] = [];
+  let formatterBody: GeminiRequestBody | undefined;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    urls.push(target);
+    if (isChatUrl(target)) return new Response(null, { status: 503 });
+    if (isGeminiUrl(target)) {
+      const body = parseGeminiBody(init);
+      // The image analysis and the text fallback are distinguishable by
+      // their generationConfig: only the analysis pins a JSON schema.
+      if (body.generationConfig?.responseMimeType === "application/json") {
+        return geminiAnalysis();
+      }
+      formatterBody = body;
+      return geminiReply(GROUNDED_REPLY);
+    }
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.textSource, "gemini_fallback");
+  assert.equal(payload.reply, GROUNDED_REPLY);
+
+  // Gemini acted ONLY as a formatter: no pixels, no JSON schema, and the
+  // same advisor system prompt the HF stage would have received.
+  assert.equal(geminiImagePart(formatterBody!), undefined, "the text stage must get no image");
+  assert.equal(formatterBody?.generationConfig?.responseMimeType, undefined);
+  assert.match(geminiSystemText(formatterBody!), /أنت مساعد زراعي خبير/);
+  const user = geminiUserText(formatterBody!);
+  assert.match(user, /اللفحة المتأخرة/);
+  assert.match(user, /الأوراق السفلية/);
+});
+
+/**
+ * The edge case called out in the spec: the analysis came from MobileNetV2
+ * and the HF text model then failed. Gemini must format the MobileNetV2 data
+ * and must NOT re-run its own image analysis.
+ */
+test("Step 3 edge case: MobileNetV2 analysis + HF text failure → Gemini formats the MobileNetV2 data", async () => {
+  configureKeys();
+  let geminiCalls = 0;
+  let formatterBody: GeminiRequestBody | undefined;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isChatUrl(target)) return new Response(null, { status: 503 });
+    if (isGeminiUrl(target)) {
+      const body = parseGeminiBody(init);
+      if (body.generationConfig?.responseMimeType === "application/json") {
+        geminiCalls += 1;
+        return geminiHttpError(400, "API key not valid.");
+      }
+      formatterBody = body;
+      return geminiReply(GROUNDED_REPLY);
+    }
+    if (isDetectUrl(target)) return Response.json([]);
+    return mobilenetReply("Tomato___Late_blight", 0.9);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+
+  assert.equal(payload.analysisSource, "mobilenet");
+  assert.equal(payload.textSource, "gemini_fallback");
+  // Exactly one Gemini image-analysis attempt: no second analysis happened.
+  assert.equal(geminiCalls, 1);
+  // The formatter received the MobileNetV2-derived data and NO image.
+  assert.equal(geminiImagePart(formatterBody!), undefined);
+  assert.match(geminiUserText(formatterBody!), /اللفحة المتأخرة/);
+});
+
+/** Text-stage failure (c): a reply that ignores ANALYSIS_DATA is rejected. */
+for (const [name, reply] of [
+  [
+    "an off-topic answer",
+    "الزراعة الجيدة تحتاج تربة خصبة وماءً منتظماً خلال موسم النمو، مع متابعة دورية للحقل بأكمله.",
+  ],
+  ["an empty reply", "   "],
+  ["a punctuation-only reply", "..."],
+] as const) {
+  test(`Step 2 → Step 3: a rejected HF reply (${name}) hands over to Gemini`, async () => {
+    configureKeys();
+    let formatterCalled = false;
+    mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+      const target = String(url);
+      if (isChatUrl(target)) return chatReply(reply);
+      if (isGeminiUrl(target)) {
+        const body = parseGeminiBody(init);
+        if (body.generationConfig?.responseMimeType === "application/json") {
+          return geminiAnalysis();
+        }
+        formatterCalled = true;
+        return geminiReply(GROUNDED_REPLY);
+      }
+      if (isDetectUrl(target)) return Response.json([]);
+      throw new Error(`unexpected upstream request: ${target}`);
+    });
+
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(formatterCalled, true, "the Gemini formatter must take over");
+    assert.equal(payload.textSource, "gemini_fallback");
+    assert.equal(payload.reply, GROUNDED_REPLY);
+  });
+}
+
+/** Both text models rejecting → the built-in direct card, still 200. */
+test("zero-failure: both text models reject their replies after a successful image analysis", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isChatUrl(target)) return chatReply("لا أفيدك في هذا."); // off-analysis
+    if (isGeminiUrl(target)) {
+      const body = parseGeminiBody(init);
+      if (body.generationConfig?.responseMimeType === "application/json") {
+        return geminiAnalysis();
+      }
+      return geminiReply("لا أفيدك في هذا.");
+    }
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "direct");
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.textSource, null);
+  assert.equal(payload.diagnosis?.labelAr, "اللفحة المتأخرة");
+  assert.match(payload.reply, /## 🔬 التشخيص/);
+  assert.match(payload.reply, /## 💊 خطة العلاج/);
+  assert.doesNotMatch(payload.reply, /82%/);
+  assert.match(warningText(payload), /Reply formatted locally/);
+});
+
+/** The Gemini key pool is exercised by the image analysis, not only by the text fallback. */
+test("Gemini key pool: the image analysis rotates keys on a quota failure", async () => {
+  process.env.GEMINI_API_KEYS = " key-a , key-b ";
   process.env.HUGGINGFACE_API_KEY = HF_KEY;
   const attempted: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
-    if (isGeminiUrl(String(url))) {
-      attempted.push(requestedGeminiKey(String(url)) ?? "");
-      return geminiHttpError(429, "Quota exceeded for quota metric 'GenerateContentRequests' (RESOURCE_EXHAUSTED).");
+    const target = String(url);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(target)) {
+      const key = requestedGeminiKey(target) ?? "";
+      attempted.push(key);
+      if (key === "key-a") {
+        return geminiHttpError(429, "Quota exceeded (RESOURCE_EXHAUSTED).");
+      }
+      return geminiAnalysis();
     }
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isDetectUrl(String(url))) return Response.json([]);
-    // Step 1 — MobileNetV2 PlantVillage (sole default classifier).
-    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+    if (isDetectUrl(target)) return Response.json([]);
+    throw new Error(`unexpected upstream request: ${target}`);
   });
 
-  const response = await POST(request(true));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  // BOTH keys were rotated through and exhausted (1 s backoff between them)…
-  assert.deepEqual(attempted, ["key-one", "key-two"]);
-  // …and the farmer still got a full structured diagnosis (the MobileNetV2
-  // card) instead of an error…
-  assert.equal(payload.source, "direct");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
-  assert.match(payload.reply, /## 🔬 التشخيص/);
-  assert.doesNotMatch(payload.reply, /Tomato___Early_blight/);
-  assert.doesNotMatch(payload.reply, /95%/);
-  assert.match(payload.reply, /## 💊 خطة العلاج/);
-  // …with the degradations reported as warnings, never an HTTP 500.
-  assert.match(warningText(payload), /all Gemini API keys failed/);
-  assert.match(warningText(payload), /HTTP 429/);
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-  assert.match(warningText(payload), /Reply formatted locally/);
+  const payload = (await (await POST(imageRequest(LEAF_JPEG_B64))).json()) as AssistantPayload;
+  assert.deepEqual(attempted, ["key-a", "key-b"]);
+  assert.equal(payload.analysisSource, "gemini");
 });
+
 
 test("Stage 2 sends the concise Arabic system instruction, the query and the profile context", async () => {
   configureKeys();
@@ -693,76 +1173,6 @@ test("Stage 2 sends the concise Arabic system instruction, the query and the pro
   assert.deepEqual(body.generationConfig?.thinkingConfig, { thinkingLevel: "low" });
 });
 
-test("hybrid fallback path: Gemini receives the image + the MobileNetV2 reference (label, confidence, candidates) and answers hybrid", async () => {
-  configureKeys();
-  const urls: string[] = [];
-  let geminiUser = "";
-  let geminiImage: GeminiImagePart | undefined;
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    urls.push(String(url));
-    // Stage 1 — the primary Hugging Face LLM is DOWN here, so the request
-    // walks on to the Gemini fallback with the very same user turn.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) {
-      const body = parseGeminiBody(init);
-      geminiUser = geminiUserText(body);
-      geminiImage = geminiImagePart(body);
-      return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
-    }
-    // Step 0 — the primary detector (facebook/detr-resnet-50) sees the raw
-    // frame first; it finds no usable leaf here, so the ORIGINAL frame
-    // continues down the pipeline.
-    if (isDetectUrl(String(url))) {
-      assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
-      return Response.json([]);
-    }
-    // Step 1 — MobileNetV2 PlantVillage, the sole default classifier.
-    assert.ok(isClassifyUrl(String(url)), `vision url should be the classifier endpoint: ${url}`);
-    assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
-    return Response.json([
-      { label: "Tomato___Late_blight", score: 0.03 },
-      { label: "Tomato___Early_blight", score: 0.95 },
-      { label: "Tomato___Leaf_Mold", score: 0.02 },
-    ]);
-  });
-
-  // A decodable frame so Step 0 (detect) actually runs its round-trip.
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "hybrid");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
-  assert.equal(payload.reply, "أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
-
-  // Pipeline order: detect → classify → HF LLM (down) → Gemini.
-  assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.length}`);
-  assert.ok(isDetectUrl(urls[0]));
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
-  // Step 1 is the MobileNetV2 PlantVillage classifier — the sole default.
-  assert.ok(isClassifyUrl(urls[1]));
-  assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
-  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
-  assert.ok(isGeminiUrl(urls[3]));
-  // The photo itself travels with the Gemini turn (inlineData part) —
-  // no-leaf outcome above means the original frame is what Gemini inspects.
-  assert.ok(geminiImage, "Gemini must receive the attached image as an inlineData part");
-  assert.equal(geminiImage?.mimeType, "image/jpeg");
-  assert.equal(geminiImage?.data, LEAF_JPEG_B64);
-  // The MobileNetV2 reference travels in the text: disease label…
-  assert.match(geminiUser, /Tomato___Early_blight/);
-  assert.match(geminiUser, /95%/);
-  // …plus the candidate diseases ("Late blight" 3%, "Leaf mold" 2% in Arabic).
-  assert.match(geminiUser, /اللفحة المتأخرة/);
-  assert.match(geminiUser, /عفن الأوراق/);
-  assert.match(geminiUser, /3%/);
-  // …and Gemini is instructed to inspect the image against the reference.
-  assert.match(geminiUser, /افحص الصورة المرفقة/);
-  assert.match(geminiUser, /شخّص هذه الورقة/);
-  // Secrets never travel back to the client.
-  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
-});
-
 for (const [name, failure] of [
   ["HTTP 400 invalid API key", () => geminiHttpError(400, "API key not valid. Please pass a valid API key.")],
   ["HTTP 429 quota exhausted", () => geminiHttpError(429, "Resource has been exhausted (e.g. check quota).")],
@@ -791,8 +1201,8 @@ for (const [name, failure] of [
     assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
     assert.equal(requestedChatModel(calls[0].init), LLM_FALLBACK_ORDER[0]);
     assert.equal(requestedGeminiModel(calls[1].url), GEMINI_FALLBACK_ORDER[0]);
-    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+    assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+    assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
     assert.match(warningText(payload), /Reply formatted locally/);
   });
 }
@@ -854,7 +1264,7 @@ test("Stage 1 network failure falls through to the Gemini fallback chain", async
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "اسقِ في الصباح الباكر.");
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
   assert.match(warningText(payload), /fetch failed/);
   // 1 primary HF attempt + 1 Gemini fallback attempt.
   assert.equal(upstream.mock.callCount(), 2);
@@ -909,8 +1319,8 @@ test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 18 
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+  assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
   assert.match(warningText(payload), /timeout after 18000 ms/);
   // The Gemini fallback ran after the primary failed — and nothing else did.
   assert.equal(calls.length, 2);
@@ -949,9 +1359,9 @@ test("Stage 2 walks the Gemini chain: a 404 'model not found' on the primary fal
     urls.filter((url) => isGeminiUrl(url)).map(requestedGeminiModel),
     [GEMINI_FALLBACK_ORDER[0], GEMINI_FALLBACK_ORDER[1]],
   );
-  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+  assert.match(warningText(payload), /Gemini unavailable/);
   assert.match(warningText(payload), /is not found for API version v1beta/);
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
 });
 
 test("Stage 2 walks the whole Gemini chain when every model 404s, then Stage 3 answers", async () => {
@@ -975,7 +1385,7 @@ test("Stage 2 walks the whole Gemini chain when every model 404s, then Stage 3 a
   assert.deepEqual(geminiUrls.map(requestedGeminiModel), [...GEMINI_FALLBACK_ORDER]);
   // …and the non-fatal warning names the whole tried chain.
   const warning = warningText(payload);
-  assert.match(warning, /Stage 2 Gemini unavailable/);
+  assert.match(warning, /Step 3 Gemini text fallback unavailable/);
   assert.match(warning, /no Gemini model could answer/);
   for (const model of GEMINI_FALLBACK_ORDER) {
     assert.match(warning, new RegExp(model.replace(/[./-]/g, "\\$&")));
@@ -1122,7 +1532,7 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
     "gemini-2.0-flash-exp",
     "gemini-2.5-flash",
   ]);
-  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+  assert.match(warningText(payload), /Gemini unavailable/);
 });
 
 test("a blank GEMINI_MODEL falls back to the gemini-3.6 default", async () => {
@@ -1172,8 +1582,8 @@ test("Gemini-only deployment: a Gemini failure degrades to Stage 3 and says the 
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   assert.match(payload.reply, /الوضع الأساسي/);
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+  assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
   assert.match(warningText(payload), /HUGGINGFACE_API_KEY is not configured/);
   assert.match(warningText(payload), /GEMINI_API_KEY is not configured|HTTP 503/);
   assert.match(warningText(payload), /Reply formatted locally/);
@@ -1209,38 +1619,49 @@ for (const [name, hfValue] of [
     // Exactly one upstream call — Gemini. Nothing went to Hugging Face.
     assert.equal(upstream.mock.callCount(), 1);
     assert.ok(upstream.mock.calls.every((call) => isGeminiUrl(String(call.arguments[0]))));
-    // The skip is a graceful degradation, not an error: no `[Stage 1: HF LLM
+    // The skip is a graceful degradation, not an error: no `[Step 2: HF LLM
     // Error]` line, and no safety-net exception.
     assert.ok(
       errorLog.mock.calls.every(
-        (call) => !/Stage 1: HF LLM Error|Safety Net/.test(String(call.arguments[0])),
+        (call) => !/Step 2: HF LLM Error|Safety Net/.test(String(call.arguments[0])),
       ),
     );
     const warning = warningText(payload);
-    assert.match(warning, /Stage 1 HF LLM unavailable — HUGGINGFACE_API_KEY is not configured/);
+    assert.match(warning, /Step 2 HF text model unavailable — HUGGINGFACE_API_KEY is not configured/);
     assert.match(warning, /HF_TOKEN unset too/);
     assert.match(warning, /Reply formatted locally/);
   });
 }
 
-test("Gemini-only deployment: an image request skips the vision step and still answers from the Gemini fallback", async () => {
+test("Gemini-only deployment: an image request is analysed AND narrated by Gemini alone", async () => {
+  // No Hugging Face token: Step 1 is the only text model and is skipped, so
+  // Gemini does both jobs — the image analysis (Step 1) and the formatting
+  // (Step 3). MobileNetV2 never runs, because it is a fallback and Gemini
+  // (the primary) succeeded.
   process.env.GEMINI_API_KEY = GEMINI_KEY;
-  let geminiImage: GeminiImagePart | undefined;
+  const geminiBodies: GeminiRequestBody[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    assert.ok(isGeminiUrl(String(url)), `vision must be skipped without an HF key: ${url}`);
-    geminiImage = geminiImagePart(parseGeminiBody(init));
-    return geminiReply("صف أعراض الورقة نصياً.");
+    assert.ok(isGeminiUrl(String(url)), `no HF provider is configured: ${url}`);
+    const body = parseGeminiBody(init);
+    geminiBodies.push(body);
+    // Exactly one call carries the photo + the JSON schema: the analysis.
+    return body.generationConfig?.responseMimeType === "application/json"
+      ? geminiAnalysis()
+      : geminiReply(GROUNDED_REPLY);
   });
+
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
-  assert.equal(payload.diagnosis, null);
-  // Fallback A: without an HF key MobileNetV2 never runs — the Gemini
-  // fallback still receives the raw image and inspects it independently.
-  assert.ok(geminiImage, "the raw image must still reach Gemini");
-  assert.equal(geminiImage?.data, "aW1hZ2U=");
-  assert.match(warningText(payload), /Step 1 vision unavailable/);
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.textSource, "gemini_fallback");
+  assert.equal(payload.reply, GROUNDED_REPLY);
+  assert.equal(geminiBodies.length, 2, "one analysis call + one formatting call");
+  // The analysis saw the photo; the formatter did not.
+  assert.equal(geminiImagePart(geminiBodies[0])?.data, "aW1hZ2U=");
+  assert.equal(geminiImagePart(geminiBodies[1]), undefined);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
   assert.match(warningText(payload), /HUGGINGFACE_API_KEY is not configured/);
 });
 
@@ -1566,30 +1987,30 @@ test("Stage 1: a transient 503 on the primary id does not walk the chain", async
   );
 });
 
-test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini fallback receives", async () => {
+test("both text stages receive the same system prompt and the same ANALYSIS_DATA user turn", async () => {
   configureKeys();
   let chatBody: ChatRequestBody | undefined;
   let geminiUser = "";
   let geminiSystem = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    if (isGeminiUrl(String(url))) {
-      geminiUser = geminiUserText(parseGeminiBody(init));
-      geminiSystem = geminiSystemText(parseGeminiBody(init));
-      return geminiReply();
-    }
     if (isChatUrl(String(url))) {
       chatBody = parseChatBody(init);
       // An account-level failure: the primary stage fails fast (no model
       // walk) and the Gemini fallback takes over with the same turn.
       return Response.json({ error: "Invalid credentials" }, { status: 401 });
     }
-    if (isDetectUrl(String(url))) return Response.json([]);
-    // Step 1 — MobileNetV2 PlantVillage (sole default classifier).
-    return Response.json([
-      { label: "Tomato___Late_blight", score: 0.03 },
-      { label: "Tomato___Early_blight", score: 0.95 },
-      { label: "Tomato___healthy", score: 0.02 },
-    ]);
+    if (isGeminiUrl(String(url))) {
+      const body = parseGeminiBody(init);
+      // Skip the Step 1 image analysis so we can assert on the FORMATTER
+      // call specifically: it is the one without the JSON response schema.
+      if (body.generationConfig?.responseMimeType === "application/json") {
+        return geminiAnalysis();
+      }
+      geminiUser = geminiUserText(body);
+      geminiSystem = geminiSystemText(body);
+      return geminiReply(GROUNDED_REPLY);
+    }
+    throw new Error(`unexpected upstream: ${url}`);
   });
 
   const response = await POST(request(true));
@@ -1611,22 +2032,20 @@ test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini 
   assert.match(system.content, /عملي/);
   assert.equal(system.content, geminiSystem);
   assert.match(system.content, /كيان خبير زراعي واحد موحّد/);
-  assert.match(system.content, /يُمنع ذكر نسب الثقة الخام/);
-  assert.match(system.content, /درجات المرشحين/);
-  assert.match(system.content, /تسميات نموذج الرؤية الخام/);
   assert.match(system.content, /بطاقة التشخيص المرئية معروضة بالفعل/);
-  assert.doesNotMatch(system.content, /اذكر المرض بالعربية مع نسبة الثقة|بنِسَبهم/);
+  assert.match(system.content, /يُمنع ذكر نسب الثقة الخام/);
   assert.equal(user.role, "user");
   // The Gemini fallback received EXACTLY the same user turn as the primary
-  // HF stage: query + Step 1 label/confidence + candidates.
+  // HF stage: query + the ANALYSIS_DATA reference block.
   assert.ok(geminiUser, "the Gemini fallback must have been consulted");
   assert.equal(user.content, geminiUser);
   assert.match(user.content, /بيانات داخلية للاستدلال فقط/);
-  assert.match(user.content, /دون نسب الثقة أو درجات المرشحين أو التسميات الخام/);
-  assert.doesNotMatch(user.content, /بنِسَبهم|بنِسَبها|بثقة 95%/);
-  assert.match(user.content, /Tomato___Early_blight/);
-  assert.match(user.content, /95%/);
+  assert.match(user.content, /اللفحة المتأخرة/);
+  assert.match(user.content, /الأوراق السفلية/);
   assert.match(user.content, /How should I irrigate tomatoes\?/);
+  // The inter-stage payload is source-agnostic: no machine label leaks.
+  assert.doesNotMatch(user.content, /Tomato___/);
+  assert.doesNotMatch(user.content, /mobilenet|PlantVillage|gemini/i);
   // Concise output must be enforced with a hard token cap too.
   assert.ok(typeof chatBody.max_tokens === "number" && chatBody.max_tokens <= 1000);
 });
@@ -1661,8 +2080,8 @@ test("zero-failure: both LLM stages down after a successful Step 1 returns 200 w
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
   // Failures are reported as non-fatal warnings, not a 500.
-  assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-  assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+  assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
@@ -1742,8 +2161,8 @@ for (const failure of ["http", "network", "empty"] as const) {
     // Non-greeting question → polite basic-mode explanation, not a config error.
     assert.match(payload.reply, /الوضع الأساسي/);
     assert.notEqual(payload.reply, "API keys missing on server");
-    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+    assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+    assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
   });
 }
 
@@ -1767,8 +2186,8 @@ for (const greeting of ["هلا", "مرحبا", "السلام عليكم", "أه
     // …and asks how it can help with the farm/crops.
     assert.match(payload.reply, /نساعدك/);
     assert.match(payload.reply, /ضيعتك|محصولك/);
-    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
-    assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
+    assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+    assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
   });
 }
 
@@ -1823,27 +2242,30 @@ test("final safety net: an unexpected internal exception still answers 200 direc
 /*  Zero-failure strategy — graceful vision degradation                 */
 /* ------------------------------------------------------------------ */
 
-test("zero-failure: HF vision failure degrades to the LLM stages with a Step 1 warning (never 500)", async () => {
+test("Step 4: an image-stage outage answers 200 with the retry message and no 500", async () => {
   configureKeys();
-  let geminiCalls = 0;
+  let chatCalls = 0;
   mock.method(globalThis, "fetch", async (url: string) => {
-    if (isGeminiUrl(String(url))) {
-      geminiCalls += 1;
-      return geminiReply("Water in the morning.");
+    if (isChatUrl(String(url))) {
+      chatCalls += 1;
+      throw new Error("Step 4 must not call any text model");
     }
-    // Step 1 fails on every vision model → an LLM stage must still answer.
+    // Both image models are down.
     return new Response(null, { status: 503 });
   });
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
+  assert.equal(payload.source, "direct");
   assert.equal(payload.diagnosis, null);
-  assert.match(warningText(payload), /Step 1 vision unavailable/);
-  assert.ok(geminiCalls >= 1);
+  assert.equal(payload.analysisSource, null);
+  assert.equal(chatCalls, 0);
+  assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
+  assert.match(warningText(payload), /Step 1 Gemini image analysis failed/);
+  assert.match(warningText(payload), /Step 1 MobileNetV2 unavailable/);
 });
 
-test("zero-failure: HF 503 model-loading plus every LLM down answers 200 asking to retry the photo", async () => {
+test("zero-failure: HF 503 model-loading plus a Gemini outage answers 200 asking to retry the photo", async () => {
   configureKeys();
   mock.method(globalThis, "fetch", async (url: string) => {
     if (isGeminiUrl(String(url))) return geminiHttpError(503, "The model is overloaded.");
@@ -1862,31 +2284,33 @@ test("zero-failure: HF 503 model-loading plus every LLM down answers 200 asking 
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   // The reply tells the user the photo couldn't be analysed and to retry.
-  assert.match(payload.reply, /تعذّر تحليل صورة الورقة/);
+  assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
   assert.match(payload.reply, /أعد المحاولة/);
   const warning = warningText(payload);
-  assert.match(warning, /Step 1 vision unavailable/);
+  assert.match(warning, /Step 1 Gemini image analysis failed/);
+  assert.match(warning, /Step 1 MobileNetV2 unavailable/);
   assert.match(warning, /loading/i);
-  assert.match(warning, /Stage 1 HF LLM unavailable/);
-  assert.match(warning, /Stage 2 Gemini unavailable/);
+  // Neither text model was consulted, so neither is reported as unavailable.
+  assert.doesNotMatch(warning, /Step 2 HF text model unavailable/);
+  assert.doesNotMatch(warning, /Step 3 Gemini text fallback unavailable/);
 });
 
-test("strict pipeline: HF parses the returned array to extract the primary class and confidence", async () => {
+test("the MobileNetV2 fallback sorts the returned array and picks the top class", async () => {
   configureKeys();
   let llmRequestBody = "";
   let llmUrl = "";
   let llmModel: string | undefined;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    if (isGeminiUrl(String(url))) return geminiHttpError(503, "overloaded");
+    // Force the fallback: the primary image model refuses.
+    if (isGeminiUrl(String(url))) return geminiBlocked();
     if (isChatUrl(String(url))) {
       llmUrl = String(url);
       llmModel = requestedChatModel(init);
       llmRequestBody = String(init.body ?? "");
-      return chatReply();
+      return chatReply(GROUNDED_REPLY);
     }
     if (isDetectUrl(String(url))) return Response.json([]);
-    // Step 1 — MobileNetV2. Unsorted array — route must sort and pick
-    // Tomato___Early_blight 95% as top.
+    // Unsorted array — the route must sort and pick the 95% entry.
     return Response.json([
       { label: "Tomato___Late_blight", score: 0.03 },
       { label: "Tomato___Early_blight", score: 0.95 },
@@ -1896,16 +2320,20 @@ test("strict pipeline: HF parses the returned array to extract the primary class
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.analysisSource, "mobilenet");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.source, "hybrid");
-  // Stage 1 (the primary HF LLM) runs via the router's chat-completions endpoint…
+  // The primary text model runs via the router's chat-completions endpoint…
   assert.equal(llmUrl, HF_ROUTER_CHAT_URL);
   assert.equal(llmModel, LLM_FALLBACK_ORDER[0]);
-  // …and the Step 1 verdict (label + confidence) is passed straight into the prompt.
-  assert.match(llmRequestBody, /Tomato___Early_blight/);
-  assert.match(llmRequestBody, /95%/);
+  // …and receives the mapped analysis, with NO machine label in the user turn
+  // (the system prompt names one only as a negative example).
+  const llmUserTurn = (JSON.parse(llmRequestBody) as ChatRequestBody).messages?.at(-1)?.content ?? "";
+  assert.match(llmUserTurn, /اللفحة المبكرة/);
+  assert.doesNotMatch(llmUserTurn, /Tomato___/);
 });
+
 
 /* ------------------------------------------------------------------ */
 /*  Step 0 — leaf Detection & Cropping before the classifier           */
@@ -1954,17 +2382,25 @@ interface PreprocessingLike {
   durationMs: number;
 }
 
-test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", async () => {
+test("Step 0 crops for the MobileNetV2 fallback, while Gemini keeps the original frame", async () => {
   configureKeys();
   const urls: string[] = [];
   let classifyBody = "";
   let classifyContentType: string | null = null;
+  let geminiImage: GeminiImagePart | undefined;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     urls.push(String(url));
-    // Stage 1 — the primary HF LLM is DOWN here, so the Gemini fallback is
-    // the stage that answers (the assertions below only watch Step 0/1).
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("الاقتصاص حسّن الدقة.");
+    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(String(url))) {
+      const body = parseGeminiBody(init);
+      // Force the fallback so the crop is actually exercised, and capture the
+      // photo the PRIMARY image model was given.
+      if (body.generationConfig?.responseMimeType === "application/json") {
+        geminiImage = geminiImagePart(body);
+        return geminiBlocked();
+      }
+      return geminiReply(GROUNDED_REPLY);
+    }
     if (isDetectUrl(String(url))) {
       assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
       return leafDetection();
@@ -1979,18 +2415,23 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Pipeline order: detect → classify → HF LLM (down) → Gemini fallback.
-  assert.equal(urls.length, 4);
+  // Pipeline order: detect → Gemini (primary) → MobileNetV2 (fallback) → chat.
+  assert.equal(urls.length, 4, `expected detect + Gemini + classify + HF, got ${urls.join(", ")}`);
   assert.ok(isDetectUrl(urls[0]));
   // The PRIMARY detector is the COCO facebook/detr-resnet-50 — the obsolete
   // fine-tuned PlantDoc checkpoint is gone from the default chain.
   assert.match(urls[0], /facebook\/detr-resnet-50/);
   assert.doesNotMatch(urls[0], /detr-finetuned-plantdoc/);
-  assert.ok(isClassifyUrl(urls[1]));
-  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
-  assert.ok(isGeminiUrl(urls[3]));
+  assert.ok(isGeminiUrl(urls[1]), "Gemini is the PRIMARY image model");
+  assert.ok(isClassifyUrl(urls[2]));
+  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
 
-  // The classifier saw the re-encoded CROP, never the original frame.
+  // The PRIMARY image model reasons over the whole scene: it gets the
+  // untouched original frame, never the crop.
+  assert.equal(geminiImage?.data, LEAF_JPEG_B64);
+  assert.equal(geminiImage?.mimeType, "image/jpeg");
+
+  // The narrow FALLBACK classifier saw the re-encoded CROP instead.
   assert.notEqual(classifyBody, LEAF_JPEG_B64);
   assert.equal(classifyContentType, "image/jpeg");
 
@@ -2001,6 +2442,7 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   assert.equal(typeof payload.preprocessing?.durationMs, "number");
 
   assert.equal(payload.source, "hybrid");
+  assert.equal(payload.analysisSource, "mobilenet");
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
@@ -2033,9 +2475,8 @@ test("Step 0 outage (detector loading) degrades to the full frame with a warning
   configureKeys();
   let classifyBody = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    // The primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("المصابيح باردة.");
+    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(String(url))) return geminiBlocked(); // force the fallback
     if (isDetectUrl(String(url))) return Response.json({ error: "Model is loading" }, { status: 503 });
     assert.ok(isClassifyUrl(String(url)));
     classifyBody = bodyB64(init);
@@ -2046,9 +2487,37 @@ test("Step 0 outage (detector loading) degrades to the full frame with a warning
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
   assert.equal(payload.preprocessing?.status, "unavailable");
+  // The crop could not be produced, so the fallback classifier got the
+  // original frame — the exact pre-Step-0 behaviour.
   assert.equal(classifyBody, LEAF_JPEG_B64);
   assert.match(warningText(payload), /Step 0 leaf detection unavailable/);
   assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 without an HF key is skipped silently and Step 1 reports its own skip", async () => {
+  // Gemini-only deployment: Step 0 cannot run (no detector token) and stays
+  // silent so it does not duplicate the Step 1 / Step 2 skip messages.
+  process.env.GEMINI_API_KEY = GEMINI_KEY;
+  const geminiBodies: GeminiRequestBody[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    assert.ok(isGeminiUrl(String(url)), `no HF endpoint is reachable: ${url}`);
+    const body = parseGeminiBody(init);
+    geminiBodies.push(body);
+    return body.generationConfig?.responseMimeType === "application/json"
+      ? geminiAnalysis()
+      : geminiReply(GROUNDED_REPLY);
+  });
+  const response = await POST(imageRequest("aW1hZ2U="));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.equal(payload.preprocessing?.status, "skipped");
+  assert.equal(payload.analysisSource, "gemini");
+  // The skip is a graceful degradation, not an error: no analysis-stage
+  // warning for MobileNetV2, because the primary model handled the photo.
+  assert.doesNotMatch(warningText(payload), /Step 0/);
+  assert.doesNotMatch(warningText(payload), /MobileNetV2/);
+  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
+  assert.equal(geminiImagePart(geminiBodies[0])?.data, "aW1hZ2U=");
 });
 
 test("Step 0 label filter: only plant/leaf boxes are accepted (a person box never crops)", async () => {
@@ -2146,19 +2615,6 @@ test("HF_LEAF_DETECT_MODELS overrides the Step 0 detector chain", async () => {
   }
 });
 
-test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip warning", async () => {
-  process.env.GEMINI_API_KEY = GEMINI_KEY;
-  mock.method(globalThis, "fetch", async (url: string) => {
-    assert.ok(isGeminiUrl(String(url)));
-    return geminiReply("بدون مفتاح.");
-  });
-  const response = await POST(imageRequest("aW1hZ2U="));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  assert.equal(payload.preprocessing?.status, "skipped");
-  assert.match(warningText(payload), /Step 1 vision unavailable/);
-  assert.doesNotMatch(warningText(payload), /Step 0/);
-});
 
 /* ------------------------------------------------------------------ */
 /*  Step 1 — streamlined vision chain: MobileNetV2 DIRECT (no CodeCraft) */
@@ -2175,21 +2631,18 @@ test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip
  *      fallback) is intact and unchanged.
  */
 
-test("streamlined Step 1: the photo goes DIRECTLY to MobileNetV2 — detect → classify → HF LLM → Gemini, no CodeCraft", async () => {
+test("orchestrated Step 1: detect → Gemini (primary) → MobileNetV2 (fallback) → HF text, no CodeCraft", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
     // The CodeCraft gateway is gone from the chain: any request to it is a
-    // regression in the streamlined pipeline.
+    // regression.
     assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
-    // Stage 1 — the primary HF LLM is DOWN here, so the Gemini fallback is
-    // the stage that answers (the assertions below watch Step 0/1).
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("تشخيص مباشر.");
+    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
+    // The primary image model fails, so the fallback classifier runs.
+    if (isGeminiUrl(String(url))) return geminiBlocked();
     if (isDetectUrl(String(url))) return leafDetection();
-    // Step 1 — the MobileNetV2 PlantVillage classifier is the ONLY vision
-    // diagnosis engine left in the pipeline.
     assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
     return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
   });
@@ -2198,26 +2651,26 @@ test("streamlined Step 1: the photo goes DIRECTLY to MobileNetV2 — detect → 
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Exactly four round-trips: detect → MobileNetV2 → HF LLM (down) → Gemini.
-  // A fifth one (the removed CodeCraft attempt) would be a regression.
-  assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.join(" | ")}`);
+  // Exactly four round-trips: detect → Gemini → MobileNetV2 → HF text.
+  assert.equal(urls.length, 4, `expected detect + Gemini + classify + HF, got ${urls.join(" | ")}`);
   assert.ok(isDetectUrl(urls[0]));
-  assert.ok(isClassifyUrl(urls[1]), "Step 1 must go directly to the MobileNetV2 classifier");
-  assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
-  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
-  assert.ok(isGeminiUrl(urls[3]));
+  assert.ok(isGeminiUrl(urls[1]), "Gemini is the PRIMARY image model");
+  assert.ok(isClassifyUrl(urls[2]), "MobileNetV2 only runs after the primary failed");
+  assert.ok(urls[2].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[2]}`);
+  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
 
-  // The MobileNetV2 verdict flows through untouched.
+  // The MobileNetV2 verdict flows through the shared AnalysisData schema.
+  assert.equal(payload.analysisSource, "mobilenet");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.preprocessing?.status, "cropped");
   assert.equal(payload.source, "hybrid");
-  // No CodeCraft degradation ever surfaces in the streamlined pipeline.
+  // No CodeCraft degradation ever surfaces in the pipeline.
   assert.doesNotMatch(warningText(payload), /CodeCraft/i);
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
-test("streamlined Step 1: legacy CODECRAFT_* env vars are ignored — no request ever reaches the removed engine", async () => {
+test("orchestrated Step 1: legacy CODECRAFT_* env vars are ignored — no request ever reaches the removed engine", async () => {
   configureKeys();
   // A deployment that still carries the pre-streamlining CodeCraft config
   // must behave exactly like one without it: the variables are dead config.
@@ -2228,25 +2681,26 @@ test("streamlined Step 1: legacy CODECRAFT_* env vars are ignored — no request
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
     assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN, "the removed CodeCraft engine must never be called");
-    if (isChatUrl(String(url))) return chatReply("إجابة النموذج الأساسي.");
+    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(String(url))) return geminiAnalysis();
     if (isDetectUrl(String(url))) return leafDetection();
-    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
-    return Response.json([{ label: "Tomato___Late_blight", score: 0.88 }]);
+    throw new Error(`unexpected upstream: ${url}`);
   });
 
   try {
     const response = await POST(imageRequest(LEAF_JPEG_B64));
     assert.equal(response.status, 200);
     const payload = (await response.json()) as AssistantPayload;
-    // Step 1 answered directly from MobileNetV2…
-    assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
+    // Gemini, the primary image model, answered…
+    assert.equal(payload.analysisSource, "gemini");
+    assert.equal(payload.textSource, "huggingface");
     assert.equal(payload.source, "hybrid");
-    // …and Stage 1 (the HF primary LLM) answered the reply — the streamlined
-    // chain never needed Gemini or any other engine.
-    assert.equal(payload.reply, "إجابة النموذج الأساسي.");
-    // Exactly: detect → classify → HF LLM. Nothing else.
-    assert.equal(urls.length, 3);
+    // …and the HF primary text model answered the reply.
+    assert.equal(payload.reply, GROUNDED_REPLY);
+    // Exactly: detect → Gemini → HF text. No classifier, no CodeCraft.
+    assert.equal(urls.length, 3, urls.join(" | "));
     assert.ok(urls.every((url) => !CODECRAFT_URL_PATTERN.test(url)));
+    assert.equal(urls.filter(isClassifyUrl).length, 0);
     assert.doesNotMatch(warningText(payload), /CodeCraft/i);
   } finally {
     delete process.env.CODECRAFT_API_KEY;
@@ -2255,55 +2709,35 @@ test("streamlined Step 1: legacy CODECRAFT_* env vars are ignored — no request
   }
 });
 
-test("streamlined Step 1: a CodeCraft-only deployment is now an unconfigured one (503 MISSING_KEYS, no request)", async () => {
-  // With the engine removed from the chain, its key alone can no longer
-  // power the route: the explicit misconfiguration signal applies.
-  process.env.CODECRAFT_API_KEY = " real-looking-key ";
-  const upstream = mock.method(globalThis, "fetch");
-  try {
-    const response = await POST(request(true));
-    assert.equal(response.status, 503);
-    assert.deepEqual(await response.json(), {
-      error: "API keys missing on server",
-      code: "MISSING_KEYS",
-    });
-    assert.equal(upstream.mock.callCount(), 0);
-  } finally {
-    delete process.env.CODECRAFT_API_KEY;
-  }
-});
-
-test("streamlined Step 1: MobileNetV2 failure still degrades to Gemini inspecting the raw image (Fallback A, no second vision engine)", async () => {
+test("orchestrated Step 1: when MobileNetV2 also fails the request lands on STEP 4, not a re-analysis", async () => {
   configureKeys();
   const urls: string[] = [];
-  let geminiImage: GeminiImagePart | undefined;
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+  mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
     assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
-    if (isGeminiUrl(String(url))) {
-      geminiImage = geminiImagePart(parseGeminiBody(init));
-      return geminiReply("افحص الصورة بنفسي.");
+    if (isChatUrl(String(url))) {
+      throw new Error("STEP 4 must not call any text model");
     }
-    // Step 0 + Step 1 both fail (models loading) — the streamlined chain has
-    // NO backup vision engine; Gemini must inspect the raw image itself.
+    if (isGeminiUrl(String(url))) return geminiBlocked();
+    // The MobileNetV2 fallback is loading too.
     return Response.json({ error: "Model is loading", estimated_time: 12 }, { status: 503 });
   });
 
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "llm");
+  assert.equal(payload.source, "direct");
   assert.equal(payload.diagnosis, null);
-  assert.ok(geminiImage, "Fallback A must still send the raw image to Gemini");
-  assert.equal(geminiImage?.data, "aW1hZ2U=");
-  assert.match(warningText(payload), /Step 1 vision unavailable/);
+  assert.equal(payload.analysisSource, null);
+  assert.equal(payload.textSource, null);
+  assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
   assert.doesNotMatch(warningText(payload), /CodeCraft/i);
-  // One vision attempt (classify — the payload is not decodable, so Step 0
-  // skips its detect round-trip), then HF LLM (down) and Gemini. A fourth
-  // call (the removed CodeCraft engine) would be a regression.
-  assert.equal(urls.length, 3);
-  assert.ok(isClassifyUrl(urls[0]), "Step 1 must go directly to the MobileNetV2 classifier");
+  // One Gemini analysis attempt (refused) + one classifier attempt (loading);
+  // no text model ran, and there is no third vision engine.
+  assert.equal(urls.filter((url) => isClassifyUrl(url)).length, 1);
+  assert.equal(urls.filter((url) => isChatUrl(url)).length, 0);
 });
+
 
 test("LLM fallback chain intact: Stage 1 HF primary (Qwen/Qwen3-4B-Instruct-2507) answers first, Gemini untouched", async () => {
   configureKeys();
@@ -2351,7 +2785,7 @@ test("LLM fallback chain intact: HF failure, timeout-shaped error or empty reply
     assert.equal(payload.source, "llm");
     assert.equal(payload.reply, "الإجابة الاحتياطية من Gemini.");
     // …with the degradation reported as a non-fatal warning.
-    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+    assert.match(warningText(payload), /Step 2 HF text model unavailable/);
     // HF first, then Gemini — the dual-tiered fallback order is locked.
     assert.equal(urls[0], HF_ROUTER_CHAT_URL);
     assert.ok(isGeminiUrl(urls[urls.length - 1]));

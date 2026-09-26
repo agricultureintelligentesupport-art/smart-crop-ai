@@ -136,3 +136,45 @@ export function confidenceBucket(score: number): "high" | "medium" | "low" {
   if (score >= 0.45) return "medium";
   return "low";
 }
+
+/**
+ * Lowercase + collapse everything that is not a letter or digit, KEEPING
+ * non-ASCII scripts. {@link norm} is English-only (it strips to `[a-z0-9]`
+ * because it keys PlantVillage labels), so an Arabic string needs this one.
+ */
+function normUnicode(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[\u064B-\u0652\u0640\u0670]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Reverse lookup: map an ALREADY-LOCALISED Arabic disease name back to its
+ * canonical English family keyword.
+ *
+ * The built-in disease-family advice matcher keys off the raw PlantVillage
+ * label ("late blight", "powdery mildew", …). Under the orchestrator the
+ * PRIMARY image model (Gemini) reports disease names directly in Arabic, so
+ * without this the family advice would silently degrade to the generic
+ * fallback for every Gemini-sourced verdict. Returns `null` when the Arabic
+ * name matches no known family.
+ *
+ * The Arabic phrases are distinct enough that the first match in
+ * {@link DISEASES_AR} order is the right one ("اللفحة المتأخرة" does not
+ * contain "لفحة الأوراق").
+ */
+export function diseaseFamilyForArabic(labelAr: string): string | null {
+  const needle = normUnicode(labelAr);
+  if (!needle) return null;
+  for (const [family, ar] of DISEASES_AR) {
+    const arabic = normUnicode(ar);
+    if (arabic && (needle === arabic || needle.includes(arabic))) return family;
+  }
+  return null;
+}

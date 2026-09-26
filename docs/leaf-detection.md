@@ -2,12 +2,19 @@
 
 ## Why
 
-The PlantVillage MobileNetV2 classifier (Step 1) is a **38-class crop/disease
-classifier with no notion of "leaf"**. When a farmer's photo contains a hand
-holding the leaf, soil, a pot or half a field, the classifier happily labels
-the *background* and returns a confident-but-wrong disease. Localising the
-leaf first and forwarding **only the cropped pixels** removes the single
-largest source of misdiagnosis in the pipeline.
+The MobileNetV2 PlantVillage classifier — the orchestrator's Step 1 **fallback**
+image model — is a **38-class crop/disease classifier with no notion of
+"leaf"**. When a farmer's photo contains a hand holding the leaf, soil, a pot
+or half a field, the classifier happily labels the *background* and returns a
+confident-but-wrong disease. Localising the leaf first and forwarding **only
+the cropped pixels** removes the single largest source of misdiagnosis for
+that stage.
+
+Note the scope: the crop feeds MobileNetV2 only. The Step 1 **primary** image
+model is Gemini, a multimodal model that reasons over the whole scene, so it
+always receives the untouched original frame — cropping would throw away the
+surrounding context (leaf, stem, soil, neighbouring plants) that makes its
+`affected_parts` and `notes` fields meaningful.
 
 ## What runs, where
 
@@ -15,8 +22,10 @@ largest source of misdiagnosis in the pipeline.
 | --- | --- | --- | --- |
 | Step 0 · detection | Server (route) | `facebook/detr-resnet-50` (COCO DETR-ResNet-50, plant/leaf-labelled boxes only; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
-| Step 1 · classification | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`) | Free tier. |
-| Stages 1–3 · LLM chain | Server (route) | HF router LLMs (PRIMARY) → Gemini `gemini-3.6` (FALLBACK, image + MobileNetV2 reference) → built-in formatter | Existing behaviour. |
+| Step 1 · image analysis (PRIMARY) | Server (route) | Gemini `gemini-3.6` — multimodal, answers a pinned `AnalysisData` JSON object. Receives the ORIGINAL frame. | Reuses the existing Gemini key pool. |
+| Step 1 · image analysis (FALLBACK) | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`). Receives the Step 0 CROP. Reached only when the Gemini analysis failed. | Free tier. |
+| Step 2 · text generation (PRIMARY) | Server (route) | HF router LLMs (Qwen chain) — narrates the `AnalysisData`. Receives NO image. | Existing behaviour. |
+| Step 3 · text fallback | Server (route) | Gemini `gemini-3.6` — formats the same `AnalysisData`, no image, never re-analyses. → built-in formatter as the zero-failure net. | Existing behaviour. |
 
 The obsolete fine-tuned PlantDoc detector
 (`suryanshgoel/detr-finetuned-plantdoc`) and the 400-prone vision cascade
@@ -53,7 +62,7 @@ Pure, dependency-free, fully unit-tested geometry:
 
 | Case | Behaviour |
 | --- | --- |
-| No `HUGGINGFACE_API_KEY`/`HF_TOKEN` | Step 0 reports `status: "skipped"` (no request, no delay); Step 1 keeps its existing skip warning. |
+| No `HUGGINGFACE_API_KEY`/`HF_TOKEN` | Step 0 reports `status: "skipped"` (no request, no delay) and stays silent so it does not duplicate the Step 1 fallback's own skip warning. |
 | Undecodable/too-small image | `status: "unavailable"`, warning pushed, original classified. |
 | Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, original classified. |
 | Payload is not object-detection-shaped | Treated as "this id can't serve detection" → next id in the chain. |

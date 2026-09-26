@@ -1,13 +1,19 @@
 /**
- * Shared contracts between the assistant UI (`/assistant`) and the fail-proof
- * 3-stage chain behind `/api/assistant`:
- *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
- *   Stage 1 Hugging Face LLM chain (primary LLM),
- *   Stage 2 Google Gemini (`gemini-3.6`, fallback LLM),
- *   Stage 3 built-in TypeScript direct formatters (never fails).
+ * Shared contracts between the assistant UI (`/assistant`) and the
+ * fail-proof orchestrator behind `/api/assistant`:
+ *   Step 1  image analysis — Gemini (`gemini-3.6`, PRIMARY) → MobileNetV2
+ *           PlantVillage on Hugging Face (FALLBACK),
+ *   Step 2  Hugging Face LLM chain (primary text model),
+ *   Step 3  Google Gemini (`gemini-3.6`, format-only text fallback),
+ *   Step 4  built-in TypeScript direct formatters (never fails).
+ *
+ * The inter-stage payload exchanged by the image and text stages is
+ * `AnalysisData` from `@/lib/assistant/analysis`.
  *
  * Kept dependency-free and importable from both server and client code.
  */
+
+import type { AnalysisSource, TextSource } from "@/lib/assistant/analysis";
 
 export interface AssistantContext {
   /** Two-digit wilaya code from the stored profile, e.g. "07". */
@@ -78,13 +84,14 @@ export interface DiagnosisCandidate {
 
 /**
  * Which vision engine produced a {@link AssistantDiagnosis}.
- *   • `plantvillage-hf` — Hugging Face MobileNetV2 PlantVillage classifier.
- * The streamlined pipeline has exactly ONE vision engine: the former
- * CodeCraft gateway was removed from the chain (WAF 403 stalls + an extra
- * network round-trip). Optional: most diagnoses carry no engine tag, and
- * every consumer treats the field as informational only.
+ *   • `gemini-vision`     — Gemini (`gemini-3.6`) image analysis, the
+ *     PRIMARY image model of the orchestrator;
+ *   • `plantvillage-hf`   — Hugging Face MobileNetV2 PlantVillage classifier,
+ *     the FALLBACK image model, reached only when Gemini's analysis failed.
+ * Optional: most diagnoses carry no engine tag, and every consumer treats the
+ * field as informational only.
  */
-export type AssistantVisionEngine = "plantvillage-hf";
+export type AssistantVisionEngine = "gemini-vision" | "plantvillage-hf";
 
 /** Structured result of the PlantVillage vision step. */
 export interface AssistantDiagnosis {
@@ -126,18 +133,18 @@ export interface AssistantDiagnosis {
 }
 
 export type AssistantSource =
-  /** Step 1 vision diagnosis + Stage 1/2 LLM reasoning. */
+  /** Image analysis succeeded + a text model narrated it. */
   | "hybrid"
   /**
-   * LLM reasoning only (no vision diagnosis attached) — the Hugging Face
-   * chain when it answers, otherwise the Gemini (`gemini-3.6`) fallback.
+   * Text-model reasoning only (no image analysis) — the Hugging Face chain
+   * when it answers, otherwise the Gemini (`gemini-3.6`) fallback.
    */
   | "llm"
   /**
-   * Built-in direct formatter — emitted whenever BOTH LLM stages were
+   * Built-in direct formatter — emitted whenever BOTH text models were
    * unavailable (zero-failure strategy: always 200, never a 500). Carries a
-   * diagnosis card when Step 1 succeeded, otherwise a friendly basic-mode
-   * Arabic reply (greeting-aware for text-only queries).
+   * diagnosis card when the image stage succeeded, otherwise a friendly
+   * basic-mode Arabic reply (greeting-aware for text-only queries).
    */
   | "direct";
 
@@ -148,6 +155,19 @@ export interface AssistantResponseBody {
   source: AssistantSource;
   /** Step 0 detection & cropping outcome (image requests only). */
   preprocessing?: AssistantPreprocessing | null;
-  /** Non-fatal pipeline notes (e.g. "vision step skipped"). */
+  /**
+   * Which image model produced `diagnosis` — `"gemini"` (primary) or
+   * `"mobilenet"` (fallback). `null` for text-only requests and for the
+   * Step 4 final fallback where no image model could answer. Carried for
+   * debugging and analytics; the user only ever sees `reply`.
+   */
+  analysisSource?: AnalysisSource | null;
+  /**
+   * Which text model narrated the analysis — `"huggingface"` (primary) or
+   * `"gemini_fallback"` (Step 3). `null` when no text model ran, i.e. the
+   * built-in direct formatter answered or Step 4 replied on its own.
+   */
+  textSource?: TextSource | null;
+  /** Non-fatal pipeline notes (e.g. "image analysis fell back to MobileNetV2"). */
   warnings?: string[];
 }
