@@ -42,8 +42,29 @@ export interface AssistantCopy {
     visionOnlyNote: string;
     /** Shown when Step 0 detected the leaf and cropped the background away. */
     cropApplied: string;
+    /** Shown when Step 0 ran the Smart Fallback Crop (no box above threshold). */
+    cropFallback: string;
+    /** Shown when the farmer confirmed a user-guided crop (Step 0 bypassed). */
+    cropUser: string;
     /** Shown when Step 0 found no usable leaf and kept the full frame. */
     cropNotFound: string;
+  };
+  /** Pre-submit interactive cropper modal (user-guided leaf crop). */
+  cropper: {
+    /** Modal title. */
+    title: string;
+    /** Gesture hint: draw a stroke or drag a box — smart snap handles the rest. */
+    hint: string;
+    /** "Cropped Leaf Preview" heading above the isolated tensor preview. */
+    previewTitle: string;
+    /** Placeholder while nothing is selected yet. */
+    previewEmpty: string;
+    /** Resets the canvas for another attempt. */
+    redo: string;
+    /** Confirms the selection and proceeds with the query. */
+    confirm: string;
+    /** Accessible label for the dismiss (X) control. */
+    close: string;
   };
   diagnosis: {
     title: string;
@@ -98,7 +119,18 @@ const AR: AssistantCopy = {
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
+    cropFallback: "✂️ لم يُعثر على ورقة واضحة — قُصّت المنطقة الخضراء (أو وسط الصورة) تلقائياً قبل التشخيص لرفع الدقة.",
+    cropUser: "✂️ حددتَ الورقة يدوياً — تم تجاوز الكشف التلقائي وإرسال منطقتك كما هي إلى المصنّف.",
     cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
+  },
+  cropper: {
+    title: "تحديد الورقة قبل الإرسال",
+    hint: "ارسم خطاً حول الورقة أو اسحب مربعاً حولها — سيلتقط التطبيق المنطقة الخضراء تلقائياً.",
+    previewTitle: "معاينة الورقة المحددة",
+    previewEmpty: "ارسم حول الورقة لعرض المعاينة.",
+    redo: "إعادة التحديد / Redo Crop",
+    confirm: "تأكيد وإرسال للتحليل / Confirm & Analyze",
+    close: "إغلاق",
   },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
@@ -153,7 +185,18 @@ const FR: AssistantCopy = {
     visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
+    cropFallback: "✂️ Aucune feuille nette détectée — recadrage automatique de la zone verte (ou centrée) avant le diagnostic pour améliorer la précision.",
+    cropUser: "✂️ Feuille recadrée manuellement — détection automatique contournée, votre sélection part telle quelle au classifieur.",
     cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",
+  },
+  cropper: {
+    title: "Cadrage avant envoi",
+    hint: "Tracez un trait ou encadrez la feuille — la zone verte est captée automatiquement.",
+    previewTitle: "Aperçu de la feuille recadrée",
+    previewEmpty: "Tracez la feuille pour voir l'aperçu.",
+    redo: "إعادة التحديد / Redo Crop",
+    confirm: "تأكيد وإرسال للتحليل / Confirm & Analyze",
+    close: "Fermer",
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",
