@@ -42,6 +42,8 @@ export interface AssistantCopy {
     visionOnlyNote: string;
     /** Shown when Step 0 detected the leaf and cropped the background away. */
     cropApplied: string;
+    /** Shown when Step 0 ran the Smart Fallback Crop (no box above threshold). */
+    cropFallback: string;
     /** Shown when Step 0 found no usable leaf and kept the full frame. */
     cropNotFound: string;
   };
@@ -98,6 +100,7 @@ const AR: AssistantCopy = {
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
+    cropFallback: "✂️ لم يُعثر على ورقة واضحة — قُصّت المنطقة الخضراء (أو وسط الصورة) تلقائياً قبل التشخيص لرفع الدقة.",
     cropNotFound: "لم يُعثر على ورقة واضحة — شُخّصت الصورة كاملة.",
   },
   diagnosis: {
@@ -153,6 +156,7 @@ const FR: AssistantCopy = {
     visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",
+    cropFallback: "✂️ Aucune feuille nette détectée — recadrage automatique de la zone verte (ou centrée) avant le diagnostic pour améliorer la précision.",
     cropNotFound: "Aucune feuille nette détectée — l'image entière a été analysée.",
   },
   diagnosis: {

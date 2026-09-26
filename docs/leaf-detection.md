@@ -13,7 +13,7 @@ largest source of misdiagnosis in the pipeline.
 
 | Stage | Where | Model | Cost |
 | --- | --- | --- | --- |
-| Step 0 · detection | Server (route) | `facebook/detr-resnet-50` (COCO DETR-ResNet-50, plant/leaf-labelled boxes only; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
+| Step 0 · detection | Server (route) | `facebook/detr-resnet-101` primary → `facebook/detr-resnet-50` fallback (higher-accuracy COCO DETR-ResNet-101, plant/vegetation-labelled boxes only — `plant`, `potted plant`, `foliage`, `leaf`, general vegetative classes — at a generous `0.22` score threshold; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
 | Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
 | Step 1 · classification | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`) | Free tier. |
 | Stages 1–3 · LLM chain | Server (route) | HF router LLMs (PRIMARY) → Gemini `gemini-3.6` (FALLBACK, image + MobileNetV2 reference) → built-in formatter | Existing behaviour. |
@@ -23,7 +23,13 @@ The obsolete fine-tuned PlantDoc detector
 ids (`dima806/plant_disease_image_detection`, `fxmeng/plantdoc-vit`,
 `wambugu71/crop_leaf_diseases_vit`) are **removed**: they no longer answer
 reliably on the free router and only cost round-trips before a known-good
-id would have answered anyway.
+id would have answered anyway. No foliage-finetuned detector
+(`foduucom/plant-leaf-detection-and-classification`,
+`nickmuchi/yolos-small-plant-disease-detection`, …) is currently served by
+the Inference Providers router at all (`inferenceProviderMapping` is
+empty), so the accuracy upgrade is the deeper **ResNet-101 backbone** plus
+the expanded plant-specific label query and the lowered threshold — not a
+label-space swap.
 
 The detector weights (~166 MB DETR-ResNet-50 checkpoint) live on
 **Hugging Face's infrastructure** — the serverless function only POSTs the
@@ -38,18 +44,41 @@ Pure, dependency-free, fully unit-tested geometry:
 1. **Validate** the HF object-detection payload (`{score,label,box}` items,
    rounded to integer pixels; wrong-task payloads degrade to "nothing found"
    instead of throwing).
-2. **Filter** detections below `minScore = 0.45`.
-3. **Grow the dominant cluster**: the highest-scoring box seeds a cluster; any
+2. **Query plant-specific labels**: only boxes whose label matches
+   `isVegetationLabel` survive — `plant`, `potted plant`, `foliage`,
+   `leaf`/`leaves`, `grass`, `weed`, `vine`, crop names… — a `person` or
+   `hand` box never crops, however confident.
+3. **Filter** detections below `minScore = 0.22` (lowered from 0.45 to
+   catch dim/back-lit foliage; the cluster + coverage guards absorb the
+   extra false positives).
+4. **Grow the dominant cluster**: the highest-scoring box seeds a cluster; any
    box overlapping the current union is merged, repeated until stable. Boxes
    that don't touch the cluster (background leaves, false positives) are
    ignored — a farmer photographs one leaf, and a single stray detection must
    not wreck the crop window.
-4. **Pad** the cluster by 12 % of its own size per side and **clamp** to the
+5. **Pad** the cluster by 12 % of its own size per side and **clamp** to the
    image so `sharp().extract()` always receives an in-bounds integer rect.
-5. **Refuse pointless crops**: a padded box covering < 3 % of the frame
-   (speck — bad read) or > 92 % (nothing would be removed) keeps the original.
+6. **Refuse pointless crops**: a padded box covering < 3 % of the frame
+   (speck — bad read) or > 92 % (nothing would be removed) keeps the
+   candidate — which now falls through to the Smart Fallback Crop below
+   instead of the raw frame.
 
-## Failure modes — all non-fatal, all → original frame
+**Smart Fallback Crop** (same module, when no box cleared the threshold):
+the frame is STILL trimmed locally before MobileNetV2 ever sees it —
+
+1. **Green-mask crop** — the photo is downscaled (≤160 px), every pixel is
+   tested in HSV for green dominance (hue 35°–175°, saturation ≥ 0.15), and
+   the bounding box of the vegetation pixels (+12 % padding, same coverage
+   guard) becomes the crop window;
+2. **Centre-focused 80 % crop** — used when there is no meaningful green or
+   the mask would keep (almost) the whole frame; always available, pure
+   geometry, no pixels analysed.
+
+Both outcomes report the crop window as a **normalised
+`[xMin, yMin, xMax, yMax]` tuple** (corners, each value in `[0, 1]`, rounded
+to 4 decimals) in `preprocessing.box`.
+
+## Failure modes — all non-fatal
 
 | Case | Behaviour |
 | --- | --- |
@@ -57,14 +86,16 @@ Pure, dependency-free, fully unit-tested geometry:
 | Undecodable/too-small image | `status: "unavailable"`, warning pushed, original classified. |
 | Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, original classified. |
 | Payload is not object-detection-shaped | Treated as "this id can't serve detection" → next id in the chain. |
-| No detection above threshold / useless box | `status: "no-leaf"` (a **normal** outcome — no warning), original classified. |
+| No detection above threshold / useless box | **Smart Fallback Crop** → `status: "smart-fallback"` (a **normal** outcome — no warning): the green-mask or centre-focused 80 % crop is classified instead of the raw frame. |
+| Even the fallback crop impossible (degenerate frame) | Legacy `status: "no-leaf"` (normal — no warning), original classified. |
 
 The outcome travels to the client in `AssistantResponseBody.preprocessing`
-(`cropped | no-leaf | unavailable | skipped`, detector id, crop box, wall
+(`cropped | smart-fallback | no-leaf | unavailable | skipped`, detector id,
+normalised `[xMin, yMin, xMax, yMax]` crop box, wall
 time). The assistant UI shows a two-phase thinking label
 ("تحديد الورقة واقتصاص الخلفية…" → "تحليل الصورة وتشخيص المرض…") while the
 longer pipeline runs, and a small ✂️ note on the answer when a crop was
-applied (or a note when no leaf was found) — the farmer always knows what
+applied (detected or automatic fallback) — the farmer always knows what
 happened to their photo.
 
 ## Why not client-side detection?
@@ -92,8 +123,9 @@ self-hosted endpoint, and `leaf-detect.ts` is already reusable client-side
 ```bash
 npm run test:unit    # includes test/unit/leaf-detect.unit.test.ts and the
                      # Step 0 route suites (crop reaches the classifier,
-                     # no-leaf keeps the full frame, outage degrades, chain
-                     # walk, env override, keyless skip)
+                     # smart fallback crop (green mask + centre 80 %),
+                     # outage degrades, chain walk, env override, keyless
+                     # skip)
 npm run lint
 npm run build
 ```

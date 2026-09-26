@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  centerFallbackCrop,
   clampBox,
+  greenMaskBox,
+  isGreenPixel,
+  isVegetationLabel,
   LEAF_DETECT_DEFAULTS,
+  normalizedCropBox,
   overlapRatio,
   parseObjectDetections,
   selectLeafCrop,
+  smartFallbackCrop,
   unionBox,
   type LeafDetection,
+  type PixelGrid,
 } from "../../src/lib/assistant/leaf-detect";
 
 const box = (xmin: number, ymin: number, xmax: number, ymax: number) => ({ xmin, ymin, xmax, ymax });
@@ -131,4 +138,174 @@ test("selectLeafCrop always returns integer rects ready for sharp().extract()", 
   for (const value of Object.values(decision.rect)) {
     assert.equal(Number.isInteger(value), true, `rect value ${value} must be an integer`);
   }
+});
+
+test("the score threshold sits in the generous 0.20–0.25 band", () => {
+  assert.ok(LEAF_DETECT_DEFAULTS.minScore >= 0.2, "threshold must reach down to 0.20");
+  assert.ok(LEAF_DETECT_DEFAULTS.minScore <= 0.25, "threshold must stay at/below 0.25");
+});
+
+/* ------------------------------------------------------------------ */
+/*  isVegetationLabel — plant-specific label query policy              */
+/* ------------------------------------------------------------------ */
+
+test("isVegetationLabel accepts plant/potted-plant/foliage and general vegetative labels", () => {
+  for (const label of [
+    "plant",
+    "potted plant",
+    "POTTED PLANT",
+    "potted-plant",
+    "foliage",
+    "vegetation",
+    "leaf",
+    "leaves",
+    "Tomato leaf",
+    "Tomato___leaf", // underscore-separated fine-tune class names
+    "grass",
+    "weed",
+    "crop",
+    "vine",
+    "houseplant",
+    "Wheat",
+    "maize",
+  ]) {
+    assert.equal(isVegetationLabel(label), true, `"${label}" must be accepted`);
+  }
+});
+
+test("isVegetationLabel rejects non-vegetative boxes (person, hand, desk…)", () => {
+  for (const label of ["person", "hand", "desk", "wall", "watch", "car", "cell phone", "cup", "book", "unknown"]) {
+    assert.equal(isVegetationLabel(label), false, `"${label}" must be rejected`);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/*  Smart Fallback Crop — green mask → centre-focused 80% crop         */
+/* ------------------------------------------------------------------ */
+
+/** RGBA grid from a per-pixel RGB function. */
+function makeGrid(
+  width: number,
+  height: number,
+  pixel: (x: number, y: number) => readonly [number, number, number],
+): PixelGrid {
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = pixel(x, y);
+      const i = (y * width + x) * 4;
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
+const GREY: readonly [number, number, number] = [128, 128, 128];
+const GREEN: readonly [number, number, number] = [34, 120, 45];
+
+test("isGreenPixel accepts vegetation hues and rejects walls, desks and hands", () => {
+  assert.equal(isGreenPixel(34, 120, 45), true, "leaf green");
+  assert.equal(isGreenPixel(20, 60, 25), true, "shaded forest green");
+  assert.equal(isGreenPixel(60, 160, 40), true, "yellow-green");
+  assert.equal(isGreenPixel(128, 128, 128), false, "grey wall");
+  assert.equal(isGreenPixel(240, 240, 240), false, "white desk");
+  assert.equal(isGreenPixel(224, 172, 140), false, "skin tone");
+  assert.equal(isGreenPixel(40, 80, 200), false, "blue shirt");
+  assert.equal(isGreenPixel(0, 0, 0), false, "black");
+});
+
+test("greenMaskBox returns the bounding box of the green pixels", () => {
+  // 20×10 grey frame with a green patch at x∈[5,14], y∈[2,7].
+  const grid = makeGrid(20, 10, (x, y) =>
+    x >= 5 && x <= 14 && y >= 2 && y <= 7 ? GREEN : GREY,
+  );
+  assert.deepEqual(greenMaskBox(grid), { xmin: 5, ymin: 2, xmax: 15, ymax: 8 });
+});
+
+test("greenMaskBox rejects frames with no (or barely any) green", () => {
+  assert.equal(greenMaskBox(makeGrid(20, 10, () => GREY)), null);
+  // A single stray green pixel is noise, not a leaf.
+  assert.equal(
+    greenMaskBox(makeGrid(20, 10, (x, y) => (x === 3 && y === 3 ? GREEN : GREY))),
+    null,
+  );
+});
+
+test("smartFallbackCrop trims to the green-dominant region when one exists", () => {
+  const grid = makeGrid(20, 10, (x, y) =>
+    x >= 5 && x <= 14 && y >= 2 && y <= 7 ? GREEN : GREY,
+  );
+  // Mask (5,2)-(15,8) + 12 % padding (1,1) → rect (4,1) 12×8.
+  assert.deepEqual(smartFallbackCrop(20, 10, grid), {
+    left: 4,
+    top: 1,
+    width: 12,
+    height: 8,
+  });
+});
+
+test("smartFallbackCrop degrades to the centred 80% crop without a usable mask", () => {
+  const expected = centerFallbackCrop(20, 10);
+  assert.ok(expected);
+  // No grid at all…
+  assert.deepEqual(smartFallbackCrop(20, 10, null), expected);
+  // …an all-grey grid…
+  assert.deepEqual(smartFallbackCrop(20, 10, makeGrid(20, 10, () => GREY)), expected);
+  // …and a fully-green frame (mask coverage ≈ 100 % > maxCoverage — the
+  // box would keep everything, so the centre crop trims the outer frame).
+  assert.deepEqual(smartFallbackCrop(20, 10, makeGrid(20, 10, () => GREEN)), expected);
+});
+
+test("centerFallbackCrop keeps a centred 80% window with integer in-bounds rects", () => {
+  assert.deepEqual(centerFallbackCrop(100, 80), { left: 10, top: 8, width: 80, height: 64 });
+  for (const [w, h] of [
+    [64, 48],
+    [63, 47],
+    [1080, 720],
+    [8, 8],
+  ] as const) {
+    const rect = centerFallbackCrop(w, h);
+    assert.ok(rect);
+    for (const value of Object.values(rect)) {
+      assert.equal(Number.isInteger(value), true, `rect value ${value} must be an integer`);
+    }
+    assert.ok(rect.left >= 0 && rect.top >= 0);
+    assert.ok(rect.left + rect.width <= w && rect.top + rect.height <= h);
+    assert.ok(rect.width >= 1 && rect.height >= 1);
+  }
+});
+
+test("smartFallbackCrop rejects degenerate image sizes", () => {
+  assert.equal(smartFallbackCrop(0, 10), null);
+  assert.equal(smartFallbackCrop(10, -1), null);
+});
+
+/* ------------------------------------------------------------------ */
+/*  normalizedCropBox — the reported [xMin, yMin, xMax, yMax] format   */
+/* ------------------------------------------------------------------ */
+
+test("normalizedCropBox reports normalised corner coordinates", () => {
+  // (5,4) 50×40 on a 64×48 frame → corners scaled to [0, 1].
+  assert.deepEqual(
+    normalizedCropBox({ left: 5, top: 4, width: 50, height: 40 }, 64, 48),
+    [0.0781, 0.0833, 0.8594, 0.9167],
+  );
+  // A full-frame crop maps to the full [0, 1] range.
+  assert.deepEqual(
+    normalizedCropBox({ left: 0, top: 0, width: 64, height: 48 }, 64, 48),
+    [0, 0, 1, 1],
+  );
+});
+
+test("normalizedCropBox always yields ordered values inside [0, 1]", () => {
+  const tuple = normalizedCropBox({ left: 12, top: 9, width: 40, height: 30 }, 64, 48);
+  const [xMin, yMin, xMax, yMax] = tuple;
+  for (const value of tuple) {
+    assert.ok(value >= 0 && value <= 1, `${value} must be in [0, 1]`);
+  }
+  assert.ok(xMin < xMax);
+  assert.ok(yMin < yMax);
 });

@@ -8,19 +8,29 @@
  *
  *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
  *     free Hugging Face Inference router now ALSO runs an open-source object
- *     detector: the COCO `facebook/detr-resnet-50` (DETR-ResNet-50) with a
- *     plant-only label filter is the primary id (the obsolete fine-tuned
- *     PlantDoc checkpoint is gone — it no longer serves on the free router;
- *     the chain stays overridable via `HF_LEAF_DETECT_MODELS`). The detected
- *     box is grown into a padded, clamped crop window and the photo is
- *     cropped server-side with sharp, so background noise (hands, soil, pots)
- *     NEVER reaches the PlantVillage classifier: Step 1 sees ONLY the
- *     cropped pixels. Strictly an accuracy
+ *     detector: the higher-accuracy COCO `facebook/detr-resnet-101`
+ *     (DETR-ResNet-101, confirmed live on the `hf-inference` provider) with
+ *     a plant/vegetation-only label filter is the primary id, walking to
+ *     `facebook/detr-resnet-50` when it is loading/404 (no foliage-finetuned
+ *     checkpoint is currently served by the router — the obsolete
+ *     fine-tuned PlantDoc checkpoint is gone — and the chain stays
+ *     overridable via `HF_LEAF_DETECT_MODELS`). The label filter accepts
+ *     "plant", "potted plant", "foliage", "leaf/leaves" and general
+ *     vegetative boxes, and the score threshold is a generous 0.22 so
+ *     dim/back-lit foliage still crops. The detected box is grown into a
+ *     padded, clamped crop window and the photo is cropped server-side with
+ *     sharp, so background noise (hands, soil, pots) NEVER reaches the
+ *     PlantVillage classifier: Step 1 sees ONLY the cropped pixels.
+ *     When the detector answers with no box above threshold the stage does
+ *     NOT forward the raw frame — an automated Smart Fallback Crop trims it
+ *     first (HSV green-dominant bounding box, else a centre-focused 80 %
+ *     crop), reported as `status: "smart-fallback"`. Strictly an accuracy
  *     pre-step — every failure mode is non-fatal and falls back to the
  *     untouched original frame (the exact pre-Step-0 behaviour): missing HF
- *     key, an undecodable image, an unreachable/loading detector, a payload
- *     that is not object-detection-shaped, or "no leaf above threshold". The
- *     outcome is reported in the new `preprocessing` response field and in
+ *     key, an undecodable image, an unreachable/loading detector, or a
+ *     payload that is not object-detection-shaped. The
+ *     outcome is reported in the new `preprocessing` response field (crop
+ *     window as a normalised `[xMin, yMin, xMax, yMax]` tuple) and in
  *     `warnings[]` when the stage could not run at all.
  *     Vercel-friendly by design: no model weights ever touch the function
  *     (the detector runs on Hugging Face's free serverless CPU tier) and
@@ -179,10 +189,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import sharp from "sharp";
 import {
   LEAF_DETECT_DEFAULTS,
+  isVegetationLabel,
+  normalizedCropBox,
   parseObjectDetections,
   selectLeafCrop,
+  smartFallbackCrop,
   type CropRect,
   type LeafDetection,
+  type PixelGrid,
 } from "@/lib/assistant/leaf-detect";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
@@ -235,14 +249,28 @@ const HF_ENDPOINT = (model: string) =>
  * Step 0 model chain (object-detection), tried in order, through the SAME
  * hf-inference router endpoint as the Step 1 classifier:
  *
- *   • `facebook/detr-resnet-50` — PRIMARY detector: the open-source
- *     DETR-ResNet-50 trained on COCO. Only its plant-flavoured labels
- *     ("potted plant", …) are accepted, so a plant photo still crops while
- *     a photo of the farmer's hand never passes the label filter. The
- *     obsolete fine-tuned PlantDoc checkpoint
- *     (`suryanshgoel/detr-finetuned-plantdoc`) is REMOVED — it is not
- *     reliably served on the free router anymore and its failures only
- *     cost a round-trip before the COCO id answered anyway.
+ *   • `facebook/detr-resnet-101` — PRIMARY detector: the higher-accuracy
+ *     DETR-ResNet-101 (deeper ResNet-101 backbone, same COCO training,
+ *     `status: "live"` on the `hf-inference` provider). Together with the
+ *     raised recall of the shared vegetation label filter and the 0.22
+ *     threshold this is the accuracy upgrade over the old single
+ *     ResNet-50 setup — no foliage-finetuned checkpoint
+ *     (`foduucom/plant-leaf-detection-and-classification`,
+ *     `suryanshgoel/detr-finetuned-plantdoc`, `nickmuchi/yolos-small-plant-disease-detection`,
+ *     …) is currently served by the Inference Providers router (their
+ *     `inferenceProviderMapping` is empty), so swapping the backbone — not
+ *     the label space — is the reliable upgrade.
+ *   • `facebook/detr-resnet-50` — FALLBACK detector: the original COCO
+ *     DETR-ResNet-50 answers whenever the 101 id is loading or retired, so
+ *     the upgrade costs nothing when it cannot run.
+ *
+ * Both ids share {@link isVegetationLabel}: only plant-flavoured labels
+ * ("plant", "potted plant", "foliage", "leaf", general vegetative boxes…)
+ * are accepted, so a plant photo still crops while a photo of the farmer's
+ * hand, watch or desk never passes the label filter. The obsolete
+ * fine-tuned PlantDoc checkpoint (`suryanshgoel/detr-finetuned-plantdoc`)
+ * stays REMOVED — it is not reliably served on the free router anymore and
+ * its failures only cost a round-trip before a COCO id answered anyway.
  *
  * Open-source and free — the weights live on Hugging Face's infrastructure,
  * the function only parses the returned boxes, so the serverless bundle and
@@ -255,14 +283,16 @@ interface LeafDetectModel {
 }
 
 const DEFAULT_LEAF_DETECT_MODELS: LeafDetectModel[] = [
-  { id: "facebook/detr-resnet-50", acceptLabel: (label) => /plant|leaf/i.test(label) },
+  { id: "facebook/detr-resnet-101", acceptLabel: isVegetationLabel },
+  { id: "facebook/detr-resnet-50", acceptLabel: isVegetationLabel },
 ];
 
 /**
  * `HF_LEAF_DETECT_MODELS="id1,id2"` overrides the chain (e.g. to pin a
  * self-hosted or newer detector). Custom ids have no known label space, so
- * their accepted labels are: clearly plant-flavoured words, or the unnamed
- * `LABEL_n` indices most fine-tuned checkpoints ship with.
+ * their accepted labels are: the shared vegetation words (plant, leaf,
+ * foliage, crop…), or the unnamed `LABEL_n` indices most fine-tuned
+ * checkpoints ship with.
  */
 function resolveLeafDetectModels(): LeafDetectModel[] {
   const raw = process.env.HF_LEAF_DETECT_MODELS?.trim();
@@ -272,7 +302,7 @@ function resolveLeafDetectModels(): LeafDetectModel[] {
   return ids.map((id) => ({
     id,
     acceptLabel: (label: string) =>
-      /plant|leaf|weed|crop/i.test(label) || /^LABEL_\d+$/i.test(label),
+      isVegetationLabel(label) || /^LABEL_\d+$/i.test(label),
   }));
 }
 
@@ -288,6 +318,14 @@ const LEAF_CROP_JPEG_QUALITY = 88;
 
 /** Smallest image worth cropping (below this, the frame IS the leaf). */
 const LEAF_CROP_MIN_DIMENSION_PX = 8;
+
+/**
+ * Longest edge of the downscaled RGBA grid read for the Smart Fallback
+ * Crop's green mask — small enough that the decode+rescale costs a few ms,
+ * large enough that a leaf occupying a quarter of the frame still yields a
+ * stable bounding box.
+ */
+const FALLBACK_MASK_MAX_EDGE_PX = 160;
 
 interface LeafDetectOutcome {
   model: string;
@@ -383,11 +421,39 @@ async function cropLeafImage(source: Buffer, rect: CropRect): Promise<Buffer> {
 }
 
 /**
+ * Downscale the photo once (≤ {@link FALLBACK_MASK_MAX_EDGE_PX} px) and read
+ * it back as an RGBA {@link PixelGrid} for the Smart Fallback Crop's green
+ * mask. Never throws to the caller: any sharp failure surfaces as `null`,
+ * which makes {@link smartFallbackCrop} fall back to the centre crop.
+ */
+async function readFallbackPixelGrid(source: Buffer): Promise<PixelGrid | null> {
+  try {
+    const { data, info } = await sharp(source)
+      .resize({
+        width: FALLBACK_MASK_MAX_EDGE_PX,
+        height: FALLBACK_MASK_MAX_EDGE_PX,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return { width: info.width, height: info.height, data };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(`[Step 0: SmartFallback Mask] ${detail} — centre crop instead`);
+    return null;
+  }
+}
+
+/**
  * Step 0 orchestration: detect the leaf, crop to it, and return BOTH the
  * stage report (`AssistantPreprocessing`) and the image the classifier must
- * receive — the cropped pixels on success, the untouched original in every
- * other case. Never throws: any internal failure is converted into an
- * "unavailable" report plus a non-fatal warning.
+ * receive — the detected crop on success, the Smart Fallback Crop when the
+ * detector answered with nothing above threshold, and the untouched
+ * original only when detection itself could not run (no key / undecodable
+ * frame / endpoint outage). Never throws: any internal failure is
+ * converted into an "unavailable" report plus a non-fatal warning.
  */
 async function runLeafDetectionStage(
   image: AssistantImagePayload,
@@ -422,17 +488,44 @@ async function runLeafDetectionStage(
       minScore: LEAF_DETECT_DEFAULTS.minScore,
     });
     if (!decision) {
+      // Smart Fallback Crop: the detector answered but nothing cleared the
+      // score threshold — NEVER forward the raw frame (desks, watches,
+      // hands, walls) to MobileNetV2. Trim it locally instead: the HSV
+      // green-dominant bounding box first, the centre-focused 80 % crop as
+      // the always-available last resort.
+      const grid = await readFallbackPixelGrid(source);
+      const rect = smartFallbackCrop(width, height, grid);
+      if (!rect) {
+        // Degenerate frame — even the centre crop is impossible. Legacy
+        // full-frame outcome, kept as a defensive branch.
+        console.log(
+          `[Step 0: Detect NoLeaf] model=${model} above-threshold=${detections.length}, no fallback crop — the full frame goes to Step 1`,
+        );
+        return {
+          preprocessing: {
+            status: "no-leaf",
+            detector: model,
+            box: null,
+            durationMs: Date.now() - startedAt,
+          },
+          image: original,
+        };
+      }
+
+      const fallbackCrop = await cropLeafImage(source, rect);
+      const durationMs = Date.now() - startedAt;
+      const coverage = Math.round(((rect.width * rect.height) / (width * height)) * 100);
       console.log(
-        `[Step 0: Detect NoLeaf] model=${model} above-threshold=${detections.length} — the full frame goes to Step 1`,
+        `[Step 0: SmartFallback] model=${model} above-threshold=${detections.length} box=${rect.left},${rect.top}+${rect.width}x${rect.height} coverage=${coverage}% ${durationMs}ms — background trimmed WITHOUT a detection; ONLY the crop goes to Step 1`,
       );
       return {
         preprocessing: {
-          status: "no-leaf",
+          status: "smart-fallback",
           detector: model,
-          box: null,
-          durationMs: Date.now() - startedAt,
+          box: normalizedCropBox(rect, width, height),
+          durationMs,
         },
-        image: original,
+        image: { data: fallbackCrop.toString("base64"), mimeType: "image/jpeg" },
       };
     }
 
@@ -445,12 +538,7 @@ async function runLeafDetectionStage(
       preprocessing: {
         status: "cropped",
         detector: model,
-        box: [
-          decision.rect.left,
-          decision.rect.top,
-          decision.rect.width,
-          decision.rect.height,
-        ],
+        box: normalizedCropBox(decision.rect, width, height),
         durationMs,
       },
       image: { data: cropped.toString("base64"), mimeType: "image/jpeg" },

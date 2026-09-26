@@ -40,19 +40,28 @@ export interface AssistantImagePayload {
  */
 export interface AssistantPreprocessing {
   /**
-   * cropped      — a leaf was detected and only the cropped region reached
-   *                the classifier;
-   * no-leaf      — the detector found no usable leaf box (or the crop would
-   *                have kept the whole frame) — the original image was used;
-   * unavailable  — the detection endpoint could not be reached (network,
-   *                loading, unexpected payload) — the original image was used;
-   * skipped      — no Hugging Face token is configured, so detection cannot
-   *                run (mirrors the Step 1 skip).
+   * cropped       — a leaf was detected and only the cropped region reached
+   *                 the classifier;
+   * smart-fallback— the detector answered but no box cleared the score
+   *                 threshold, so the automated Smart Fallback Crop (HSV
+   *                 green-dominant box, else a centre-focused 80 % crop)
+   *                 trimmed desks/hands/walls before the classifier;
+   * no-leaf       — no detector box AND even the fallback crop was
+   *                 impossible (degenerate frame) — the original image was
+   *                 used (legacy status, normally unreachable);
+   * unavailable   — the detection endpoint could not be reached (network,
+   *                 loading, unexpected payload) — the original image was used;
+   * skipped       — no Hugging Face token is configured, so detection cannot
+   *                 run (mirrors the Step 1 skip).
    */
-  status: "cropped" | "no-leaf" | "unavailable" | "skipped";
+  status: "cropped" | "smart-fallback" | "no-leaf" | "unavailable" | "skipped";
   /** Detector model id, when a detection call was attempted. */
   detector: string | null;
-  /** Crop window on the ORIGINAL image, [left, top, width, height]. */
+  /**
+   * Crop window on the ORIGINAL image as a normalised
+   * `[xMin, yMin, xMax, yMax]` tuple — every coordinate in `[0, 1]`
+   * (corners, not size), `null` when no crop was applied.
+   */
   box: [number, number, number, number] | null;
   /** Wall-clock cost of the whole stage (detection + crop), in ms. */
   durationMs: number;

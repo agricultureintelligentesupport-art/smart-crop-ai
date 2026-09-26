@@ -437,6 +437,15 @@ export default function AssistantView() {
                       {t.chat.cropApplied}
                     </p>
                   )}
+                  {msg.author === "assistant" && msg.preprocessing?.status === "smart-fallback" && (
+                    <p
+                      className="mb-2 flex items-start gap-1.5 rounded-2xl bg-amber-50/80 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-amber-800 ring-1 ring-amber-200/70"
+                      title={msg.preprocessing.detector ?? undefined}
+                    >
+                      <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-amber-600" />
+                      {t.chat.cropFallback}
+                    </p>
+                  )}
                   {msg.author === "assistant" && msg.preprocessing?.status === "no-leaf" && (
                     <p className="mb-2 flex items-start gap-1.5 rounded-2xl bg-white/70 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-900/70 ring-1 ring-[#E2F1E8]">
                       <ScanSearch size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />

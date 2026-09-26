@@ -192,8 +192,13 @@ const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined =
 const MOBILENET_MODEL =
   "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification";
 
-/** Step 0 — primary leaf detector (COCO DETR-ResNet-50), mirrors the route. */
-const LEAF_DETECTOR = "facebook/detr-resnet-50";
+/**
+ * Step 0 — primary leaf detector (higher-accuracy COCO DETR-ResNet-101),
+ * mirrors the route's default chain head.
+ */
+const LEAF_DETECTOR = "facebook/detr-resnet-101";
+/** Step 0 — second id of the default chain, walked when the primary 404s. */
+const LEAF_DETECTOR_FALLBACK = "facebook/detr-resnet-50";
 
 /**
  * Stage 1 model chain, in order — must mirror the route's HF_LLM_MODELS:
@@ -709,9 +714,9 @@ test("hybrid fallback path: Gemini receives the image + the MobileNetV2 referenc
       geminiImage = geminiImagePart(body);
       return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
     }
-    // Step 0 — the primary detector (facebook/detr-resnet-50) sees the raw
-    // frame first; it finds no usable leaf here, so the ORIGINAL frame
-    // continues down the pipeline.
+    // Step 0 — the primary detector (facebook/detr-resnet-101) sees the raw
+    // frame first; it finds no usable leaf here, so the Smart Fallback Crop
+    // (centre-focused 80 % on this solid frame) trims it before Step 1.
     if (isDetectUrl(String(url))) {
       assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
       return Response.json([]);
@@ -729,7 +734,9 @@ test("hybrid fallback path: Gemini receives the image + the MobileNetV2 referenc
   // A decodable frame so Step 0 (detect) actually runs its round-trip.
   const response = await POST(imageRequest(LEAF_JPEG_B64));
   assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
+  const payload = (await response.json()) as AssistantPayload & {
+    preprocessing?: PreprocessingLike;
+  };
   assert.equal(payload.source, "hybrid");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
@@ -738,17 +745,19 @@ test("hybrid fallback path: Gemini receives the image + the MobileNetV2 referenc
   // Pipeline order: detect → classify → HF LLM (down) → Gemini.
   assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.length}`);
   assert.ok(isDetectUrl(urls[0]));
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
+  assert.match(urls[0], /facebook\/detr-resnet-101/);
   // Step 1 is the MobileNetV2 PlantVillage classifier — the sole default.
   assert.ok(isClassifyUrl(urls[1]));
   assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
   assert.equal(urls[2], HF_ROUTER_CHAT_URL);
   assert.ok(isGeminiUrl(urls[3]));
-  // The photo itself travels with the Gemini turn (inlineData part) —
-  // no-leaf outcome above means the original frame is what Gemini inspects.
+  // The photo itself travels with the Gemini turn (inlineData part) — the
+  // no-detection outcome above means the SMART FALLBACK CROP (not the raw
+  // frame) is what Gemini inspects.
   assert.ok(geminiImage, "Gemini must receive the attached image as an inlineData part");
   assert.equal(geminiImage?.mimeType, "image/jpeg");
-  assert.equal(geminiImage?.data, LEAF_JPEG_B64);
+  assert.notEqual(geminiImage?.data, LEAF_JPEG_B64);
+  assert.equal(payload.preprocessing?.status, "smart-fallback");
   // The MobileNetV2 reference travels in the text: disease label…
   assert.match(geminiUser, /Tomato___Early_blight/);
   assert.match(geminiUser, /95%/);
@@ -1941,8 +1950,8 @@ const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toSt
 
 /**
  * The Step 0 mock answer: one high-confidence leaf box at (10,8)-(50,40).
- * The label must pass the facebook/detr-resnet-50 plant filter
- * (`/plant|leaf/i`) — "potted plant" is the COCO id's plant-flavoured label.
+ * The label must pass the route's vegetation filter
+ * (`isVegetationLabel` → "potted plant" is COCO's plant-flavoured class).
  */
 const leafDetection = () =>
   Response.json([{ label: "potted plant", score: 0.87, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
@@ -1982,9 +1991,11 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   // Pipeline order: detect → classify → HF LLM (down) → Gemini fallback.
   assert.equal(urls.length, 4);
   assert.ok(isDetectUrl(urls[0]));
-  // The PRIMARY detector is the COCO facebook/detr-resnet-50 — the obsolete
-  // fine-tuned PlantDoc checkpoint is gone from the default chain.
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
+  // The PRIMARY detector is the higher-accuracy COCO
+  // facebook/detr-resnet-101 — the obsolete fine-tuned PlantDoc checkpoint
+  // is gone from the default chain (facebook/detr-resnet-50 stays as the
+  // walked fallback, covered by the chain test below).
+  assert.match(urls[0], /facebook\/detr-resnet-101/);
   assert.doesNotMatch(urls[0], /detr-finetuned-plantdoc/);
   assert.ok(isClassifyUrl(urls[1]));
   assert.equal(urls[2], HF_ROUTER_CHAT_URL);
@@ -1994,23 +2005,24 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   assert.notEqual(classifyBody, LEAF_JPEG_B64);
   assert.equal(classifyContentType, "image/jpeg");
 
-  // Crop window: 40×32 box + 12% padding (5,4) → (5,4) 50×40 on the 64×48 frame.
+  // Crop window: 40×32 box + 12% padding (5,4) → (5,4) 50×40 on the 64×48
+  // frame, reported as a normalised [xMin, yMin, xMax, yMax] tuple.
   assert.equal(payload.preprocessing?.status, "cropped");
   assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
-  assert.deepEqual(payload.preprocessing?.box, [5, 4, 50, 40]);
+  assert.deepEqual(payload.preprocessing?.box, [0.0781, 0.0833, 0.8594, 0.9167]);
   assert.equal(typeof payload.preprocessing?.durationMs, "number");
 
   assert.equal(payload.source, "hybrid");
   assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
-test("Step 0 with no usable detection keeps the full frame for Step 1", async () => {
+test("Step 0 with no usable detection applies the Smart Fallback Crop — never the raw frame", async () => {
   configureKeys();
   let classifyBody = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     // The primary HF LLM is down → the Gemini fallback answers.
     if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("الصورة كاملة.");
+    if (isGeminiUrl(String(url))) return geminiReply("قُصّت الصورة تلقائياً.");
     if (isDetectUrl(String(url))) return Response.json([]);
     assert.ok(isClassifyUrl(String(url)));
     classifyBody = bodyB64(init);
@@ -2020,13 +2032,57 @@ test("Step 0 with no usable detection keeps the full frame for Step 1", async ()
   const response = await POST(imageRequest(LEAF_JPEG_B64));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  // The untouched original reached the classifier.
-  assert.equal(classifyBody, LEAF_JPEG_B64);
-  assert.equal(payload.preprocessing?.status, "no-leaf");
-  assert.equal(payload.preprocessing?.box, null);
-  // A no-leaf outcome is a normal result, not a pipeline warning.
+  // The RAW original must NOT reach the classifier: this solid-green frame
+  // has no separable green box (the mask would keep the whole frame), so
+  // the centre-focused 80 % crop trims the outer frame instead.
+  assert.notEqual(classifyBody, LEAF_JPEG_B64);
+  assert.equal(payload.preprocessing?.status, "smart-fallback");
+  assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
+  // 64×48 → 51×38 centred at (7,5), reported as normalised
+  // [xMin, yMin, xMax, yMax] corners in [0, 1].
+  assert.deepEqual(payload.preprocessing?.box, [0.1094, 0.1042, 0.9063, 0.8958]);
+  // A fallback crop is a normal result, not a pipeline warning.
   assert.doesNotMatch(warningText(payload), /Step 0/);
   assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 Smart Fallback Crop follows the green-dominant region, not the frame centre", async () => {
+  configureKeys();
+  // Lossless 64×48 grey frame with a green patch hugging the LEFT edge —
+  // the mask crop and the centre crop are wildly different windows, so the
+  // box proves the HSV mask (not the centre fallback) chose the crop.
+  const patch = await sharp({
+    create: { width: 17, height: 37, channels: 3, background: { r: 34, g: 120, b: 45 } },
+  })
+    .png()
+    .toBuffer();
+  const png = await sharp({
+    create: { width: 64, height: 48, channels: 3, background: { r: 128, g: 128, b: 128 } },
+  })
+    .composite([{ input: patch, left: 4, top: 4 }])
+    .png()
+    .toBuffer();
+  const pngB64 = png.toString("base64");
+
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) return geminiReply("المنطقة الخضراء فقط.");
+    if (isDetectUrl(String(url))) return Response.json([]);
+    assert.ok(isClassifyUrl(String(url)));
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(pngB64, "image/png"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.notEqual(classifyBody, pngB64);
+  assert.equal(payload.preprocessing?.status, "smart-fallback");
+  // Green mask (4,4)-(21,41) + 12 % padding (2,4) → (2,0) 21×45,
+  // reported as normalised corners: [2/64, 0, 23/64, 45/48].
+  assert.deepEqual(payload.preprocessing?.box, [0.0313, 0, 0.3594, 0.9375]);
+  assert.doesNotMatch(warningText(payload), /Step 0/);
 });
 
 test("Step 0 outage (detector loading) degrades to the full frame with a warning", async () => {
@@ -2059,7 +2115,7 @@ test("Step 0 label filter: only plant/leaf boxes are accepted (a person box neve
     if (isGeminiUrl(String(url))) return geminiReply("تم.");
     if (isDetectUrl(String(url))) {
       // The higher-scoring "person" box (full frame) must be REJECTED by the
-      // facebook/detr-resnet-50 plant label filter; the potted-plant box crops.
+      // vegetation label filter (isVegetationLabel); the potted-plant box crops.
       return Response.json([
         { label: "potted plant", score: 0.8, box: { xmin: 5, ymin: 5, xmax: 45, ymax: 35 } },
         { label: "person", score: 0.99, box: { xmin: 0, ymin: 0, xmax: 64, ymax: 48 } },
@@ -2076,6 +2132,34 @@ test("Step 0 label filter: only plant/leaf boxes are accepted (a person box neve
   // full frame) was filtered out by label.
   assert.equal(payload.preprocessing?.status, "cropped");
   assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
+});
+
+test("Step 0 default chain walks facebook/detr-resnet-101 → facebook/detr-resnet-50 on a 404", async () => {
+  configureKeys();
+  const detectIds: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) return geminiReply("تم.");
+    if (
+      /router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) &&
+      !isClassifyUrl(String(url))
+    ) {
+      const id = /models\/(.+)$/.exec(String(url))?.[1] ?? "";
+      detectIds.push(id);
+      // The primary id is gone — the chain must reach the ResNet-50 fallback.
+      if (id === LEAF_DETECTOR) return Response.json({ error: "Model not found" }, { status: 404 });
+      return leafDetection();
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.deepEqual(detectIds, [LEAF_DETECTOR, LEAF_DETECTOR_FALLBACK]);
+  assert.equal(payload.preprocessing?.status, "cropped");
+  assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR_FALLBACK);
 });
 
 test("Step 0 walks the HF_LEAF_DETECT_MODELS override chain when the primary id 404s", async () => {
