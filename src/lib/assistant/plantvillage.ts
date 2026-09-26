@@ -275,14 +275,52 @@ function stripCropAffixes(label: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** Whole-phrase match on an already-normalised English string. */
+function includesPhrase(haystack: string, phrase: string): boolean {
+  const needle = norm(phrase);
+  if (!needle) return false;
+  return ` ${haystack} `.includes(` ${needle} `);
+}
+
+/**
+ * Translate a prose English diagnosis ("Corn (Maize) with Common Rust",
+ * "Healthy Corn (Maize) Plant") to an Arabic disease-only name. Returns null
+ * when the string is not English or names no known disease / healthy state.
+ */
+function arabicDiseaseFromProse(source: string): string | null {
+  if (!/[A-Za-z]/.test(source)) return null;
+  const folded = norm(foldLatin(source));
+  if (!folded) return null;
+  for (const [key, ar] of DISEASES_AR) {
+    if (includesPhrase(folded, key)) return stripCropAffixes(ar) || ar;
+  }
+  if (includesPhrase(folded, "healthy")) return "نبتة سليمة";
+  return null;
+}
+
+/** Drop "Corn (Maize) with …" / trailing "Plant" when no disease key matched. */
+function stripEnglishCropProse(source: string): string {
+  let text = source.replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
+  const withParts = text.split(/\s+with\s+/i);
+  if (withParts.length >= 2 && isCropFragment(withParts[0])) {
+    text = withParts.slice(1).join(" with ");
+  }
+  text = text
+    .replace(/^(?:healthy|diseased)\s+/i, "")
+    .replace(/\s+plant$/i, "")
+    .trim();
+  return stripCropAffixes(text);
+}
+
 /**
  * Disease-only diagnosis name.
  *
- * Accepts either a raw PlantVillage label (`Corn_(maize)___Common_rust_`) or an
- * already localised string (`الذرة — الصدأ الشائع`) and returns just the disease
- * (`الصدأ الشائع`). Healthy labels become "نبتة سليمة" with no crop prefix.
- * Custom spellings on an already-localised string are preserved (the crop affix
- * is stripped, the disease half is not re-translated).
+ * Accepts a raw PlantVillage label (`Corn_(maize)___Common_rust_`), a prose
+ * English candidate (`Corn (Maize) with Common Rust`, `Healthy Corn (Maize) Plant`)
+ * or an already localised string (`الذرة — الصدأ الشائع`) and returns just the
+ * disease (`الصدأ الشائع` / `نبتة سليمة`). Custom spellings on an already-localised
+ * string are preserved (the crop affix is stripped, the disease half is not
+ * re-translated).
  */
 export function diseaseOnlyName(source: string): string {
   const trimmed = source.trim();
@@ -299,11 +337,19 @@ export function diseaseOnlyName(source: string): string {
       .replace(/_/g, " ")
       .replace(/✅/g, "")
       .trim();
+    const translatedSide = arabicDiseaseFromProse(diseaseSide);
+    if (translatedSide) return translatedSide;
     const strippedSide = stripCropAffixes(diseaseSide);
     if (strippedSide) return strippedSide;
   }
 
-  const stripped = stripCropAffixes(trimmed);
+  const translated = arabicDiseaseFromProse(trimmed);
+  if (translated) return translated;
+
+  const base = /[A-Za-z]/.test(trimmed) ? stripEnglishCropProse(trimmed) : trimmed;
+  const stripped = stripCropAffixes(base);
+  const translatedRemainder = arabicDiseaseFromProse(stripped);
+  if (translatedRemainder) return translatedRemainder;
   return stripped || trimmed.replace(/✅/g, "").trim();
 }
 

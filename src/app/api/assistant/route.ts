@@ -870,6 +870,14 @@ async function classifyPlantImageStrict(
  * No affectionate greetings, no long-winded essays, no repeated pleasantries
  * or rehashed advice, strictly within agriculture / date-palm / Algerian farming.
  */
+/**
+ * Spoken agricultural-scope sentence. Off-topic and wellbeing replies append
+ * this exact line after a minimal direct answer — the existing domain wording,
+ * in the first person, with no extra warmth.
+ */
+const AGRICULTURAL_SCOPE_SENTENCE =
+  "اختصاصي الأساسي: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي.";
+
 const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق "محصولي الذكي" (Smart Crop AI): أخصائي زراعي متمرس تتحدث مباشرة، بثقة ووضوح، وتقدّم نصيحة عملية فورية قابلة للتنفيذ. لا تتردد، لا تمهّد، ولا تشرح كيف وصلت إلى النتيجة.
 
 الهوية والسرية التقنية — ممنوع الميتا-حديث منعاً باتاً:
@@ -897,9 +905,10 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - الولاية والمناخ معلومة خلفية لتوقيت التدخل لا عنواناً يُعاد، ومحصول الملف الشخصي ليس سبباً لحصر النصيحة في نوع نباتي واحد.
 
 الذاكرة الذكية وعدم التكرار:
-- ابنِ كل ردّ على رسائل المحادثة السابقة: لا تكرر التحية أو الترحيب أو ذكر مدينة المستخدم وولايته في كل رسالة.
-- إذا كانت رسالة المستخدم مجرد تحية (مثل «مرحبا»)، فرد بجملة مهنية قصيرة واحدة ثم انتظر سؤاله.
-- إذا كانت المحادثة جارية، ادخل مباشرة في الجواب دون أي مجاملات افتتاحية أو تقديم مكرر لنفسك.
+- ابنِ كل ردّ على رسائل المحادثة السابقة: لا تكرر التحية أو الترحيب أو ذكر مدينة المستخدم وولايته في كل رسالة زراعية.
+- إذا كانت الرسالة تحية أو سؤالاً عن الحال أو سؤالاً خارج الفلاحة (مثل «مرحبا» أو «كيف حالك؟»): لا تتهرب ولا تتجاهل السؤال. ابدأ بجواب مباشر فائق الاختصار من بضع كلمات فقط — لسؤال الحال قل «بخير،» أو «بخير والحمد لله،»، وللتحية كلمة بالنبرة الحالية («أهلاً،» أو «وعليكم السلام،»)، ولسؤال خارجي جملة وقائعية قصيرة جداً تجيب عن السؤال نفسه. ثم ألحق فوراً جملة النطاق الزراعي الحالية دون أي زيادة لطف أو شخصية جديدة: «${AGRICULTURAL_SCOPE_SENTENCE}»
+- إن أصرّ المستخدم في رسالة لاحقة على موضوع خارج الفلاحة: أجب أولاً بجواب مباشر فائق الاختصار عن سؤاله، ثم ألحق فوراً جملة التركيز الزراعي نفسها («${AGRICULTURAL_SCOPE_SENTENCE}») دون شرح إضافي ودون تغيير النبرة.
+- إذا كانت المحادثة جارية في موضوع فلاحي، ادخل مباشرة في الجواب دون أي مجاملات افتتاحية أو تقديم مكرر لنفسك.
 - لا تكرر معلومات أو حقائق أو تشخيصات أو نصائح قدمتها في الرسائل السابقة؛ اكتفِ بالإضافة أو التعميق.
 - إذا نقصت حقيقة واحدة ضرورية للجرعة أو التوقيت، اسأل سؤالاً مهنياً واحداً ثم أعطِ الخطوة العملية التي يمكن تنفيذها الآن. لا تؤجّل العلاج بجولة أسئلة واسعة عندما يكون التشخيص معروفاً.
 
@@ -909,7 +918,7 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 
 حدود المجال (بمرونة):
 - اختصاصك الأساسي: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي.
-- إن خرج السؤال عن الفلاحة لكنه مفيد عموماً، أجب عنه بإيجاز وبشكل نافع، ثم أشر بلطف إلى اختصاصك الزراعي عند الحاجة.
+- إن خرج السؤال عن الفلاحة: لا تُطل فيه ولا تغيّر النبرة. جواب مباشر فائق الاختصار أولاً، ثم جملة النطاق الزراعي الحالية مباشرة: «${AGRICULTURAL_SCOPE_SENTENCE}»
 - في الحالات الحرجة التي تحتاج معاينة حقلية، انصح بمعاينة مهندس زراعي محلي في سطر واحد، دون الحديث عن ثقة أو نموذج أو درجة كشف.
 `;
 
@@ -1892,6 +1901,37 @@ function isGreetingMessage(message: string): boolean {
   );
 }
 
+/** Short "how are you" questions — not farm talk, not a bare salutation. */
+const WELLBEING: readonly string[] = [
+  "كيف حالك",
+  "كيف حالكم",
+  "كيفك",
+  "كيفكم",
+  "كيف الحال",
+  "شلونك",
+  "شلونكم",
+  "شخبارك",
+  "عامل ايه",
+  "ازيك",
+  "how are you",
+  "how are u",
+  "ca va",
+  "comment ca va",
+  "comment allez vous",
+];
+
+function isWellbeingMessage(message: string): boolean {
+  const normalized = normalizeForGreeting(message);
+  if (!normalized || normalized.length > MAX_GREETING_CHARS) return false;
+  if (/محصول|حقل|زرع|سقي|نبت|مرض|ورق|ضيع/.test(normalized)) return false;
+  return WELLBEING.some((phrase) => normalized === phrase || normalized.startsWith(`${phrase} `));
+}
+
+/** Minimal direct answer, then the existing agricultural scope sentence. */
+function buildWellbeingPivot(): string {
+  return `بخير والحمد لله، ${AGRICULTURAL_SCOPE_SENTENCE}`;
+}
+
 /**
  * Friendly basic-mode text reply used when the whole LLM chain (Stage 1
  * Hugging Face + Stage 2 Gemini) is unavailable on a request without a usable
@@ -1901,6 +1941,7 @@ function isGreetingMessage(message: string): boolean {
  * can still handle without the LLM).
  */
 function buildTextFallbackReply(message: string): string {
+  if (isWellbeingMessage(message)) return buildWellbeingPivot();
   if (isGreetingMessage(message)) {
     const isSalam = /سلام/.test(normalizeForGreeting(message));
     return [

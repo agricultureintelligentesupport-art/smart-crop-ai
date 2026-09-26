@@ -15,8 +15,16 @@ test("diseaseOnlyName strips an Arabic crop prefix and keeps a custom spelling",
 test("diseaseOnlyName strips crop suffixes, parenthetical hosts and English 'of crop'", () => {
   assert.equal(diseaseOnlyName("الصدأ الشائع — الذرة"), "الصدأ الشائع");
   assert.equal(diseaseOnlyName("التبقّع الرمادي للأوراق (الذرة)"), "التبقّع الرمادي للأوراق");
-  assert.equal(diseaseOnlyName("Gray leaf spot of corn"), "Gray leaf spot");
-  assert.equal(diseaseOnlyName("Common rust — Maize"), "Common rust");
+  assert.equal(diseaseOnlyName("Gray leaf spot of corn"), "التبقع الرمادي للأوراق");
+  assert.equal(diseaseOnlyName("Common rust — Maize"), "الصدأ الشائع");
+});
+
+test("diseaseOnlyName translates prose English candidates and drops the crop", () => {
+  assert.equal(diseaseOnlyName("Corn (Maize) with Common Rust"), "الصدأ الشائع");
+  assert.equal(diseaseOnlyName("Healthy Corn (Maize) Plant"), "نبتة سليمة");
+  assert.equal(diseaseOnlyName("Corn (Maize) with Northern Leaf Blight"), "اللفحة الشمالية للأوراق");
+  assert.equal(diseaseOnlyName("Tomato with Early Blight"), "اللفحة المبكرة");
+  assert.doesNotMatch(diseaseOnlyName("Corn (Maize) with Common Rust"), /corn|maize|ذرة/i);
 });
 
 test("diseaseOnlyName keeps official disease names that merely mention a host", () => {

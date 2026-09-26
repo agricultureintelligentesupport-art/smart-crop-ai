@@ -1616,6 +1616,14 @@ test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini 
   assert.match(system.content, /تسميات نموذج الرؤية الخام/);
   assert.match(system.content, /بطاقة التشخيص المرئية معروضة بالفعل/);
   assert.doesNotMatch(system.content, /اذكر المرض بالعربية مع نسبة الثقة|بنِسَبهم/);
+  // Off-topic / wellbeing: minimal direct answer, then the existing scope sentence.
+  assert.match(system.content, /بخير،/);
+  assert.match(system.content, /بخير والحمد لله،/);
+  assert.match(
+    system.content,
+    /اختصاصي الأساسي: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي\./,
+  );
+  assert.match(system.content, /إن أصرّ المستخدم/);
   assert.equal(user.role, "user");
   // The Gemini fallback received EXACTLY the same user turn as the primary
   // HF stage: query + Step 1 label/confidence + candidates.
@@ -1773,6 +1781,23 @@ for (const greeting of ["هلا", "مرحبا", "السلام عليكم", "أه
     assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
   });
 }
+
+test("zero-failure: a wellbeing question answers minimally then states the agricultural scope", async () => {
+  configureKeys();
+  mock.method(globalThis, "fetch", async (url: string) =>
+    isGeminiUrl(String(url)) ? geminiHttpError(503, "overloaded") : new Response(null, { status: 503 }),
+  );
+  const response = await POST(textRequest("كيف حالك؟"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "direct");
+  assert.match(payload.reply, /^بخير والحمد لله،/);
+  assert.match(
+    payload.reply,
+    /اختصاصي الأساسي: الفلاحة، صحة النخيل والتمور، السقي، العناية بالتربة، والسياق الفلاحي الجزائري المحلي\./,
+  );
+  assert.doesNotMatch(payload.reply, /الوضع الأساسي|أهلاً وسهلاً/);
+});
 
 test("zero-failure: text-only LLM outage answers a farm question with the polite basic-mode fallback", async () => {
   configureKeys();
