@@ -125,7 +125,7 @@ const AR: AssistantCopy = {
   },
   cropper: {
     title: "تحديد الورقة قبل الإرسال",
-    hint: "ارسم خطاً حول الورقة أو اسحب مربعاً حولها — سيلتقط التطبيق المنطقة الخضراء تلقائياً.",
+    hint: "ارسم حلقة حول الورقة أو اسحب مربعاً — يتعرف الحد تلقائياً على شكل الورقة ويلتصق بحوافها، وتُزال الخلفية تماماً.",
     previewTitle: "معاينة الورقة المحددة",
     previewEmpty: "ارسم حول الورقة لعرض المعاينة.",
     redo: "إعادة التحديد / Redo Crop",
@@ -191,7 +191,7 @@ const FR: AssistantCopy = {
   },
   cropper: {
     title: "Cadrage avant envoi",
-    hint: "Tracez un trait ou encadrez la feuille — la zone verte est captée automatiquement.",
+    hint: "Tracez une boucle autour de la feuille — le contour se cale automatiquement sur ses bords et le fond est supprimé.",
     previewTitle: "Aperçu de la feuille recadrée",
     previewEmpty: "Tracez la feuille pour voir l'aperçu.",
     redo: "إعادة التحديد / Redo Crop",

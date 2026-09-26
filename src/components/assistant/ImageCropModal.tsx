@@ -1,17 +1,26 @@
 "use client";
 
 /**
- * Pre-submit interactive leaf cropper.
+ * Pre-submit interactive leaf cropper — **polygonal masking edition**.
  *
- * Opens right after an image is attached/captured. The farmer either draws
- * a freehand STROKE over the leaf or drags a BOUNDING BOX around it; on
- * release the Smart Snap (`src/lib/assistant/user-crop.ts`) expands the
- * path's box outward over the green/foliage pixels so the selection hugs
- * the leaf without pixel-perfect drawing. The modal then shows the exact
- * cropped tensor that will be analysed ("معاينة الورقة المحددة") and two
- * actions: **Redo Crop** resets the canvas, **Confirm & Analyze** ships the
- * crop with `isUserCropped: true` (the server bypasses Step 0 and routes it
- * straight to MobileNetV2).
+ * Opens right after an image is attached/captured. The farmer draws a
+ * freehand LOOP (or line/drag) around the leaf; on release the drawn path
+ * becomes a polygon that is edge-snapped by the contour detector in
+ * `src/lib/assistant/user-crop.ts`:
+ *
+ *   1. the loop is densified, every vertex gets an outward normal, and it
+ *      walks along that normal looking for the strongest colour gradient
+ *      (boosted on green-mask crossings) within `searchRadius` px — the
+ *      vertices land ON the physical foliage boundary, so the outline
+ *      tightens onto the leaf automatically;
+ *   2. the polygon is used as a Canvas Clipping Path (`ctx.clip()`): the
+ *      preview tensor is painted white-first, then only the region INSIDE
+ *      the loop is drawn — everything outside is erased to clean white.
+ *
+ * The preview ("معاينة الورقة المحددة") is the exact background-masked
+ * tensor Step 1 receives: **Confirm & Analyze** ships it with
+ * `isUserCropped: true` (the server bypasses Step 0 and routes it
+ * straight to MobileNetV2), **Redo Crop** resets the canvas.
  *
  * Touch-first: pointer events + `touch-action: none` (no scroll-stealing
  * while drawing), 44 px minimum targets, inherits the chat's `dir` (RTL)
@@ -29,11 +38,13 @@ import {
 } from "react";
 import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
 import type { AssistantCopy } from "@/lib/assistant/copy";
-import type { LeafBox } from "@/lib/assistant/leaf-detect";
 import {
   boxFromPath,
-  smartSnapBox,
-  toCropRect,
+  CONTOUR_DEFAULTS,
+  polygonArea,
+  polygonBounds,
+  rectPolygonFromBox,
+  snapPolygonToEdges,
   type CropPoint,
 } from "@/lib/assistant/user-crop";
 
@@ -44,7 +55,7 @@ export interface CropSourceImage {
   mimeType: string;
 }
 
-/** What Confirm hands back: the isolated tensor + the bypass flag. */
+/** What Confirm hands back: the background-masked tensor + bypass flag. */
 export interface CroppedLeafImage extends CropSourceImage {
   isUserCropped: true;
 }
@@ -73,6 +84,20 @@ const toImagePoint = (
   };
 };
 
+/** Trace a polygon onto an existing canvas path (image/display space). */
+const tracePolygon = (
+  ctx: CanvasRenderingContext2D | Path2D,
+  polygon: readonly CropPoint[],
+  scaleX: number,
+  scaleY: number,
+): void => {
+  ctx.moveTo(polygon[0].x * scaleX, polygon[0].y * scaleY);
+  for (let i = 1; i < polygon.length; i++) {
+    ctx.lineTo(polygon[i].x * scaleX, polygon[i].y * scaleY);
+  }
+  ctx.closePath();
+};
+
 export default function ImageCropModal({
   image,
   copy,
@@ -81,8 +106,8 @@ export default function ImageCropModal({
 }: ImageCropModalProps) {
   const imgRef = useRef<HTMLImageElement | null>(null);
   /**
-   * Full-resolution pixel snapshot (natural size) — the Smart Snap input.
-   * Read once at decode time so the gesture handler never pays for it.
+   * Full-resolution pixel snapshot (natural size) — the contour-snap
+   * input. Read once at decode time so the gesture handler never pays.
    */
   const gridRef = useRef<{
     canvas: HTMLCanvasElement;
@@ -93,17 +118,18 @@ export default function ImageCropModal({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const pathRef = useRef<CropPoint[]>([]);
-  const selectionRef = useRef<LeafBox | null>(null);
+  /** Edge-snapped selection loop (image space) — the clipping polygon. */
+  const polygonRef = useRef<CropPoint[] | null>(null);
   const drawingRef = useRef(false);
 
   const [ready, setReady] = useState(false);
   const [view, setView] = useState({ width: 0, height: 0 });
-  const [selection, setSelectionState] = useState<LeafBox | null>(null);
+  const [polygon, setPolygonState] = useState<CropPoint[] | null>(null);
   const [preview, setPreview] = useState<CroppedLeafImage | null>(null);
 
-  const setSelection = useCallback((box: LeafBox | null) => {
-    selectionRef.current = box;
-    setSelectionState(box);
+  const setPolygon = useCallback((next: CropPoint[] | null) => {
+    polygonRef.current = next;
+    setPolygonState(next);
   }, []);
 
   /* ---- Decode the image + build the pixel grid (once) -------------- */
@@ -164,7 +190,7 @@ export default function ImageCropModal({
     return () => window.removeEventListener("resize", compute);
   }, [ready]);
 
-  /* ---- Paint: image + dim-outside-selection + dashed box + path ---- */
+  /* ---- Paint: image + dim-outside-polygon + contour outline -------- */
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const element = imgRef.current;
@@ -184,26 +210,39 @@ export default function ImageCropModal({
     const scaleX = width / element.naturalWidth;
     const scaleY = height / element.naturalHeight;
 
-    const box = selectionRef.current;
-    if (box) {
-      const sx = box.xmin * scaleX;
-      const sy = box.ymin * scaleY;
-      const sw = (box.xmax - box.xmin) * scaleX;
-      const sh = (box.ymax - box.ymin) * scaleY;
-      // Dim everything OUTSIDE the selection (even-odd hole fill).
+    const selected = polygonRef.current;
+    if (selected && selected.length >= 3) {
+      // Dim everything OUTSIDE the polygon (outer rect + loop, even-odd).
       ctx.save();
       ctx.fillStyle = "rgba(6, 44, 35, 0.55)";
       ctx.beginPath();
       ctx.rect(0, 0, width, height);
-      ctx.rect(sx, sy, sw, sh);
+      tracePolygon(ctx, selected, scaleX, scaleY);
       ctx.fill("evenodd");
       ctx.restore();
-      // Bright dashed frame around the kept region.
+
+      // The edge-snapped contour itself: bright dashed outline.
       ctx.save();
       ctx.strokeStyle = "#34d399";
       ctx.lineWidth = 2;
       ctx.setLineDash([7, 5]);
-      ctx.strokeRect(sx, sy, sw, sh);
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      tracePolygon(ctx, selected, scaleX, scaleY);
+      ctx.stroke();
+      ctx.restore();
+
+      // Snapped vertices as small dots — visible proof the contour locked on.
+      ctx.save();
+      ctx.fillStyle = "#ecfdf5";
+      ctx.strokeStyle = "#059669";
+      ctx.lineWidth = 1.5;
+      for (const vertex of selected) {
+        ctx.beginPath();
+        ctx.arc(vertex.x * scaleX, vertex.y * scaleY, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -228,44 +267,59 @@ export default function ImageCropModal({
 
   useEffect(() => {
     redraw();
-  }, [redraw, selection, ready]);
+  }, [redraw, polygon, ready]);
 
-  /* ---- Build the exact preview tensor from the confirmed box ------- */
-  const buildPreview = useCallback((box: LeafBox) => {
-    const rect = toCropRect(box);
-    if (rect.width < 1 || rect.height < 1) return;
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = rect.width;
-      canvas.height = rect.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      const source = gridRef.current?.canvas ?? imgRef.current;
-      if (!source) return;
-      ctx.drawImage(
-        source,
-        rect.left,
-        rect.top,
-        rect.width,
-        rect.height,
-        0,
-        0,
-        rect.width,
-        rect.height,
-      );
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-      setPreview({
-        previewUrl: dataUrl,
-        data: dataUrl.split(",", 2)[1] ?? "",
-        mimeType: "image/jpeg",
-        isUserCropped: true,
-      });
-    } catch {
-      setPreview(null);
-    }
-  }, []);
+  /**
+   * Build the background-masked preview tensor: white background →
+   * `ctx.clip()` to the polygon → paint the source through the clip.
+   * Output is the polygon's bounding box, exactly the isolated leaf shape.
+   */
+  const buildPreview = useCallback(
+    (loop: readonly CropPoint[]) => {
+      const bounds = polygonBounds(loop);
+      const element = imgRef.current;
+      if (!bounds || !element) return;
+      const x0 = Math.max(0, bounds.xmin);
+      const y0 = Math.max(0, bounds.ymin);
+      const x1 = Math.min(element.naturalWidth, bounds.xmax);
+      const y1 = Math.min(element.naturalHeight, bounds.ymax);
+      const width = x1 - x0;
+      const height = y1 - y0;
+      if (width < 1 || height < 1) return;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        const source = gridRef.current?.canvas ?? element;
+        // 1. Neutral mask: every pixel starts clean white…
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        // 2. …clip to the drawn polygon (the Canvas Clipping Path)…
+        ctx.save();
+        ctx.translate(-x0, -y0);
+        ctx.beginPath();
+        tracePolygon(ctx, loop, 1, 1);
+        ctx.clip();
+        // 3. …and paint ONLY the region inside the loop.
+        ctx.drawImage(source, 0, 0);
+        ctx.restore();
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.94);
+        setPreview({
+          previewUrl: dataUrl,
+          data: dataUrl.split(",", 2)[1] ?? "",
+          mimeType: "image/jpeg",
+          isUserCropped: true,
+        });
+      } catch {
+        setPreview(null);
+      }
+    },
+    [],
+  );
 
-  /* ---- Gesture: stroke OR box — one path, bounds + smart snap ------ */
+  /* ---- Gesture: loop OR drag/tap — one path, contour snap on release */
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!ready || event.button === 2) return;
     event.preventDefault();
@@ -274,7 +328,7 @@ export default function ImageCropModal({
     const element = imgRef.current;
     if (!element) return;
     pathRef.current = [toImagePoint(event, element.naturalWidth, element.naturalHeight)];
-    setSelection(null);
+    setPolygon(null);
     setPreview(null);
     redraw();
   };
@@ -297,23 +351,40 @@ export default function ImageCropModal({
     drawingRef.current = false;
     const element = imgRef.current;
     if (!element) return;
-    const raw = boxFromPath(pathRef.current, element.naturalWidth, element.naturalHeight);
-    if (!raw) {
+    const path = pathRef.current;
+    if (path.length === 0) {
       redraw();
       return;
     }
+
+    // A closed-ish loop (real area) is used as drawn; a drag or a bare tap
+    // (≈zero area) becomes the min-size bounding rectangle polygon.
+    const isLoop =
+      path.length >= 3 && Math.abs(polygonArea(path)) >= CONTOUR_DEFAULTS.degenerateArea;
+    let loop: CropPoint[];
+    if (isLoop) {
+      loop = path.map((p) => ({ ...p }));
+    } else {
+      const box = boxFromPath(path, element.naturalWidth, element.naturalHeight);
+      if (!box) {
+        redraw();
+        return;
+      }
+      loop = rectPolygonFromBox(box);
+    }
+
+    // Edge-snapped contour: pull every vertex onto the foliage boundary.
     const grid = gridRef.current;
-    const snapped =
-      grid && grid.data.length >= grid.width * grid.height * 4
-        ? smartSnapBox(
-            { width: grid.width, height: grid.height, data: grid.data },
-            raw,
-          )
-        : null;
-    const box = snapped ?? raw;
-    setSelection(box);
-    buildPreview(box);
-  }, [buildPreview, redraw, setSelection]);
+    if (grid && grid.data.length >= grid.width * grid.height * 4) {
+      loop = snapPolygonToEdges(
+        loop,
+        { width: grid.width, height: grid.height, data: grid.data },
+        {},
+      );
+    }
+    setPolygon(loop);
+    buildPreview(loop);
+  }, [buildPreview, redraw, setPolygon]);
 
   const onPointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!drawingRef.current) return;
@@ -326,10 +397,10 @@ export default function ImageCropModal({
   /* ---- Redo / Confirm / dismiss ------------------------------------ */
   const redo = useCallback(() => {
     pathRef.current = [];
-    setSelection(null);
+    setPolygon(null);
     setPreview(null);
     redraw();
-  }, [redraw, setSelection]);
+  }, [redraw, setPolygon]);
   const confirm = useCallback(() => {
     if (!preview) return;
     onConfirm(preview);
@@ -399,14 +470,14 @@ export default function ImageCropModal({
           )}
         </div>
 
-        {/* Pre-submit preview — the exact tensor Step 1 will evaluate */}
+        {/* Pre-submit preview — the exact masked tensor Step 1 will evaluate */}
         <div className="rounded-2xl bg-emerald-50/70 p-2.5 ring-1 ring-emerald-100">
           <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-black text-emerald-800">
             <Scissors size={12} strokeWidth={2.8} aria-hidden className="shrink-0 text-emerald-600" />
             {copy.previewTitle}
           </p>
           {preview ? (
-            // eslint-disable-next-line @next/next/no-img-element -- local data-URL preview of the isolated crop
+            // eslint-disable-next-line @next/next/no-img-element -- local data-URL preview of the masked crop
             <img
               src={preview.previewUrl}
               alt={copy.previewTitle}
@@ -424,7 +495,7 @@ export default function ImageCropModal({
           <button
             type="button"
             onClick={redo}
-            disabled={!selection && !preview}
+            disabled={!polygon && !preview}
             className={`flex h-11 flex-1 items-center justify-center gap-1.5 rounded-2xl bg-emerald-100 text-[12.5px] font-black text-emerald-800 transition-colors hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-45 ${FOCUS_RING}`}
           >
             <RotateCcw size={15} strokeWidth={2.6} aria-hidden />

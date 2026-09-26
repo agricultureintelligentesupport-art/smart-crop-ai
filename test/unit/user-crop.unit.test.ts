@@ -3,8 +3,14 @@ import { test } from "node:test";
 import type { PixelGrid } from "../../src/lib/assistant/leaf-detect";
 import {
   boxFromPath,
+  CONTOUR_DEFAULTS,
+  densifyPolygon,
   expandBoxToGreen,
+  polygonArea,
+  polygonBounds,
+  rectPolygonFromBox,
   smartSnapBox,
+  snapPolygonToEdges,
   toCropRect,
   USER_CROP_DEFAULTS,
 } from "../../src/lib/assistant/user-crop";
@@ -185,4 +191,165 @@ test("USER_CROP_DEFAULTS keeps sensible tap-guard and probe values", () => {
   assert.ok(USER_CROP_DEFAULTS.minBandGreenRatio > 0 && USER_CROP_DEFAULTS.minBandGreenRatio < 1);
   assert.ok(USER_CROP_DEFAULTS.maxCoverage <= 1);
   assert.ok(USER_CROP_DEFAULTS.probePx >= 1);
+});
+
+/* ------------------------------------------------------------------ */
+/*  Polygon masking helpers — area, densify, bounds                    */
+/* ------------------------------------------------------------------ */
+
+test("polygonArea returns the signed area (and 0 for a degenerate drag)", () => {
+  const square = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ];
+  assert.equal(polygonArea(square), 100);
+  assert.equal(polygonArea([...square].reverse()), -100);
+  // A double-back stroke (drag out and retrace) has no enclosed area.
+  const retrace = [
+    { x: 0, y: 0 },
+    { x: 5, y: 5 },
+    { x: 10, y: 10 },
+    { x: 5, y: 5 },
+  ];
+  assert.equal(polygonArea(retrace), 0);
+});
+
+test("densifyPolygon subdivides long sides so snapping gets evenly spaced vertices", () => {
+  const loop = [
+    { x: 0, y: 0 },
+    { x: 40, y: 0 },
+    { x: 40, y: 40 },
+    { x: 0, y: 40 },
+  ];
+  const dense = densifyPolygon(loop, 10);
+  // 4 sides × ceil(40/10) = 16 points, first input point preserved first.
+  assert.equal(dense.length, 16);
+  assert.deepEqual(dense[0], { x: 0, y: 0 });
+  // Cyclic neighbour spacing never exceeds the requested step.
+  for (let i = 0; i < dense.length; i++) {
+    const a = dense[i];
+    const b = dense[(i + 1) % dense.length];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    assert.ok(d <= 10 + 1e-9, `segment ${i} too long: ${d}`);
+  }
+});
+
+test("rectPolygonFromBox + polygonBounds round-trip a crop box", () => {
+  const poly = rectPolygonFromBox({ xmin: 10.4, ymin: 20, xmax: 50.6, ymax: 79.2 });
+  assert.equal(poly.length, 4);
+  assert.deepEqual(polygonBounds(poly), { xmin: 10, ymin: 20, xmax: 51, ymax: 80 });
+  // Bounds need a real triangle.
+  assert.equal(polygonBounds([{ x: 0, y: 0 }, { x: 5, y: 5 }]), null);
+});
+
+/* ------------------------------------------------------------------ */
+/*  snapPolygonToEdges — contour snapping onto the foliage boundary    */
+/* ------------------------------------------------------------------ */
+
+/** Distance from a point to the boundary of the green rectangle. */
+function distToRectBoundary(
+  p: { x: number; y: number },
+  rect: { xmin: number; ymin: number; xmax: number; ymax: number },
+): number {
+  return Math.min(
+    Math.abs(p.x - rect.xmin),
+    Math.abs(p.x - rect.xmax),
+    Math.abs(p.y - rect.ymin),
+    Math.abs(p.y - rect.ymax),
+  );
+}
+
+test("snapPolygonToEdges pulls a loose loop onto the green leaf boundary", () => {
+  // Green "leaf": x ∈ [20,60), y ∈ [15,45) on an 80×60 grey frame.
+  const greenRect = { xmin: 20, ymin: 15, xmax: 60, ymax: 45 };
+  const grid = makeGrid(80, 60, (x, y) =>
+    x >= 20 && x < 60 && y >= 15 && y < 45 ? GREEN : GREY,
+  );
+  // Loop drawn ~5 px INSIDE every side of the leaf.
+  const loop = [
+    { x: 25, y: 20 },
+    { x: 55, y: 20 },
+    { x: 55, y: 40 },
+    { x: 25, y: 40 },
+  ];
+  const snapped = snapPolygonToEdges(loop, grid);
+  // Densified pass-through: 30+20+30+20 perimeter at step 14 → 10 vertices.
+  assert.equal(snapped.length, 10);
+  // Every vertex now sits ON (or sub-pixel across) the actual leaf edge.
+  for (const p of snapped) {
+    assert.ok(distToRectBoundary(p, greenRect) <= 2, `off-contour vertex ${p.x},${p.y}`);
+    // Clamped inside the frame.
+    assert.ok(p.x >= 0 && p.x <= grid.width - 1);
+    assert.ok(p.y >= 0 && p.y <= grid.height - 1);
+  }
+  // The contour actually TIGHTENED: drawn area 30×20 = 600 → leaf ≈ 40×30.
+  const area = Math.abs(polygonArea(snapped));
+  assert.ok(area > 1100 && area < 1300, `snapped area ${area} not near leaf area`);
+  // Every original corner moved by a meaningful amount.
+  for (const op of loop) {
+    const nearest = Math.min(
+      ...snapped.map((sp) => Math.hypot(sp.x - op.x, sp.y - op.y)),
+    );
+    assert.ok(nearest > 3, `corner ${op.x},${op.y} barely moved (${nearest})`);
+  }
+});
+
+test("snapPolygonToEdges leaves the contour untouched on a flat (edgeless) frame", () => {
+  const grid = makeGrid(80, 60, () => GREY);
+  const loop = [
+    { x: 25, y: 20 },
+    { x: 55, y: 20 },
+    { x: 55, y: 40 },
+    { x: 25, y: 40 },
+  ];
+  const snapped = snapPolygonToEdges(loop, grid);
+  // Without any edge above minEdgeStrength every point stays on the drawn square.
+  for (const p of snapped) {
+    const onEdge =
+      Math.abs(p.x - 25) < 1e-9 ||
+      Math.abs(p.x - 55) < 1e-9 ||
+      Math.abs(p.y - 20) < 1e-9 ||
+      Math.abs(p.y - 40) < 1e-9;
+    assert.ok(onEdge, `point ${p.x},${p.y} left the drawn square without an edge`);
+  }
+});
+
+test("snapPolygonToEdges returns a degenerate (<3-point, no-area) path unchanged", () => {
+  const grid = makeGrid(80, 60, () => GREY);
+  const drag = [
+    { x: 10, y: 10 },
+    { x: 30, y: 10 },
+  ];
+  const snapped = snapPolygonToEdges(drag, grid);
+  assert.deepEqual(snapped, drag);
+});
+
+test("snapPolygonToEdges never moves a vertex beyond searchRadius to reach an edge", () => {
+  // Green band starts at x=60; the loop's right edge is at x=35 → 25 px away,
+  // farther than the default 20 px search radius: nothing may move.
+  const grid = makeGrid(80, 60, (x) => (x >= 60 ? GREEN : GREY));
+  const loop = [
+    { x: 15, y: 15 },
+    { x: 35, y: 15 },
+    { x: 35, y: 35 },
+    { x: 15, y: 35 },
+  ];
+  const snapped = snapPolygonToEdges(loop, grid);
+  const xs = snapped.map((p) => p.x);
+  const ys = snapped.map((p) => p.y);
+  assert.equal(Math.min(...xs), 15);
+  assert.equal(Math.max(...xs), 35);
+  assert.equal(Math.min(...ys), 15);
+  assert.equal(Math.max(...ys), 35);
+});
+
+test("CONTOUR_DEFAULTS keeps sensible probing values", () => {
+  assert.ok(CONTOUR_DEFAULTS.searchRadius >= 10);
+  assert.ok(CONTOUR_DEFAULTS.sampleStep >= 4 && CONTOUR_DEFAULTS.sampleStep <= CONTOUR_DEFAULTS.searchRadius);
+  assert.ok(CONTOUR_DEFAULTS.edgeProbe >= 1);
+  assert.ok(CONTOUR_DEFAULTS.minEdgeStrength > 0);
+  assert.ok(CONTOUR_DEFAULTS.greenBonus > CONTOUR_DEFAULTS.minEdgeStrength);
+  assert.ok(CONTOUR_DEFAULTS.degenerateArea > 0);
 });
