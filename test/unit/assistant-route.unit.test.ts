@@ -6,10 +6,12 @@ import { dynamic, POST } from "../../src/app/api/assistant/route";
 /** Provider keys used across the suite (values are deliberately padded). */
 const GEMINI_KEY = "test-gemini";
 const HF_KEY = "test-hf";
-/** Step 1 primary vision engine key (CodeCraft, OpenAI-compatible). */
-const CODECRAFT_KEY = "test-codecraft";
-/** Default CodeCraft endpoint — `CODECRAFT_BASE_URL` + `/chat/completions`. */
-const CODECRAFT_CHAT_URL = "https://codecraftapi.com/v1/chat/completions";
+/**
+ * The removed CodeCraft vision engine's endpoint — kept ONLY as a guard
+ * pattern: no test may ever see a request to it (the engine is gone from
+ * the pipeline).
+ */
+const CODECRAFT_URL_PATTERN = /codecraftapi\.com/i;
 
 /**
  * Stage-2 (Gemini fallback) AbortController window, mirrored from the route:
@@ -41,6 +43,9 @@ const GEMINI_FALLBACK_ORDER = [
  */
 const SCRUBBED_ENV_PATTERN =
   /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
+// NOTE: the CODECRAFT_* variables stay in the scrub list on purpose — a
+// developer's shell may still export them from the pre-streamlining setup,
+// and the guard tests below rely on them being absent unless set explicitly.
 
 const originalKeys: Record<string, string | undefined> = {};
 for (const [name, value] of Object.entries(process.env)) {
@@ -2135,391 +2140,200 @@ test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip
 });
 
 /* ------------------------------------------------------------------ */
-/*  Step 1 — dual-engine vision: CodeCraft PRIMARY, MobileNetV2 backup  */
+/*  Step 1 — streamlined vision chain: MobileNetV2 DIRECT (no CodeCraft) */
 /* ------------------------------------------------------------------ */
 
 /**
- * The CodeCraft chat-completions endpoint. NOTE: it also matches the Stage 2
- * helper `isChatUrl` (`/v1/chat/completions`), so every mock in this section
- * checks CodeCraft FIRST.
+ * The streamlined pipeline locks three contracts:
+ *   1. Step 1 routes EVERY photo DIRECTLY to the MobileNetV2 PlantVillage
+ *      classifier — the removed CodeCraft engine is never called, whatever
+ *      its (legacy) environment variables say;
+ *   2. the upstream order is exactly: Step 0 detect → Step 1 MobileNetV2
+ *      classify → Stage 1 HF LLM → (on failure) Stage 2 Gemini;
+ *   3. the Stage 1 → Stage 2 LLM fallback chain (HF Qwen primary, Gemini
+ *      fallback) is intact and unchanged.
  */
-const isCodeCraftUrl = (url: string) =>
-  /codecraftapi\.com\/v1\/chat\/completions$/.test(String(url));
 
-interface CodeCraftContentPart {
-  type?: string;
-  text?: string;
-  image_url?: { url?: string };
-}
-
-interface CodeCraftRequestBody {
-  model?: string;
-  messages?: { role: string; content: string | CodeCraftContentPart[] }[];
-}
-
-const parseCodeCraftBody = (init: RequestInit): CodeCraftRequestBody =>
-  JSON.parse(String(init.body ?? "{}")) as CodeCraftRequestBody;
-
-/** The data URL CodeCraft received (proves the photo actually travelled). */
-const codeCraftImageUrl = (body: CodeCraftRequestBody): string => {
-  const userMessage = (body.messages ?? []).find((message) => message.role === "user");
-  const content = userMessage?.content;
-  if (!Array.isArray(content)) return "";
-  const imagePart = content.find((part) => part?.type === "image_url");
-  return imagePart?.image_url?.url ?? "";
-};
-
-/**
- * A successful CodeCraft verdict — the structured agricultural diagnostic
- * data the engine is asked for (disease name, severity, immediate treatment).
- */
-const codecraftVerdict = (overrides: Record<string, unknown> = {}) =>
-  Response.json({
-    choices: [
-      {
-        message: {
-          role: "assistant",
-          content: JSON.stringify({
-            is_plant: true,
-            crop: "Tomato",
-            crop_ar: "الطماطم",
-            disease: "Early blight",
-            disease_ar: "اللفحة المبكرة",
-            healthy: false,
-            severity: "medium",
-            severity_percent: 45,
-            confidence: 92,
-            symptoms: ["بقع بنية دائرية على الأوراق السفلية"],
-            immediate_treatment: ["رشّ مانكوزيب بالجرعة المسجلة"],
-            prevention: ["تناوب زراعي لموسمين"],
-            alternatives: [{ disease: "Late blight", confidence: 6 }],
-            notes: "الإصابة في مرحلة مبكرة",
-            ...overrides,
-          }),
-        },
-        finish_reason: "stop",
-      },
-    ],
-  });
-
-/** An OpenAI-shaped error envelope from the CodeCraft gateway. */
-const codecraftHttpError = (status: number, message: string, code?: string) =>
-  Response.json(
-    {
-      error: {
-        message,
-        type: status === 402 ? "billing_error" : "invalid_request_error",
-        ...(code ? { code } : {}),
-      },
-    },
-    { status },
-  );
-
-/** Enable the CodeCraft engine (padded, to prove the route trims the value). */
-const configureCodeCraft = (key: string = CODECRAFT_KEY) => {
-  process.env.CODECRAFT_API_KEY = ` ${key} `;
-};
-
-test("Step 1 primary: CodeCraft diagnoses the leaf and its findings feed the EXISTING agent pipeline", async () => {
+test("streamlined Step 1: the photo goes DIRECTLY to MobileNetV2 — detect → classify → HF LLM → Gemini, no CodeCraft", async () => {
   configureKeys();
-  configureCodeCraft();
   const urls: string[] = [];
-  let codecraftAuth: string | null = null;
-  let codecraftBody: CodeCraftRequestBody = {};
-  let geminiBody: GeminiRequestBody = {};
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+  mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
-    if (isCodeCraftUrl(String(url))) {
-      codecraftAuth = new Headers(init.headers).get("Authorization");
-      codecraftBody = parseCodeCraftBody(init);
-      return codecraftVerdict();
-    }
+    // The CodeCraft gateway is gone from the chain: any request to it is a
+    // regression in the streamlined pipeline.
+    assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
     // Stage 1 — the primary HF LLM is DOWN here, so the Gemini fallback is
-    // the stage that answers (the MobileNetV2 backup engine is not needed).
+    // the stage that answers (the assertions below watch Step 0/1).
     if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) {
-      geminiBody = parseGeminiBody(init);
-      return geminiReply("علاج فوري.");
-    }
+    if (isGeminiUrl(String(url))) return geminiReply("تشخيص مباشر.");
     if (isDetectUrl(String(url))) return leafDetection();
-    // The Hugging Face classifier must NOT run: CodeCraft answered.
-    throw new Error(`unexpected upstream: ${url}`);
+    // Step 1 — the MobileNetV2 PlantVillage classifier is the ONLY vision
+    // diagnosis engine left in the pipeline.
+    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
+    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
   });
 
   const response = await POST(imageRequest(LEAF_JPEG_B64));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Pipeline order: Step 0 crop → Step 1 CodeCraft (primary) → Stage 1 HF LLM
-  // (down) → Stage 2 Gemini.
-  assert.equal(urls.length, 4);
+  // Exactly four round-trips: detect → MobileNetV2 → HF LLM (down) → Gemini.
+  // A fifth one (the removed CodeCraft attempt) would be a regression.
+  assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.join(" | ")}`);
   assert.ok(isDetectUrl(urls[0]));
-  assert.equal(urls[1], CODECRAFT_CHAT_URL);
+  assert.ok(isClassifyUrl(urls[1]), "Step 1 must go directly to the MobileNetV2 classifier");
+  assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
   assert.equal(urls[2], HF_ROUTER_CHAT_URL);
   assert.ok(isGeminiUrl(urls[3]));
 
-  // OpenAI-compatible round-trip: Bearer key, vision model, the photo itself.
-  assert.equal(codecraftAuth, `Bearer ${CODECRAFT_KEY}`);
-  assert.equal(codecraftBody.model, "gpt-4o");
-  assert.match(codeCraftImageUrl(codecraftBody), /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/);
-
-  // SAME contract as MobileNetV2 — the UI card, the source and the crop
-  // report are untouched by the engine swap.
+  // The MobileNetV2 verdict flows through untouched.
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 92);
-  assert.equal((payload.diagnosis as { engine?: string } | null)?.engine, "codecraft");
+  assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.equal(payload.preprocessing?.status, "cropped");
   assert.equal(payload.source, "hybrid");
-
-  // The structured findings (disease, severity, immediate treatment) are
-  // handed to the EXISTING conversation context…
-  const userTurn = geminiUserText(geminiBody);
-  assert.match(userTurn, /اللفحة المبكرة/);
-  assert.match(userTurn, /92%/);
-  assert.match(userTurn, /درجة الخطورة/);
-  assert.match(userTurn, /مانكوزيب/);
-  assert.match(userTurn, /تناوب زراعي لموسمين/);
-  // …while the agent's persona and system prompt stay exactly as they were.
-  assert.match(geminiSystemText(geminiBody), /^أنت مساعد زراعي خبير داخل تطبيق/);
-  assert.doesNotMatch(geminiSystemText(geminiBody), /plant pathology vision module/i);
-  assert.doesNotMatch(userTurn, /CodeCraft/i);
-
-  // No secret ever leaves the server.
-  assert.doesNotMatch(
-    JSON.stringify(payload),
-    new RegExp(`${GEMINI_KEY}|${HF_KEY}|${CODECRAFT_KEY}`),
-  );
+  // No CodeCraft degradation ever surfaces in the streamlined pipeline.
+  assert.doesNotMatch(warningText(payload), /CodeCraft/i);
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
 });
 
-test("Step 1 fallback: CodeCraft HTTP 402 (payment) fails over to MobileNetV2 + Gemini — 200, never 500", async () => {
+test("streamlined Step 1: legacy CODECRAFT_* env vars are ignored — no request ever reaches the removed engine", async () => {
   configureKeys();
-  configureCodeCraft();
+  // A deployment that still carries the pre-streamlining CodeCraft config
+  // must behave exactly like one without it: the variables are dead config.
+  process.env.CODECRAFT_API_KEY = " real-looking-key ";
+  process.env.CODECRAFT_BASE_URL = "https://codecraftapi.com/v1";
+  process.env.CODECRAFT_VISION_MODEL = "gpt-4o";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
-    if (isCodeCraftUrl(String(url))) {
-      return codecraftHttpError(402, "You exceeded your current quota.", "insufficient_quota");
-    }
+    assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN, "the removed CodeCraft engine must never be called");
+    if (isChatUrl(String(url))) return chatReply("إجابة النموذج الأساسي.");
     if (isDetectUrl(String(url))) return leafDetection();
-    if (isClassifyUrl(String(url))) {
-      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
-    }
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
-    throw new Error(`unexpected upstream: ${url}`);
+    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
+    return Response.json([{ label: "Tomato___Late_blight", score: 0.88 }]);
   });
 
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-
-  // The backup engine ran: detect → codecraft → classify → HF LLM (down) →
-  // Gemini fallback.
-  assert.equal(urls.length, 5);
-  assert.ok(isClassifyUrl(urls[2]));
-  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
-  assert.ok(isGeminiUrl(urls[4]));
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(payload.source, "hybrid");
-  // The failover is recorded for the operator — and never shown as an error.
-  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
-  assert.match(warningText(payload), /insufficient_quota/);
-  assert.doesNotMatch(JSON.stringify(payload), new RegExp(CODECRAFT_KEY));
+  try {
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    // Step 1 answered directly from MobileNetV2…
+    assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
+    assert.equal(payload.source, "hybrid");
+    // …and Stage 1 (the HF primary LLM) answered the reply — the streamlined
+    // chain never needed Gemini or any other engine.
+    assert.equal(payload.reply, "إجابة النموذج الأساسي.");
+    // Exactly: detect → classify → HF LLM. Nothing else.
+    assert.equal(urls.length, 3);
+    assert.ok(urls.every((url) => !CODECRAFT_URL_PATTERN.test(url)));
+    assert.doesNotMatch(warningText(payload), /CodeCraft/i);
+  } finally {
+    delete process.env.CODECRAFT_API_KEY;
+    delete process.env.CODECRAFT_BASE_URL;
+    delete process.env.CODECRAFT_VISION_MODEL;
+  }
 });
 
-test("Step 1 fallback: a CodeCraft timeout fails over to MobileNetV2 + Gemini", async () => {
-  configureKeys();
-  configureCodeCraft();
-  let classifyCalled = false;
-  mock.method(globalThis, "fetch", async (url: string) => {
-    if (isCodeCraftUrl(String(url))) {
-      const timeout = new Error("The operation was aborted due to timeout");
-      timeout.name = "TimeoutError";
-      throw timeout;
-    }
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isClassifyUrl(String(url))) {
-      classifyCalled = true;
-      return Response.json([{ label: "Tomato___Late_blight", score: 0.88 }]);
-    }
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("علاج بديل.");
-    throw new Error(`unexpected upstream: ${url}`);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.ok(classifyCalled, "the MobileNetV2 backup engine must answer");
-  assert.equal(payload.diagnosis?.label, "Tomato___Late_blight");
-  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
-  assert.match(warningText(payload), /timeout/i);
+test("streamlined Step 1: a CodeCraft-only deployment is now an unconfigured one (503 MISSING_KEYS, no request)", async () => {
+  // With the engine removed from the chain, its key alone can no longer
+  // power the route: the explicit misconfiguration signal applies.
+  process.env.CODECRAFT_API_KEY = " real-looking-key ";
+  const upstream = mock.method(globalThis, "fetch");
+  try {
+    const response = await POST(request(true));
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "API keys missing on server",
+      code: "MISSING_KEYS",
+    });
+    assert.equal(upstream.mock.callCount(), 0);
+  } finally {
+    delete process.env.CODECRAFT_API_KEY;
+  }
 });
 
-test("Step 1 fallback: a non-JSON CodeCraft answer fails over to MobileNetV2", async () => {
-  configureKeys();
-  configureCodeCraft();
-  let classifyCalled = false;
-  mock.method(globalThis, "fetch", async (url: string) => {
-    if (isCodeCraftUrl(String(url))) {
-      return Response.json({
-        choices: [{ message: { role: "assistant", content: "لا أستطيع تحليل هذه الصورة." } }],
-      });
-    }
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isClassifyUrl(String(url))) {
-      classifyCalled = true;
-      return Response.json([{ label: "Tomato___healthy", score: 0.91 }]);
-    }
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("النبتة سليمة.");
-    throw new Error(`unexpected upstream: ${url}`);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.ok(classifyCalled, "an unusable verdict must fall back to MobileNetV2");
-  assert.equal(payload.diagnosis?.label, "Tomato___healthy");
-  assert.match(warningText(payload), /Step 1 CodeCraft vision unavailable/);
-});
-
-test("Step 1: an unconfigured CodeCraft key leaves the pipeline byte-for-byte unchanged", async () => {
+test("streamlined Step 1: MobileNetV2 failure still degrades to Gemini inspecting the raw image (Fallback A, no second vision engine)", async () => {
   configureKeys();
   const urls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
+  let geminiImage: GeminiImagePart | undefined;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     urls.push(String(url));
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isClassifyUrl(String(url))) {
-      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
+    assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
+    if (isGeminiUrl(String(url))) {
+      geminiImage = geminiImagePart(parseGeminiBody(init));
+      return geminiReply("افحص الصورة بنفسي.");
     }
-    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
-    throw new Error(`unexpected upstream: ${url}`);
+    // Step 0 + Step 1 both fail (models loading) — the streamlined chain has
+    // NO backup vision engine; Gemini must inspect the raw image itself.
+    return Response.json({ error: "Model is loading", estimated_time: 12 }, { status: 503 });
   });
 
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.equal(urls.length, 4);
-  assert.ok(!urls.some(isCodeCraftUrl), "no CodeCraft request without a key");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.doesNotMatch(warningText(payload), /CodeCraft/);
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.diagnosis, null);
+  assert.ok(geminiImage, "Fallback A must still send the raw image to Gemini");
+  assert.equal(geminiImage?.data, "aW1hZ2U=");
+  assert.match(warningText(payload), /Step 1 vision unavailable/);
+  assert.doesNotMatch(warningText(payload), /CodeCraft/i);
+  // One vision attempt (classify — the payload is not decodable, so Step 0
+  // skips its detect round-trip), then HF LLM (down) and Gemini. A fourth
+  // call (the removed CodeCraft engine) would be a regression.
+  assert.equal(urls.length, 3);
+  assert.ok(isClassifyUrl(urls[0]), "Step 1 must go directly to the MobileNetV2 classifier");
 });
 
-test("Step 1: the documented placeholder key keeps the CodeCraft engine disabled", async () => {
+test("LLM fallback chain intact: Stage 1 HF primary (Qwen/Qwen3-4B-Instruct-2507) answers first, Gemini untouched", async () => {
   configureKeys();
-  configureCodeCraft("your_key_here");
-  let classifyCalled = false;
-  mock.method(globalThis, "fetch", async (url: string) => {
-    assert.ok(!isCodeCraftUrl(String(url)), "a placeholder key must not call CodeCraft");
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isClassifyUrl(String(url))) {
-      classifyCalled = true;
-      return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
-    }
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
-    throw new Error(`unexpected upstream: ${url}`);
+  const calls: { url: string; init: RequestInit }[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    calls.push({ url: String(url), init });
+    assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
+    if (isChatUrl(String(url))) return chatReply("الإجابة الأساسية من Qwen.");
+    throw new Error(`Gemini must not run while the primary HF LLM answers: ${url}`);
   });
 
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  const response = await POST(request());
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
-  assert.ok(classifyCalled);
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.doesNotMatch(warningText(payload), /CodeCraft/);
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "الإجابة الأساسية من Qwen.");
+  // The PRIMARY model id is Qwen/Qwen3-4B-Instruct-2507 on the HF router…
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
+  assert.equal(requestedChatModel(calls[0].init), LLM_FALLBACK_ORDER[0]);
+  assert.equal(LLM_FALLBACK_ORDER[0], "Qwen/Qwen3-4B-Instruct-2507");
+  // …and the Gemini fallback never ran.
+  assert.doesNotMatch(warningText(payload), /Gemini/);
 });
 
-test("Step 1: CODECRAFT_BASE_URL overrides the endpoint (slashes and a pasted path are normalised)", async () => {
-  configureKeys();
-  configureCodeCraft();
-  process.env.CODECRAFT_BASE_URL = " https://proxy.internal/cc/v1/chat/completions/ ";
-  const urls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
-    urls.push(String(url));
-    if (/proxy\.internal\/cc\/v1\/chat\/completions$/.test(String(url))) return codecraftVerdict();
-    // Stage 1 — the primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
-    throw new Error(`unexpected upstream: ${url}`);
-  });
+test("LLM fallback chain intact: HF failure, timeout-shaped error or empty reply seamlessly triggers the Gemini fallback", async () => {
+  for (const failure of [
+    () => new Response(null, { status: 503 }), // router down
+    () => Response.json({ choices: [] }), // empty reply on every model
+  ] as const) {
+    configureKeys();
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(String(url));
+      assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN);
+      if (isChatUrl(String(url))) return failure();
+      assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+      return geminiReply("الإجابة الاحتياطية من Gemini.");
+    });
 
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.equal(urls[1], "https://proxy.internal/cc/v1/chat/completions");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(payload.source, "hybrid");
-});
-
-test("Step 1: a Markdown-wrapped CODECRAFT_BASE_URL is sanitised before the request", async () => {
-  configureKeys();
-  configureCodeCraft();
-  process.env.CODECRAFT_BASE_URL =
-    "[CodeCraft](https://proxy.internal/cc/v1)";
-  const urls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
-    urls.push(String(url));
-    if (/proxy\.internal\/cc\/v1\/chat\/completions$/.test(String(url))) return codecraftVerdict();
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isGeminiUrl(String(url))) return geminiReply("علاج.");
-    throw new Error(`unexpected upstream: ${url}`);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  // Only the inner URL survives Markdown brackets/parentheses + no doubled path.
-  assert.equal(urls[1], "https://proxy.internal/cc/v1/chat/completions");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  assert.equal(payload.source, "hybrid");
-});
-
-test("Step 1 primary + every LLM down: the direct card reuses the CodeCraft treatment plan", async () => {
-  // No Gemini key (Stage 1 skipped) + a dead HF LLM (Stage 2) → Stage 3.
-  process.env.HUGGINGFACE_API_KEY = HF_KEY;
-  configureCodeCraft();
-  mock.method(globalThis, "fetch", async (url: string) => {
-    if (isCodeCraftUrl(String(url))) return codecraftVerdict();
-    if (isDetectUrl(String(url))) return leafDetection();
-    if (isChatUrl(String(url))) {
-      return Response.json({ error: "Model is loading" }, { status: 503 });
-    }
-    throw new Error(`unexpected upstream: ${url}`);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.source, "direct");
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  // The zero-failure card speaks with the engine's own plan…
-  assert.match(payload.reply, /مانكوزيب/);
-  assert.match(payload.reply, /درجة الخطورة/);
-  // …and keeps the assistant's established structure.
-  assert.match(payload.reply, /## 🔬 التشخيص/);
-  assert.match(payload.reply, /## 💊 خطة العلاج/);
-});
-
-test("Step 1: a CodeCraft-only deployment answers an image request without Gemini or HF keys", async () => {
-  configureCodeCraft();
-  mock.method(globalThis, "fetch", async (url: string) => {
-    if (isCodeCraftUrl(String(url))) return codecraftVerdict();
-    throw new Error(`unexpected upstream: ${url}`);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload;
-  assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
-  // Every LLM stage is unconfigured → the built-in formatter answers, still 200.
-  assert.equal(payload.source, "direct");
-  assert.doesNotMatch(warningText(payload), /MISSING_KEYS/);
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    // Gemini answered seamlessly after the HF stage failed…
+    assert.equal(payload.source, "llm");
+    assert.equal(payload.reply, "الإجابة الاحتياطية من Gemini.");
+    // …with the degradation reported as a non-fatal warning.
+    assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
+    // HF first, then Gemini — the dual-tiered fallback order is locked.
+    assert.equal(urls[0], HF_ROUTER_CHAT_URL);
+    assert.ok(isGeminiUrl(urls[urls.length - 1]));
+    mock.restoreAll();
+  }
 });

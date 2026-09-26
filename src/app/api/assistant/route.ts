@@ -27,36 +27,15 @@
  *     sharp adds only a few tens of ms of decode/crop work; the whole stage
  *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
  *
- *   Step 1 — DUAL-ENGINE vision (when an image is attached), on the Step 0
- *     crop when detection succeeded, the full frame otherwise:
- *
- *     PRIMARY — CodeCraft vision API (OpenAI-compatible,
- *       `CODECRAFT_BASE_URL` = https://codecraftapi.com/v1, model `gpt-4o`
- *       → `gpt-4o-mini`) through the dedicated service
- *       {@link analyzePlantImageWithCodeCraft} in
- *       `@/lib/assistant/codecraft-vision`. It returns STRUCTURED diagnostic
- *       data (disease name, severity, immediate treatment, prevention,
- *       symptoms) which is normalised into the very same
- *       `AssistantDiagnosis` contract the pipeline already consumes — so the
- *       agent's persona, system prompt, tone and response format are 100 %
- *       untouched: the findings simply become the reference diagnosis that
- *       the existing LLM stage turns into the reply, exactly like the
- *       MobileNetV2 reference did.
- *       Server-only secrets (`CODECRAFT_API_KEY`, `CODECRAFT_BASE_URL` — no
- *       `NEXT_PUBLIC_` prefix), read per request; a missing OR placeholder
- *       key disables the engine instantly (no request, no latency).
- *
- *     FALLBACK (safety net) — the whole CodeCraft call is wrapped in a
- *       try/catch: an invalid/unpaid key, HTTP 401/402/403/429, a timeout, a
- *       network error, a non-JSON answer or "this is not a plant" silently
- *       fails over to the EXISTING MobileNetV2 PlantVillage + Gemini vision
- *       path below. The user never sees a broken UI or a code error: the
- *       degradation is logged on the server and appended to `warnings[]`.
- *
- *   Step 1 (fallback engine) — MobileNetV2 PlantVillage classification (when
- *     an image is attached), via the Hugging Face Serverless Inference API
- *     after Step 0 cropping — used whenever CodeCraft did not answer:
- *       PRIMARY (and only default) classifier —
+ *   Step 1 — MobileNetV2 PlantVillage classification (when an image is
+ *     attached), on the Step 0 crop when detection succeeded, the full frame
+ *     otherwise, via the Hugging Face Serverless Inference API after Step 0
+ *     cropping. STREAMLINED SINGLE-ENGINE pipeline: the former CodeCraft
+ *     vision engine (an OpenAI-compatible gateway at codecraftapi.com) is
+ *     REMOVED from the chain — its WAF 403 stalls and the extra network
+ *     round-trip only added latency, so every image request now goes
+ *     DIRECTLY to the classifier with zero intermediate vision calls:
+ *       PRIMARY (and only) classifier —
  *         `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`
  *         (MobileNetV2 PlantVillage, 38 crop/disease classes). The obsolete
  *         field-trained cascade ids (`dima806/plant_disease_image_detection`,
@@ -175,13 +154,10 @@
  * Gemini credentials — every environment variable starting with
  * `GEMINI_API_KEY` (`GEMINI_API_KEY`, `GEMINI_API_KEYS` comma-separated pool,
  * and numbered `GEMINI_API_KEY_N` variants; combined, trimmed, deduplicated,
- * rotation-ordered) —, the Hugging Face secret (`HUGGINGFACE_API_KEY` —
- * with Hugging Face's conventional `HF_TOKEN` accepted as an alias) and the
- * CodeCraft vision secret (`CODECRAFT_API_KEY`, with `CODECRAFT_BASE_URL`
- * and `CODECRAFT_VISION_MODEL` as optional overrides — never a
- * `NEXT_PUBLIC_` variable) are read from `process.env` on the server only —
- * they are never shipped to the browser and never echoed back in a response
- * body.
+ * rotation-ordered) — and the Hugging Face secret (`HUGGINGFACE_API_KEY` —
+ * with Hugging Face's conventional `HF_TOKEN` accepted as an alias) are read
+ * from `process.env` on the server only — they are never shipped to the
+ * browser and never echoed back in a response body.
  *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
@@ -208,11 +184,6 @@ import {
   type CropRect,
   type LeafDetection,
 } from "@/lib/assistant/leaf-detect";
-import {
-  resolveCodeCraftApiKey,
-  tryAnalyzePlantImageWithCodeCraft,
-  type CodeCraftVisionContext,
-} from "@/lib/assistant/codecraft-vision";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
   AssistantContext,
@@ -498,71 +469,6 @@ async function runLeafDetectionStage(
       image: original,
     };
   }
-}
-
-/* ---- Step 1 (PRIMARY) — CodeCraft vision engine ------------------- */
-
-/**
- * Step 1, primary engine: CodeCraft vision (OpenAI-compatible chat
- * completions at `CODECRAFT_BASE_URL`, model `gpt-4o` → `gpt-4o-mini`).
- *
- * The photo is sent as a data URL together with a STRICT structured-output
- * instruction (disease name, severity, immediate treatment, prevention,
- * symptoms). The dedicated service
- * {@link import("@/lib/assistant/codecraft-vision").analyzePlantImageWithCodeCraft}
- * normalises the answer into the SAME `AssistantDiagnosis` contract the
- * MobileNetV2 classifier already produced — that is what keeps the agent's
- * personality, system prompt, tone and response format 100 % intact: the
- * verdict simply flows through the existing context builders
- * ({@link describeDiagnosis} → {@link buildUserContent}) into the very same
- * LLM stage that writes the reply.
- *
- * FALLBACK ENGINE (safety net): the call goes through
- * `tryAnalyzePlantImageWithCodeCraft`, which never throws — an invalid or
- * unpaid key, HTTP 401/402/403/429, a timeout, a network error, a
- * non-JSON answer or "this is not a plant" are all captured here, logged on
- * the server, pushed to `warnings[]` and the function returns `null` so the
- * caller runs the pre-existing MobileNetV2 PlantVillage + Gemini vision path
- * instead. The user never sees an error, a degraded UI or a code exception.
- *
- * @returns the CodeCraft diagnosis, or `null` when the engine could not
- *   answer (the caller then falls back).
- */
-async function runCodeCraftVisionStage(
-  image: AssistantImagePayload,
-  context: AssistantContext | undefined,
-  warnings: string[],
-): Promise<AssistantDiagnosis | null> {
-  const startedAt = Date.now();
-  const visionContext: CodeCraftVisionContext = {
-    mimeType: image.mimeType,
-    profile: context ?? null,
-  };
-
-  const { diagnosis, error } = await tryAnalyzePlantImageWithCodeCraft(
-    image.data,
-    visionContext,
-  );
-
-  if (diagnosis) {
-    console.log(
-      `[Step 1: CodeCraft Accepted] engine=codecraft label=${diagnosis.label} severity=${diagnosis.severity ?? "n/a"} treatment=${diagnosis.treatment?.length ?? 0} ${Date.now() - startedAt}ms`,
-    );
-    return diagnosis;
-  }
-
-  if (error) {
-    // The message already starts with "HTTP <status> …" for upstream failures.
-    const detail =
-      error.status && !/^HTTP\b/.test(error.message)
-        ? `HTTP ${error.status} — ${error.message}`
-        : error.message;
-    console.warn(
-      `[Step 1: CodeCraft Unavailable → MobileNetV2 fallback] ${detail} (${Date.now() - startedAt}ms)`,
-    );
-    warnings.push(`Step 1 CodeCraft vision unavailable — ${detail}`.slice(0, 400));
-  }
-  return null;
 }
 
 /* ---- Stage 2 — Google Gemini (FALLBACK LLM) ---------------------- */
@@ -1030,12 +936,14 @@ function describeContext(context: AssistantContext | undefined): string {
 }
 
 /**
- * Extra reference lines for a verdict that carries more than a label —
- * today only the CodeCraft vision engine reports them (severity, symptoms,
- * immediate treatment, prevention). Appended INSIDE the reference block,
- * above its "only report what is listed here" boundary, so the reply keeps
- * the agent's single voice while reusing the engine's own findings.
- * Emits nothing for a plain PlantVillage verdict (no extra fields set).
+ * Extra reference lines for a verdict that carries more than a plain label
+ * (the OPTIONAL enrichment fields on `AssistantDiagnosis`: severity,
+ * symptoms, immediate treatment, prevention). Appended INSIDE the reference
+ * block, above its "only report what is listed here" boundary, so the reply
+ * keeps the agent's single voice while reusing the engine's own findings.
+ * The MobileNetV2 PlantVillage verdict sets none of them, so this emits
+ * nothing on the streamlined pipeline — it stays as a forward-compatible
+ * renderer for any richer classifier pinned via `HF_VISION_MODEL`.
  */
 function describeDiagnosisExtras(diagnosis: AssistantDiagnosis): string[] {
   const lines: string[] = [];
@@ -1079,8 +987,8 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     diagnosis.healthy
       ? "- يبدو أن النبتة سليمة؛ طمئن المستخدم وقدّم نصائح وقائية."
       : "",
-    // Engine extras (CodeCraft: severity + immediate treatment) stay INSIDE
-    // the reference block…
+    // Optional enrichment extras (severity + immediate treatment, when a
+    // verdict carries them) stay INSIDE the reference block…
     ...describeDiagnosisExtras(diagnosis),
     // …and the display boundary remains the last line.
     "- حدّ العرض: اذكر فقط ما ورد أعلاه — التسمية العليا ونسبة الثقة ومرشّحات بديلة إن وُجدت بنِسَبها — ويُمنع ذكر أي مرض أو نقص أو سبب أو مرشّح خارج هذه القائمة حتى لو بدا لك مرجحاً؛ الثقة المنخفضة سبب لطلب صورة أوضح لا لاقتراح تشخيص مختلف.",
@@ -1878,10 +1786,11 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
     ].join("\n\n");
   }
 
-  // Reuse the vision engine's own plan when it reported one (CodeCraft) —
-  // the direct card then carries exactly the findings the LLM stages receive,
-  // in the same voice; otherwise the built-in disease-family advice applies
-  // unchanged (PlantVillage path).
+  // Reuse the vision engine's own plan when the verdict carried one (the
+  // optional enrichment fields) — the direct card then carries exactly the
+  // findings the LLM stages receive, in the same voice; on the streamlined
+  // MobileNetV2 pipeline these fields are unset, so the built-in
+  // disease-family advice applies.
   const fallbackAdvice = adviceForLabel(diagnosis.label);
   const advice: DirectAdvice = {
     treatment:
@@ -2084,17 +1993,13 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   //   HUGGINGFACE_API_KEY   → Step 1 PlantVillage vision + Stage 1 PRIMARY LLM
   //                           (HF_TOKEN, Hugging Face's own conventional
   //                           variable name, is honoured as an alias).
-  //   CODECRAFT_API_KEY     → Step 1 PRIMARY vision engine (CodeCraft,
-  //                           OpenAI-compatible). Server-only, never
-  //                           NEXT_PUBLIC_; a missing OR placeholder value
-  //                           disables the engine instantly.
-  //   CODECRAFT_BASE_URL    → optional endpoint override (default
-  //                           https://codecraftapi.com/v1).
+  // The streamlined pipeline reads ONLY these two providers: the former
+  // CodeCraft vision engine (CODECRAFT_API_KEY / CODECRAFT_BASE_URL) is gone
+  // from the chain — Step 1 goes directly to MobileNetV2 on Hugging Face.
   const geminiApiKeys = resolveGeminiApiKeys();
   const huggingfaceKey = resolveHuggingFaceToken();
-  const codecraftKey = resolveCodeCraftApiKey();
 
-  if (geminiApiKeys.length === 0 && !huggingfaceKey && !codecraftKey) {
+  if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
     // contract no longer includes any HTTP 500). The UI shows its dedicated
     // "assistant unavailable" notice for code MISSING_KEYS. With either key
@@ -2126,42 +2031,27 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     preprocessing = detection.preprocessing;
     classifyImage = detection.image;
 
-    // Step 1 — PRIMARY engine: CodeCraft vision (gpt-4o → gpt-4o-mini). Only
-    // attempted when a real key is configured: `resolveCodeCraftApiKey()`
-    // returns null for a missing OR placeholder value, so an unconfigured
-    // deployment keeps the previous pipeline byte-for-byte (no request, no
-    // latency, no warning). Any failure is captured inside the stage → silent
-    // failover to MobileNetV2 + Gemini below.
-    if (codecraftKey) {
-      diagnosis = await runCodeCraftVisionStage(classifyImage, context, warnings);
-    }
-
-    // Step 1 — FALLBACK engine: MobileNetV2 PlantVillage (Hugging Face).
-    // Runs whenever CodeCraft is unavailable, unconfigured or could not
-    // diagnose the photo — the pre-existing behaviour, untouched.
-    if (!diagnosis) {
-      if (!huggingfaceKey) {
-        // Only warn when CodeCraft is not the reason we got here: when the
-        // primary engine is configured, a missing HF key is not a degradation.
-        if (!codecraftKey) {
-          const detail =
-            "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
-          console.warn(`[Step 1: HF Skipped] ${detail}`);
-          warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
-        }
-      } else {
-        try {
-          diagnosis = await classifyPlantImageStrict(
-            classifyImage.data,
-            classifyImage.mimeType,
-            huggingfaceKey,
-          );
-        } catch (error) {
-          const msg = error instanceof Error ? error.message : String(error);
-          const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
-          console.warn(`[Step 1: HF Unavailable] ${detail}`);
-          warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
-        }
+    // Step 1 — MobileNetV2 PlantVillage (Hugging Face), DIRECTLY: the former
+    // CodeCraft vision engine is removed from the chain, so every photo is
+    // classified by the single known-good MobileNetV2 id with no
+    // intermediate vision round-trip (no WAF 403 stalls, no extra latency).
+    if (!huggingfaceKey) {
+      const detail =
+        "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — vision step skipped.";
+      console.warn(`[Step 1: HF Skipped] ${detail}`);
+      warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
+    } else {
+      try {
+        diagnosis = await classifyPlantImageStrict(
+          classifyImage.data,
+          classifyImage.mimeType,
+          huggingfaceKey,
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
+        console.warn(`[Step 1: HF Unavailable] ${detail}`);
+        warnings.push(`Step 1 vision unavailable — ${detail}`.slice(0, 400));
       }
     }
   }

@@ -78,12 +78,13 @@ export interface DiagnosisCandidate {
 
 /**
  * Which vision engine produced a {@link AssistantDiagnosis}.
- *   • `plantvillage-hf` — Hugging Face MobileNetV2 PlantVillage classifier;
- *   • `codecraft`       — CodeCraft vision API (gpt-4o / gpt-4o-mini).
- * Optional: diagnoses produced before the CodeCraft engine existed carry no
- * engine tag, and every consumer treats the field as informational only.
+ *   • `plantvillage-hf` — Hugging Face MobileNetV2 PlantVillage classifier.
+ * The streamlined pipeline has exactly ONE vision engine: the former
+ * CodeCraft gateway was removed from the chain (WAF 403 stalls + an extra
+ * network round-trip). Optional: most diagnoses carry no engine tag, and
+ * every consumer treats the field as informational only.
  */
-export type AssistantVisionEngine = "plantvillage-hf" | "codecraft";
+export type AssistantVisionEngine = "plantvillage-hf";
 
 /** Structured result of the PlantVillage vision step. */
 export interface AssistantDiagnosis {
@@ -103,8 +104,9 @@ export interface AssistantDiagnosis {
 
   /* ------------------------------------------------------------------ */
   /*  Optional enrichment — additive, never required by any consumer.    */
-  /*  Emitted by the CodeCraft vision engine, which reports more than a   */
-  /*  plain label: severity and an immediate treatment plan.             */
+  /*  The MobileNetV2 PlantVillage classifier sets none of these; they   */
+  /*  remain for richer classifiers pinned via `HF_VISION_MODEL` and for */
+  /*  older stored responses (severity + immediate treatment plan).      */
   /* ------------------------------------------------------------------ */
 
   /** Vision engine that produced this diagnosis. */
