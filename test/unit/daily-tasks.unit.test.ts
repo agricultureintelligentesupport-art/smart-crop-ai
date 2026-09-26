@@ -462,7 +462,7 @@ test("generateAiTasks parses the spec's Gemini JSON sample end-to-end", async ()
   const fetchImpl: FetchLike = async (url) => {
     assert.ok(String(url).includes("generativelanguage.googleapis.com"));
     assert.ok(String(url).includes("key=test-key"));
-    assert.ok(String(url).includes("/models/gemini-3.6-flash:generateContent"));
+    assert.ok(String(url).includes("/models/gemini-3.6:generateContent"));
     return {
       ok: true,
       json: async () => ({
@@ -511,7 +511,7 @@ test("generateAiTasks calls the OpenAI primary first, then the Gemini fallback, 
   assert.equal(urls.length, 1);
   assert.ok(String(urls[0]).includes("api.openai.com"));
 
-  // 2. The primary is down → the Gemini fallback answers (gemini-3.6-flash).
+  // 2. The primary is down → the Gemini fallback answers (gemini-3.6).
   urls.length = 0;
   const fallbackFetch: FetchLike = async (url) => {
     urls.push(String(url));
@@ -526,9 +526,9 @@ test("generateAiTasks calls the OpenAI primary first, then the Gemini fallback, 
   const fallback = await generateAiTasks(ctx, fallbackFetch);
   assert.ok(fallback);
   assert.equal(fallback!.provider, "gemini");
-  assert.equal(fallback!.model, "gemini-3.6-flash");
+  assert.equal(fallback!.model, "gemini-3.6");
   assert.equal(urls.length, 2); // openai tried first, then gemini
-  assert.ok(String(urls[1]).includes("/models/gemini-3.6-flash:generateContent"));
+  assert.ok(String(urls[1]).includes("/models/gemini-3.6:generateContent"));
 
   // 3. Every provider answers unusable text → null (caller must use the rules).
   const badFetch: FetchLike = async () => ({

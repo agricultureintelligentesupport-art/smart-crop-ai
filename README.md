@@ -178,7 +178,7 @@ photo (base64)
   └─ Stages 1–3 · Stage 1 = PRIMARY LLM — the Hugging Face Inference
      Providers router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507,
      Bearer HUGGINGFACE_API_KEY / HF_TOKEN)
-     → Stage 2 = FALLBACK LLM — Google Gemini (gemini-3.6-flash → 2.5-flash →
+     → Stage 2 = FALLBACK LLM — Google Gemini (gemini-3.6 → 2.5-flash →
      2.0-flash-exp on a retired-id 404), reached ONLY when the primary HF
      stage failed, timed out or has no token. Gemini inspects the image itself
      (inlineData) with the reference diagnosis when Step 1 produced one

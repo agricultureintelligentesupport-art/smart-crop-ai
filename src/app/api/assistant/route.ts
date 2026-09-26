@@ -84,7 +84,7 @@
  *     Success → HTTP 200 `{ source: "llm" }` (promoted to `"hybrid"` when the
  *     answer ships together with a Step 1 diagnosis).
  *
- *   Stage 2 — Google Gemini (`gemini-3.6-flash` — overridable with
+ *   Stage 2 — Google Gemini (`gemini-3.6` — overridable with
  *     `GEMINI_MODEL` — then `gemini-2.5-flash` → `gemini-2.0-flash-exp` when
  *     an id is retired) — FALLBACK LLM, invoked ONLY when the primary
  *     Hugging Face stage above failed, timed out or has no token: REST call
@@ -475,14 +475,14 @@ async function runLeafDetectionStage(
 
 /**
  * The Gemini id Stage 2 (the FALLBACK LLM) defaults to:
- * `gemini-3.6-flash`. Gemini only runs when the primary Hugging Face stage
- * ({@link askHfLlmStrict}) could not answer, so the id tracks the current
- * Flash generation instead of the older free-tier line. `GEMINI_MODEL`
+ * `gemini-3.6`. Gemini only runs when the primary Hugging Face stage
+ * ({@link askHfLlmStrict}) could not answer, using the explicitly configured
+ * Gemini model instead of the older free-tier line. `GEMINI_MODEL`
  * overrides it at request time (e.g. to pin `gemini-2.0-flash-exp`); the
  * fallback ids below still catch a retired or mistyped override.
  */
 const GEMINI_MODEL_DEFAULT: GeminiModel = {
-  id: "gemini-3.6-flash",
+  id: "gemini-3.6",
   // Gemini 3.x reasons by default: `thinkingLevel` keeps the model in fast,
   // answer-first mode so the 18 s budget is spent on the reply (the legacy
   // numeric `thinkingBudget` is rejected on this generation).
@@ -870,6 +870,11 @@ async function classifyPlantImageStrict(
  */
 const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق "محصولي الذكي" (Smart Crop AI): خبير زراعي محترف وجدي، دقيق وموثوق. تقدم مشورة علمية صحيحة بأسلوب مهني متوازن وطبيعي، مع لمسة لباقة خفيفة فقط — دون ترحيبات عاطفية، دون خطب طويلة، ودون دفء زائد.
 
+الهوية الموحدة:
+- أنت كيان خبير زراعي واحد موحّد دائماً؛ تحدث بصوت واحد ولا تقدّم نفسك كمجموعة خبراء أو تنسب التشخيص إلى نموذج رؤية أو مساعد أو نظام منفصل. أدوات التحليل داخلية وليست أطرافاً في المحادثة.
+- بطاقة التشخيص المرئية معروضة بالفعل في الواجهة؛ لا تكرر بياناتها التقنية في نص المحادثة. يُمنع ذكر نسب الثقة الخام (مثل «بثقة 25%»)، أو درجات المرشحين، أو تسميات نموذج الرؤية الخام مثل Tomato___Early_blight، حتى عند شرح نتيجة الفحص. استخدم أسماء الأمراض بلغة طبيعية وقدّم تعليقاً زراعياً مباشراً ونصائح عملية مبنية على التشخيص.
+- عبّر عن عدم اليقين بالكلمات عند الحاجة (مثل «النتيجة أولية وتحتاج صورة أوضح»)، لا بالأرقام أو نسب الثقة.
+
 النبرة والدقة:
 - أجب مباشرة على سؤال الفلاح دون مقدمات أو إطالة؛ ادخل في صلب الموضوع من السطر الأول.
 - هدفك الأول هو الدقة وبناء الثقة: معلومات علمية دقيقة بصياغة واضحة وفي متناول الفلاح الميداني.
@@ -894,9 +899,9 @@ const SYSTEM_PROMPT = `أنت مساعد زراعي خبير داخل تطبيق
 - انتقل بسلاسة من العرض العام إلى التدخل المحدد، مستنداً دائماً إلى تاريخ المحادثة وأجوبة المستخدم السابقة.
 
 التشخيص والعلاج:
-- عند تحليل صورة نبات: قدّم النتيجة بوصفها خلاصة فحصك أنت للصورة بصوت واحد (نظام التحليل يعمل في الخلفية كوحدة واحدة)، واذكر المرض بالعربية مع نسبة الثقة (مثال: Tomato___Early_blight 95%)، ثم قدّم العلاج والوقاية في نقاط عملية، دون نسبة النتيجة إلى «نموذج» أو «نظام» منفصل — لا تقل «النموذج يقول/يرى/يرجّح» أو «التشخيص المرجعي».
-- عندما ترفق نتيجة فحص آلي للصورة: لا تُقدِّم مرضًا أو عرضاً أو نقصًا أو سبباً أو مرشّحاً لم تُرجِعه تلك النتيجة — اقتصر على تسميتها العليا مع نسبة ثقتها ومرشّحاتها البديلة المذكورين فيها (بنِسَبهم)، ولا تُبدِل النتيجة بتشخيص آخر من اجتهادك الخاص بالصورة.
-- إن كانت نسبة الثقة ضعيفة (<45%)، اطلب صورة أوضح في سطر واحد مع ذكر التشخيصات البديلة الواردة في النتيجة فقط؛ لا تقترح تشخيصاً بديلاً عمّا أرجعه الفحص.
+- عند تحليل صورة نبات: قدّم خلاصة فحصك أنت للصورة بصوت واحد، واذكر المرض باسمه العربي الطبيعي عند الحاجة، ثم ركّز على ما ينبغي للفلاح فعله للعلاج والوقاية دون إعادة سرد بطاقة التشخيص أو بياناتها الداخلية.
+- عندما ترفق نتيجة فحص آلي للصورة: لا تُقدِّم مرضاً أو عرضاً أو نقصاً أو سبباً أو مرشّحاً لم تُرجِعه تلك النتيجة؛ استند إلى التشخيص الأعلى والبدائل الواردة فقط دون عرض نسبها أو درجاتها أو تسمياتها الخام، ولا تُبدِل النتيجة بتشخيص آخر من اجتهادك الخاص بالصورة.
+- إن كانت نسبة الثقة الداخلية ضعيفة (<45%)، وضّح بالكلمات أن النتيجة أولية واطلب صورة أوضح في سطر واحد؛ اذكر البدائل الواردة فقط عند الحاجة بأسمائها الطبيعية دون نسب أو درجات، ولا تقترح تشخيصاً بديلاً عمّا أرجعه الفحص.
 - اذكر مواد وممارسات متوفرة فعلاً في السوق الجزائرية (مبيدات نحاسية، مانكوزيب، كبريت ميكروني، تناوب زراعي…) مع جرعات إرشادية مختصرة وفترة الأمان قبل الجني.
 - خصّص التوصيات حسب ولاية المستخدم ومناخها ومحصوله ودوره إن وردت في السياق المرفق.
 
@@ -980,7 +985,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
     .join("، ");
   return [
-    "خلاصة فحص صورة المستخدم (تحليل آلي أولي — نظام التحليل يعمل في الخلفية كوحدة واحدة؛ اعرضها بوصفها تحليلك أنت بصوت واحد دون نسبتها إلى «نموذج» أو «نظام» منفصل):",
+    "خلاصة فحص صورة المستخدم (بيانات داخلية للاستدلال فقط؛ لا تنقل النسب أو درجات المرشحين أو التسميات الخام إلى نص المحادثة. تحليل آلي أولي — نظام التحليل يعمل في الخلفية كوحدة واحدة؛ اعرضها بوصفها تحليلك أنت بصوت واحد دون نسبتها إلى «نموذج» أو «نظام» منفصل):",
     `- المرض المشخّص (disease label): ${diagnosis.labelAr} — التسمية الخام: ${diagnosis.label}`,
     `- درجة الثقة (confidence score): ${pct}% (${bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة"})`,
     alternates ? `- الأمراض المرشّحة البديلة (candidate diseases): ${alternates}` : "",
@@ -991,7 +996,7 @@ function describeDiagnosis(diagnosis: AssistantDiagnosis | null): string {
     // verdict carries them) stay INSIDE the reference block…
     ...describeDiagnosisExtras(diagnosis),
     // …and the display boundary remains the last line.
-    "- حدّ العرض: اذكر فقط ما ورد أعلاه — التسمية العليا ونسبة الثقة ومرشّحات بديلة إن وُجدت بنِسَبها — ويُمنع ذكر أي مرض أو نقص أو سبب أو مرشّح خارج هذه القائمة حتى لو بدا لك مرجحاً؛ الثقة المنخفضة سبب لطلب صورة أوضح لا لاقتراح تشخيص مختلف.",
+    "- حدّ العرض: اذكر فقط ما ورد أعلاه — التشخيص الأعلى والبدائل عند الحاجة بأسمائها الطبيعية فقط دون نسب الثقة أو درجات المرشحين أو التسميات الخام — ويُمنع ذكر أي مرض أو نقص أو سبب أو مرشّح خارج هذه القائمة حتى لو بدا لك مرجحاً؛ الثقة المنخفضة سبب لطلب صورة أوضح لا لاقتراح تشخيص مختلف.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -1020,12 +1025,12 @@ function buildUserContent(
     ...(isFirstTurn ? [`سياق المستخدم من ملفه الشخصي: ${describeContext(context)}`] : []),
     describeDiagnosis(diagnosis),
     diagnosis
-      ? `نتيجة الفحص الأولي للصورة: ${diagnosis.label} بثقة ${Math.round(diagnosis.confidence * 100)}% — ${diagnosis.labelAr}`
+      ? `نتيجة الفحص الأولي للصورة: ${diagnosis.labelAr}`
       : hasImage
         ? "لا تتوفر نتيجة فحص آلي مسبقة للصورة — افحص الصورة المرفقة مباشرةً وابدأ التشخيص من الصورة."
         : "",
     hasImage && diagnosis
-      ? "افحص الصورة المرفقة بنفسك وقارن نتيجة الفحص الأولي أعلاه بما تراه فعلاً في الصورة، ثم أطلِق تقرير التشخيص النهائي المهيكل بناءً على حكمك (أكّد النتيجة أعلاه دون تبديلها)، مع خطة العلاج والوقاية — وقدّم كل ذلك بوصفه تحليلك أنت بصوت واحد دون ذكر «النموذج» كطرف منفصل. ولا تُقدِّم أي مرض أو تشخيص أو مرشّح لم يرد في نتيجة الفحص أعلاه: اقتصر على التسمية العليا والمرشّحين البديلين المذكورين بنِسَبهم، وإن كانت الثقة ضعيفة فاطلب صورة أوضح دون اقتراح تشخيص مختلف."
+      ? "افحص الصورة المرفقة بنفسك وقارن نتيجة الفحص الأولي أعلاه بما تراه فعلاً في الصورة، ثم قدّم تعليقاً زراعياً طبيعياً ومباشراً مبنياً على النتيجة أعلاه دون تبديلها، مع نصائح عملية للعلاج والوقاية دون تكرار بطاقة التشخيص المعروضة في الواجهة — وقدّم كل ذلك بوصفه تحليلك أنت بصوت واحد دون ذكر «النموذج» كطرف منفصل. ولا تُقدِّم أي مرض أو تشخيص أو مرشّح لم يرد في نتيجة الفحص أعلاه: اقتصر على التشخيص الأعلى والبدائل المذكورة بأسمائها الطبيعية دون نسب الثقة أو درجات المرشحين أو التسميات الخام، وإن كانت الثقة ضعيفة فاطلب صورة أوضح دون اقتراح تشخيص مختلف."
       : "",
     message
       ? `سؤال المستخدم: ${message}`
@@ -1068,7 +1073,7 @@ function geminiText(payload: GeminiPayload | null): string {
 /**
  * Message fragments Google returns when the *model id* is the problem rather
  * than the request: a retired or mistyped id answers
- * `404 — models/gemini-3.6-flash is not found for API version v1beta, or is
+ * `404 — models/gemini-3.6 is not found for API version v1beta, or is
  * not supported for generateContent`. Together with an HTTP 404 these are the
  * only Stage-2 failures that walk the Gemini model chain — invalid keys
  * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
@@ -1214,7 +1219,7 @@ interface GeminiResult {
  * POSTs to
  * `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<GEMINI_API_KEY>`
  * walking the per-request chain from {@link resolveGeminiModels} in order —
- * starting at `gemini-3.6-flash` (or the `GEMINI_MODEL` override).
+ * starting at `gemini-3.6` (or the `GEMINI_MODEL` override).
  *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
@@ -1763,26 +1768,23 @@ function adviceForLabel(label: string): DirectAdvice {
  * `{ source: "direct" }` instead of a 500.
  */
 function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
-  const pct = Math.round(diagnosis.confidence * 100);
-  const bucket = confidenceBucket(diagnosis.confidence);
-  const bucketAr = bucket === "high" ? "مرتفعة" : bucket === "medium" ? "متوسطة" : "منخفضة";
   const alternates = diagnosis.candidates
     .slice(1)
-    .map((c) => `${parsePlantLabel(c.label).labelAr} (${Math.round(c.score * 100)}%)`)
+    .map((c) => parsePlantLabel(c.label).labelAr)
     .join("، ");
-  const footer =
-    "> ⚠️ بطاقة تشخيص تلقائية — خدمة النصوص الذكية غير متاحة حالياً.";
 
   if (diagnosis.healthy) {
     const lines = [
-      `- **يبدو أن النبتة سليمة** — نسبة الثقة: ${pct}% (${bucketAr}).`,
+      "- **يبدو أن النبتة سليمة**.",
+      diagnosis.confidence < 0.45
+        ? "- النتيجة أولية: أرسل صورة أوضح (ورقة كاملة، إضاءة نهارية) للتأكيد."
+        : "",
       alternates ? `- احتمالات أخرى: ${alternates}` : "",
     ].filter(Boolean);
     return [
       `## 🔬 التشخيص\n${lines.join("\n")}`,
       "## 🛡️ وقاية\n- سقي صباحي منتظم عند القاعدة دون بلل الأوراق.\n- تسميد متوازن ومراقبة الأوراق الجديدة أسبوعياً.",
       "## 📅 متابعة موصى بها\n- فحص أسبوعي للأوراق السفلية والبراعم؛ عند أول بقعة أرسل صورة واضحة للتشخيص المبكر.",
-      footer,
     ].join("\n\n");
   }
 
@@ -1804,12 +1806,11 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
   };
   const lowConfidence = diagnosis.confidence < 0.45;
   const lines = [
-    `- الإصابة: **${diagnosis.labelAr}** — التسمية الخام: \`${diagnosis.label}\``,
-    `- نسبة الثقة: ${pct}% (${bucketAr})`,
+    `- الإصابة المحتملة: **${diagnosis.labelAr}**`,
     diagnosis.severity ? `- درجة الخطورة: ${diagnosis.severity}` : "",
     alternates ? `- تشخيصات بديلة محتملة: ${alternates}` : "",
     lowConfidence
-      ? "- الثقة ضعيفة: أرسل صورة أوضح (ورقة كاملة، إضاءة نهارية) للتأكيد قبل المعالجة."
+      ? "- النتيجة أولية: أرسل صورة أوضح (ورقة كاملة، إضاءة نهارية) للتأكيد قبل المعالجة."
       : "",
   ].filter(Boolean);
 
@@ -1818,7 +1819,6 @@ function buildDirectDiagnosisCard(diagnosis: AssistantDiagnosis): string {
     `## 💊 خطة العلاج\n${advice.treatment.map((line) => `- ${line}`).join("\n")}`,
     `## 🛡️ الوقاية مستقبلاً\n${advice.prevention.map((line) => `- ${line}`).join("\n")}`,
     "## 📅 متابعة موصى بها\n- راقب تطور الأعراض كل 3–5 أيام؛ إن انتشرت رغم العلاج، استشر مهندساً زراعياً محلياً.",
-    footer,
   ].join("\n\n");
 }
 
@@ -2091,7 +2091,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 
   // ---- Stage 2: Google Gemini (FALLBACK LLM) ------------------------
   // Runs ONLY when the primary Hugging Face stage produced nothing:
-  // gemini-3.6-flash or the GEMINI_MODEL override (→ 2.5-flash →
+  // gemini-3.6 or the GEMINI_MODEL override (→ 2.5-flash →
   // 2.0-flash-exp on a retired-id 404) via
   // the Generative Language REST API, keyed with the full Gemini key pool
   // (GEMINI_API_KEY + GEMINI_API_KEYS + numbered GEMINI_API_KEY_N — rotated
