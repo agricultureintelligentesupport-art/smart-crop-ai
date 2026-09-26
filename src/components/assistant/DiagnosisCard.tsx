@@ -2,13 +2,13 @@
 
 import { Microscope, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { AssistantCopy } from "@/lib/assistant/copy";
-import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
+import { confidenceBucket, diseaseOnlyName } from "@/lib/assistant/plantvillage";
 import type { AssistantDiagnosis } from "@/lib/assistant/types";
 
 /**
- * Structured card for the PlantVillage vision verdict: localized disease
- * name, a confidence meter with color-coded buckets and the runner-up
- * candidates — displayed above the LLM treatment plan.
+ * Structured card for the PlantVillage vision verdict: disease name only
+ * (crop prefixes and suffixes stripped), a confidence meter with color-coded
+ * buckets and the runner-up candidates — displayed above the LLM treatment plan.
  */
 export default function DiagnosisCard({
   diagnosis,
@@ -24,6 +24,9 @@ export default function DiagnosisCard({
   const barColor =
     bucket === "high" ? "bg-emerald-500" : bucket === "medium" ? "bg-amber-400" : "bg-orange-500";
   const alternates = diagnosis.candidates.slice(1);
+  const diseaseTitle = diagnosis.healthy
+    ? `${copy.healthy} ✅`
+    : diseaseOnlyName(diagnosis.labelAr || diagnosis.label);
 
   return (
     <div className="overflow-hidden rounded-2xl border border-emerald-200/70 bg-gradient-to-br from-emerald-50/90 to-teal-50/60">
@@ -39,9 +42,12 @@ export default function DiagnosisCard({
       </div>
 
       <div className="space-y-2.5 px-3 py-2.5">
-        <p className="text-[14.5px] font-black leading-6 text-emerald-950">
-          {diagnosis.healthy ? `${copy.healthy} ✅` : diagnosis.labelAr}
-        </p>
+        <div>
+          <p className="text-[14.5px] font-black leading-6 text-emerald-950">{diseaseTitle}</p>
+          {!diagnosis.healthy && (
+            <p className="mt-0.5 text-[11px] font-medium leading-5 text-emerald-900/50">{copy.multiCropNote}</p>
+          )}
+        </div>
 
         <div>
           <div className="mb-1 flex items-center justify-between gap-2">
@@ -74,7 +80,7 @@ export default function DiagnosisCard({
                   key={c.label}
                   className="rounded-full bg-white/80 px-2.5 py-1 text-[10.5px] font-bold text-emerald-800 ring-1 ring-emerald-100"
                 >
-                  {parsePlantLabel(c.label).labelAr} · {Math.round(c.score * 100)}%
+                  {diseaseOnlyName(c.label)}
                 </span>
               ))}
             </div>

@@ -1657,7 +1657,9 @@ test("zero-failure: both LLM stages down after a successful Step 1 returns 200 w
   assert.match(payload.reply, /## 🔬 التشخيص/);
   assert.doesNotMatch(payload.reply, /Tomato___Early_blight/);
   assert.doesNotMatch(payload.reply, /95%/);
-  assert.match(payload.reply, /الطماطم/);
+  // Disease-only display: the crop prefix is stripped from the fallback card.
+  assert.match(payload.reply, /اللفحة المبكرة/);
+  assert.doesNotMatch(payload.reply, /الطماطم/);
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
   // Failures are reported as non-fatal warnings, not a 500.

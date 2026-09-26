@@ -54,6 +54,8 @@ export interface AssistantCopy {
     confidenceHigh: string;
     confidenceMedium: string;
     confidenceLow: string;
+    /** Subtle note under the disease title: the same symptoms can hit several crops. */
+    multiCropNote: string;
   };
 }
 
@@ -109,6 +111,7 @@ const AR: AssistantCopy = {
     confidenceHigh: "ثقة مرتفعة",
     confidenceMedium: "ثقة متوسطة",
     confidenceLow: "ثقة منخفضة — جرّب صورة أوضح",
+    multiCropNote: "مرض شائع يصيب عدة محاصيل تشترك في نفس الأعراض",
   },
 };
 
@@ -164,6 +167,7 @@ const FR: AssistantCopy = {
     confidenceHigh: "Confiance élevée",
     confidenceMedium: "Confiance moyenne",
     confidenceLow: "Confiance faible — photo plus nette conseillée",
+    multiCropNote: "Maladie courante qui touche plusieurs cultures partageant les mêmes symptômes",
   },
 };
 

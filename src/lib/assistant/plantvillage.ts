@@ -130,6 +130,183 @@ export function parsePlantLabel(rawLabel: string): ParsedPlantLabel {
   return { raw, cropAr, diseaseAr, healthy, labelAr };
 }
 
+/**
+ * Crop names that may prefix or suffix a diagnosis string. Arabic values come
+ * from {@link CROPS_AR}; English keys cover PlantVillage crop sides such as
+ * `Corn (maize)` and `Pepper, bell`. Comparison is accent- and harakat-folded.
+ */
+const CROP_AR_KEYS = new Set(
+  [...Object.values(CROPS_AR), "بطاطس", "بندورة", "بندوره", "مايس", "مايز"].map((name) => foldArCrop(name)),
+);
+const CROP_LATIN_KEYS = new Set(
+  [
+    ...Object.keys(CROPS_AR),
+    "tomate",
+    "pomme de terre",
+    "mais",
+    "ble",
+    "pomme",
+    "raisin",
+    "poivron",
+    "piment",
+    "fraise",
+    "courge",
+    "soja",
+    "cerise",
+    "peche",
+    "orange",
+    "coton",
+    "concombre",
+    "riz",
+    "bleuet",
+    "framboise",
+  ].map((name) => norm(foldLatin(name))),
+);
+/** Words that may sit beside a crop on a PlantVillage crop side, but are not diseases. */
+const CROP_SIDE_FILLERS = new Set(["including", "sour", "bell", "sweet", "and", "plant", "crop", "species"]);
+
+function foldLatin(input: string): string {
+  return input.normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+function foldAr(input: string): string {
+  return input
+    .replace(/[أإآٱ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[\u064B-\u0652\u0640\u0670]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function foldArCrop(input: string): string {
+  return foldAr(input).replace(/^ال/, "");
+}
+
+/** True when a label segment is only a plant species (optionally with a variety qualifier). */
+function isCropFragment(fragment: string): boolean {
+  const cleaned = fragment
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    .replace(/^(?:محصول|نبات|نبتة|زراعة)\s+/u, "")
+    .replace(/^(?:crop|plant|species)\s+/iu, "")
+    .replace(/\s+(?:crop|plant|species)$/iu, "")
+    .trim();
+  if (!cleaned) return false;
+
+  const ar = foldArCrop(cleaned.replace(/^(?:مرض|اصابة|إصابة)\s+/u, ""));
+  if (ar && CROP_AR_KEYS.has(ar)) return true;
+
+  const latin = norm(foldLatin(cleaned));
+  if (!latin) return false;
+  if (CROP_LATIN_KEYS.has(latin)) return true;
+  const words = latin.split(" ").filter(Boolean);
+  return (
+    words.length > 0 &&
+    words.every((word) => CROP_LATIN_KEYS.has(word) || CROP_SIDE_FILLERS.has(word)) &&
+    words.some((word) => CROP_LATIN_KEYS.has(word))
+  );
+}
+
+const LABEL_SEGMENT_SPLIT = /\s*(?:—|–|―|‒|−|_{2,}|[:：])\s*|\s+[-/|]\s+/u;
+
+function splitLabelSegments(label: string): string[] {
+  return label
+    .split(LABEL_SEGMENT_SPLIT)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function dropCropSegments(label: string): string {
+  const parts = splitLabelSegments(label);
+  if (parts.length < 2) return label;
+  const kept = parts.filter((part) => !isCropFragment(part));
+  if (kept.length === 0 || kept.length === parts.length) return label;
+  return kept.join(" — ");
+}
+
+function stripEdgeParentheticalCrops(label: string): string {
+  let text = label;
+  let previous = "";
+  while (text !== previous) {
+    previous = text;
+    text = text
+      .replace(/^\s*[(\[（]\s*([^)\]）]+)\s*[)\]）]\s*/u, (full, inner: string) =>
+        isCropFragment(inner) ? "" : full,
+      )
+      .replace(/\s*[(\[（]\s*([^)\]）]+)\s*[)\]）]\s*$/u, (full, inner: string) =>
+        isCropFragment(inner) ? "" : full,
+      )
+      .trim();
+  }
+  return text;
+}
+
+/**
+ * Remove plant-species prefixes and suffixes from a diagnosis display string.
+ * "الذرة — التبقّع الرمادي للأوراق" → "التبقّع الرمادي للأوراق".
+ * Official disease names that merely mention a host ("جرب التفاح") are kept.
+ */
+function stripCropAffixes(label: string): string {
+  let text = label.replace(/✅/g, "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+
+  text = stripEdgeParentheticalCrops(text);
+  text = dropCropSegments(text);
+  // Hyphenated crop sides ("Corn-Common rust") — only when a segment is a crop,
+  // so disease tokens like "leaf-spot" stay intact.
+  if (!text.includes(" — ")) {
+    const hyphenParts = text.split(/\s*-\s*/).map((part) => part.trim()).filter(Boolean);
+    if (hyphenParts.length >= 2) {
+      const kept = hyphenParts.filter((part) => !isCropFragment(part));
+      if (kept.length > 0 && kept.length < hyphenParts.length) text = kept.join(" — ");
+    }
+  }
+  text = stripEdgeParentheticalCrops(text);
+
+  text = text
+    .replace(/\s+(?:of|on|in|for|chez|du|de la|de l'|des)\s+([A-Za-z][^—–]{0,48})$/i, (full, crop: string) =>
+      isCropFragment(crop) ? "" : full,
+    )
+    .replace(/\s+(?:في|على|لدى)\s+([\u0600-\u06FF][\u0600-\u06FF\s]{1,40})$/u, (full, crop: string) =>
+      isCropFragment(crop) ? "" : full,
+    )
+    .trim();
+
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Disease-only diagnosis name.
+ *
+ * Accepts either a raw PlantVillage label (`Corn_(maize)___Common_rust_`) or an
+ * already localised string (`الذرة — الصدأ الشائع`) and returns just the disease
+ * (`الصدأ الشائع`). Healthy labels become "نبتة سليمة" with no crop prefix.
+ * Custom spellings on an already-localised string are preserved (the crop affix
+ * is stripped, the disease half is not re-translated).
+ */
+export function diseaseOnlyName(source: string): string {
+  const trimmed = source.trim();
+  if (!trimmed) return "";
+
+  if (/_{2,}/.test(trimmed)) {
+    const parsed = parsePlantLabel(trimmed);
+    if (parsed.healthy) return "نبتة سليمة";
+    if (parsed.diseaseAr) return stripCropAffixes(parsed.diseaseAr) || parsed.diseaseAr;
+    const diseaseSide = trimmed
+      .split(/_{2,}/)
+      .slice(1)
+      .join(" ")
+      .replace(/_/g, " ")
+      .replace(/✅/g, "")
+      .trim();
+    const strippedSide = stripCropAffixes(diseaseSide);
+    if (strippedSide) return strippedSide;
+  }
+
+  const stripped = stripCropAffixes(trimmed);
+  return stripped || trimmed.replace(/✅/g, "").trim();
+}
+
 /** Confidence bucket used for wording (server + UI share the thresholds). */
 export function confidenceBucket(score: number): "high" | "medium" | "low" {
   if (score >= 0.75) return "high";
