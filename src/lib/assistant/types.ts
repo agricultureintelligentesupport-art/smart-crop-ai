@@ -3,7 +3,7 @@
  * 3-stage chain behind `/api/assistant`:
  *   Step 1  Hugging Face MobileNet PlantVillage vision diagnosis,
  *   Stage 1 Hugging Face LLM chain (primary LLM),
- *   Stage 2 Google Gemini (`gemini-3.6-flash`, fallback LLM),
+ *   Stage 2 Google Gemini (`gemini-3.6`, fallback LLM),
  *   Stage 3 built-in TypeScript direct formatters (never fails).
  *
  * Kept dependency-free and importable from both server and client code.
@@ -130,7 +130,7 @@ export type AssistantSource =
   | "hybrid"
   /**
    * LLM reasoning only (no vision diagnosis attached) — the Hugging Face
-   * chain when it answers, otherwise the Gemini (`gemini-3.6-flash`) fallback.
+   * chain when it answers, otherwise the Gemini (`gemini-3.6`) fallback.
    */
   | "llm"
   /**

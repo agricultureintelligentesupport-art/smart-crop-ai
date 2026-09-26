@@ -111,7 +111,7 @@ pinned and the rest wait behind the integrated handle.
 | Variable | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | Stage-1 LLM (PRIMARY, `gpt-4o-mini` by default) with JSON mode |
-| `GEMINI_API_KEY*` | Stage-2 LLM (FALLBACK, same key pool as `/api/assistant`), model chain `gemini-3.6-flash` → `2.5-flash` → `2.0-flash`, `GEMINI_MODEL` overrides |
+| `GEMINI_API_KEY*` | Stage-2 LLM (FALLBACK, same key pool as `/api/assistant`), model chain `gemini-3.6` → `2.5-flash` → `2.0-flash`, `GEMINI_MODEL` overrides |
 | `FIREBASE_DATABASE_URL`, `FIREBASE_DATABASE_AUTH` | optional RTDB REST persistence (`dailyTasks/…`, `dailySnapshots/…`); omit to keep everything client-side |
 | `DAILY_TASK_CONTEXTS` | JSON array of pinned parcels the midnight job publishes for (defaults to the app's default wilaya + lead crop) |
 | `CRON_SECRET` | protects the two cron endpoints |

@@ -8,7 +8,7 @@
  *
  *   Stage 1 — OpenAI-compatible chat endpoint (`OPENAI_API_KEY`,
  *             `OPENAI_MODEL`, default `gpt-4o-mini`) with JSON mode.
- *   Stage 2 — Google Gemini (`GEMINI_MODEL`, default `gemini-3.6-flash`, then
+ *   Stage 2 — Google Gemini (`GEMINI_MODEL`, default `gemini-3.6`, then
  *             `gemini-2.5-flash` → `gemini-2.0-flash` on a retired-id 404),
  *             keyed with the full `GEMINI_API_KEY*` pool (rotated on quota) —
  *             the SECONDARY FALLBACK: it only runs when the primary OpenAI
@@ -45,7 +45,7 @@ export const AI_TIMEOUT_MS = 15_000;
  */
 export function resolveGeminiModels(): string[] {
   const override = (process.env.GEMINI_MODEL ?? "").trim();
-  const chain = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+  const chain = ["gemini-3.6", "gemini-2.5-flash", "gemini-2.0-flash"];
   return override ? [override, ...chain.filter((m) => m !== override)] : chain;
 }
 

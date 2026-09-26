@@ -27,7 +27,7 @@ const GEMINI_TIMEOUT_MS = 18_000;
  * ids walked when a generation is retired.
  */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-3.6-flash",
+  "gemini-3.6",
   "gemini-2.5-flash",
   "gemini-2.0-flash-exp",
 ] as const;
@@ -407,12 +407,12 @@ test("chain order: Gemini is consulted ONLY after the primary LLM failed", async
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "إجابة الاحتياط.");
-  // Primary first (503), then the Gemini fallback with gemini-3.6-flash.
+  // Primary first (503), then the Gemini fallback with gemini-3.6.
   assert.equal(urls.length, 2);
   assert.equal(urls[0], HF_ROUTER_CHAT_URL);
   assert.equal(
     urls[1],
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${GEMINI_KEY}`,
   );
   assert.match(warningText(payload), /Stage 1 HF LLM unavailable/);
 });
@@ -421,7 +421,7 @@ test("chain order: Gemini is consulted ONLY after the primary LLM failed", async
 /*  Stage 2 — Google Gemini fallback LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 2 answers from gemini-3.6-flash with 200 { source: \"llm\" }", async () => {
+test("Stage 2 answers from gemini-3.6 with 200 { source: \"llm\" }", async () => {
   // Gemini-only deployment: with no Hugging Face token the primary LLM stage
   // is skipped, so the Gemini fallback is the stage that answers.
   configureKeys({ huggingface: false });
@@ -448,7 +448,7 @@ test("Stage 2 answers from gemini-3.6-flash with 200 { source: \"llm\" }", async
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -464,7 +464,7 @@ test("Stage 2 answers from gemini-3.6-flash with 200 { source: \"llm\" }", async
   });
 });
 
-test("Stage 2 keeps the gemini-3.6-flash endpoint when the API key rotates", async () => {
+test("Stage 2 keeps the gemini-3.6 endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -483,7 +483,7 @@ test("Stage 2 keeps the gemini-3.6-flash endpoint when the API key rotates", asy
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${key}`,
     ),
   );
 });
@@ -635,8 +635,8 @@ test("Fallback B: every Gemini key exhausted → structured response built direc
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
   assert.match(payload.reply, /## 🔬 التشخيص/);
-  assert.match(payload.reply, /Tomato___Early_blight/);
-  assert.match(payload.reply, /95%/);
+  assert.doesNotMatch(payload.reply, /Tomato___Early_blight/);
+  assert.doesNotMatch(payload.reply, /95%/);
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   // …with the degradations reported as warnings, never an HTTP 500.
   assert.match(warningText(payload), /all Gemini API keys failed/);
@@ -1091,7 +1091,7 @@ test("GEMINI_MODEL overrides the Stage-2 model id (trimmed, single round-trip)",
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   // Exactly one Gemini round-trip against the override — the default
-  // gemini-3.6-flash id is skipped and the override is not duplicated as its
+  // gemini-3.6 id is skipped and the override is not duplicated as its
   // own fallback.
   assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash-exp"]);
 });
@@ -1125,7 +1125,7 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
   assert.match(warningText(payload), /Stage 2 Gemini unavailable/);
 });
 
-test("a blank GEMINI_MODEL falls back to the gemini-3.6-flash default", async () => {
+test("a blank GEMINI_MODEL falls back to the gemini-3.6 default", async () => {
   configureKeys();
   process.env.GEMINI_MODEL = "   ";
   const urls: string[] = [];
@@ -1570,9 +1570,11 @@ test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini 
   configureKeys();
   let chatBody: ChatRequestBody | undefined;
   let geminiUser = "";
+  let geminiSystem = "";
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (isGeminiUrl(String(url))) {
       geminiUser = geminiUserText(parseGeminiBody(init));
+      geminiSystem = geminiSystemText(parseGeminiBody(init));
       return geminiReply();
     }
     if (isChatUrl(String(url))) {
@@ -1607,11 +1609,21 @@ test("Stage 1 sends the same system prompt, query and Step 1 context the Gemini 
   assert.match(system.content, /دون مقدمات أو إطالة/);
   assert.match(system.content, /باللغة العربية/);
   assert.match(system.content, /عملي/);
+  assert.equal(system.content, geminiSystem);
+  assert.match(system.content, /كيان خبير زراعي واحد موحّد/);
+  assert.match(system.content, /يُمنع ذكر نسب الثقة الخام/);
+  assert.match(system.content, /درجات المرشحين/);
+  assert.match(system.content, /تسميات نموذج الرؤية الخام/);
+  assert.match(system.content, /بطاقة التشخيص المرئية معروضة بالفعل/);
+  assert.doesNotMatch(system.content, /اذكر المرض بالعربية مع نسبة الثقة|بنِسَبهم/);
   assert.equal(user.role, "user");
   // The Gemini fallback received EXACTLY the same user turn as the primary
   // HF stage: query + Step 1 label/confidence + candidates.
   assert.ok(geminiUser, "the Gemini fallback must have been consulted");
   assert.equal(user.content, geminiUser);
+  assert.match(user.content, /بيانات داخلية للاستدلال فقط/);
+  assert.match(user.content, /دون نسب الثقة أو درجات المرشحين أو التسميات الخام/);
+  assert.doesNotMatch(user.content, /بنِسَبهم|بنِسَبها|بثقة 95%/);
   assert.match(user.content, /Tomato___Early_blight/);
   assert.match(user.content, /95%/);
   assert.match(user.content, /How should I irrigate tomatoes\?/);
@@ -1643,8 +1655,8 @@ test("zero-failure: both LLM stages down after a successful Step 1 returns 200 w
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   // Clean concise Arabic Markdown card built from the Step 1 label + confidence.
   assert.match(payload.reply, /## 🔬 التشخيص/);
-  assert.match(payload.reply, /Tomato___Early_blight/);
-  assert.match(payload.reply, /95%/);
+  assert.doesNotMatch(payload.reply, /Tomato___Early_blight/);
+  assert.doesNotMatch(payload.reply, /95%/);
   assert.match(payload.reply, /الطماطم/);
   assert.match(payload.reply, /## 💊 خطة العلاج/);
   assert.match(payload.reply, /## 🛡️ الوقاية مستقبلاً/);
@@ -1685,7 +1697,8 @@ test("zero-failure: healthy diagnosis gets a direct reassurance card with preven
   assert.equal(payload.source, "direct");
   assert.equal(payload.diagnosis?.healthy, true);
   assert.match(payload.reply, /سليمة/);
-  assert.match(payload.reply, /97%/);
+  assert.doesNotMatch(payload.reply, /97%|Tomato___healthy/);
+  assert.equal(payload.diagnosis?.confidence, 0.97);
   assert.match(payload.reply, /## 🛡️ وقاية/);
   assert.doesNotMatch(payload.reply, /## 💊 خطة العلاج/);
 });
@@ -1695,13 +1708,21 @@ test("zero-failure: low-confidence diagnosis asks for a clearer photo in the dir
   mockHfLlmPrimary(async (url: string) =>
     isChatUrl(url)
       ? new Response(null, { status: 503 })
-      : Response.json([{ label: "Tomato___Late_blight", score: 0.3 }]),
+      : Response.json([
+          { label: "Tomato___Late_blight", score: 0.3 },
+          { label: "Tomato___Early_blight", score: 0.25 },
+        ]),
   );
   const response = await POST(request(true));
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
   assert.match(payload.reply, /صورة أوضح/);
+  assert.match(payload.reply, /اللفحة المتأخرة/);
+  assert.match(payload.reply, /اللفحة المبكرة/);
+  assert.doesNotMatch(payload.reply, /[%٪]|Tomato___|نموذج|خدمة النصوص/);
+  assert.equal(payload.diagnosis?.confidence, 0.3);
+  assert.equal(payload.diagnosis?.candidates[1]?.score, 0.25);
 });
 
 for (const failure of ["http", "network", "empty"] as const) {
