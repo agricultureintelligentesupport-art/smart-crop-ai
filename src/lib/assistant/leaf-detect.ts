@@ -2,13 +2,32 @@
  * Step 0 — leaf detection & smart cropping: shared geometry and payload
  * parsing for the "Detection & Cropping" preprocessing stage.
  *
- * The stage runs BEFORE the PlantVillage disease classifier (Step 1): an
- * open-source object detector localises the leaf in the photo, the handler
- * crops the detected region (removing hands, soil, pots and other background
- * noise) and forwards ONLY the cropped pixels to the classifier — background
- * clutter is the most common cause of confident-but-wrong PlantVillage
- * verdicts, because the classifier has no notion of "leaf" and happily
- * classifies dirt.
+ * The stage runs BEFORE the PlantVillage disease classifier (Step 1): a
+ * high-precision open-source object detector (COCO DETR-ResNet-101 primary,
+ * see the route's `DEFAULT_LEAF_DETECT_MODELS` chain) localises the leaf in
+ * the photo, the handler crops the detected region (removing hands, soil,
+ * pots and other background noise) and forwards ONLY the cropped pixels to
+ * the classifier —
+ * background clutter is the most common cause of confident-but-wrong
+ * PlantVillage verdicts, because the classifier has no notion of "leaf" and
+ * happily classifies dirt.
+ *
+ * CONTEXT-PADDING CONTRACT (12–15 %):
+ * The crop window is the detected box grown by a 12 %–15 % safety margin
+ * (of the box's own size, per side; default 13 % — see
+ * {@link LEAF_MARGIN_MIN} / {@link LEAF_MARGIN_MAX}). The padding keeps the
+ * stem, the leaf margins and the surrounding foliage inside the frame —
+ * exactly the context MobileNetV2 (Step 1) needs to tell a diseased leaf
+ * from a healthy one. The margin is clamped into the band INSIDE
+ * `selectLeafCrop`, so the guarantee holds for any caller.
+ *
+ * NO PIXEL MASKING:
+ * The crop is a plain RECTANGULAR extract (`sharp().extract()` on an
+ * integer rect). There is deliberately no pixel-level background
+ * removal/masking/alpha compositing — the natural edges, stem context and
+ * surrounding foliage stay in the rectangular crop, which is what keeps the
+ * Step 1 accuracy high (a masked-out, white- or black-filled background
+ * would be a synthetic image the classifier was never trained on).
  *
  * This module is deliberately dependency-free (no sharp, no fetch, no DOM) so
  * it is importable from the route handler AND from `node --test` unit tests.
@@ -40,7 +59,9 @@ export interface CropRect {
   height: number;
 }
 
-/** Outcome of the crop decision, surfaced for logging/telemetry. */
+/**
+ * Outcome of the crop decision, surfaced for logging/telemetry.
+ */
 export interface LeafCropDecision {
   rect: CropRect;
   /** Rect area ÷ image area, in [0, 1]. */
@@ -49,25 +70,65 @@ export interface LeafCropDecision {
   detections: number;
   /** Score of the top detection that seeded the cluster. */
   topScore: number;
+  /**
+   * Effective context padding actually applied, in [0.12, 0.15] — the
+   * caller's margin clamped into the safety band (of the box's own size,
+   * per side).
+   */
+  margin: number;
 }
 
+/**
+ * The 12 %–15 % context-padding safety band (fractions of the detected
+ * box's own size, applied on every side). Below 12 % the stem and the leaf
+ * margins risk being cut; above 15 % the crop starts re-including the
+ * background clutter this stage exists to remove. Any margin requested by a
+ * caller is clamped into this band by {@link clampLeafMargin}.
+ */
+export const LEAF_MARGIN_MIN = 0.12;
+export const LEAF_MARGIN_MAX = 0.15;
+
 /** Tunables (fractions of the image / box, not pixels). */
-export const LEAF_DETECT_DEFAULTS = {
+export const LEAF_DETECT_DEFAULTS: {
   /** Detections below this confidence are ignored entirely. */
-  minScore: 0.45,
-  /** Margin added around the cluster box on every side (of the box size). */
-  margin: 0.12,
+  minScore: number;
+  /**
+   * Default context padding: middle of the 12–15 % safety band.
+   * `selectLeafCrop` clamps it (and any override) into
+   * [LEAF_MARGIN_MIN, LEAF_MARGIN_MAX] before use.
+   */
+  margin: number;
   /** A crop smaller than this share of the image is too risky — keep all. */
-  minCoverage: 0.03,
+  minCoverage: number;
   /** A crop this large keeps (almost) everything — cropping is pointless. */
+  maxCoverage: number;
+} = {
+  minScore: 0.45,
+  margin: 0.13,
+  minCoverage: 0.03,
   maxCoverage: 0.92,
-} as const;
+};
 
 export type LeafCropOptions = Partial<typeof LEAF_DETECT_DEFAULTS>;
 
 /**
+ * Clamp a requested context-padding margin into the 12–15 % safety band.
+ * ±Infinity clamps to the band edges; NaN / non-numeric input falls back
+ * to the default (13 %) instead of poisoning the geometry.
+ */
+export function clampLeafMargin(margin: number): number {
+  if (typeof margin !== "number" || Number.isNaN(margin)) {
+    return LEAF_DETECT_DEFAULTS.margin;
+  }
+  return Math.min(LEAF_MARGIN_MAX, Math.max(LEAF_MARGIN_MIN, margin));
+}
+
+/**
  * Parse and validate the Hugging Face object-detection payload:
- * `[{ "score": 0.99, "label": "Tomato leaf", "box": {xmin, ymin, xmax, ymax} }]`.
+ * `[{ "score": 0.99, "label": "potted plant", "box": {xmin, ymin, xmax, ymax} }]`
+ * (labels come from the model's own label space — "potted plant" for the
+ * COCO-pretrained DETR ids of the default chain, free-form for fine-tuned
+ * ones pinned via `HF_LEAF_DETECT_MODELS`).
  * Coordinates may be floats and may touch/outstep the image edges — they are
  * rounded and validated here (non-finite/negative/inverted boxes dropped),
  * so the caller receives clean pixel-space detections or an empty array.
@@ -133,19 +194,23 @@ export function unionBox(a: LeafBox, b: LeafBox): LeafBox {
 }
 
 /**
- * Grow the dominant detection cluster and turn it into a padded crop rect.
+ * Grow the dominant detection cluster and turn it into a context-padded
+ * crop rect.
  *
  * Farmers photograph ONE leaf; extra boxes usually mark secondary leaves or
  * noise in the background. So instead of blindly unioning everything (one
  * false positive in a corner would wreck the crop), the highest-scoring box
  * seeds a cluster and only boxes overlapping it are merged, repeated until
- * stable. The cluster box is then padded by `margin` on every side and
- * clamped to the image.
+ * stable. The cluster box is then padded by the (clamped) 12–15 % context
+ * margin on every side and clamped to the image — a RECTANGULAR window,
+ * never a pixel mask: the stem, the leaf margins and the surrounding
+ * foliage stay inside the frame.
  *
- * Returns `null` when the crop is not worth doing: no detection above
- * `minScore`, or the padded cluster covers ≤ `minCoverage` (a speck — likely
- * a bad read) or ≥ `maxCoverage` (cropping would keep the whole frame
- * anyway, so the original image is just as good).
+ * Returns `null` when the crop is not worth doing (the caller then passes
+ * the FULL intact image to the classifier — the graceful fallback): no
+ * detection above `minScore`, or the padded cluster covers ≤ `minCoverage`
+ * (a speck — likely a bad read) or ≥ `maxCoverage` (cropping would keep the
+ * whole frame anyway, so the original image is just as good).
  */
 export function selectLeafCrop(
   detections: LeafDetection[],
@@ -157,6 +222,10 @@ export function selectLeafCrop(
   const width = Math.round(imageWidth);
   const height = Math.round(imageHeight);
   if (!(width >= 1 && height >= 1)) return null;
+
+  // Enforce the 12–15 % safety band: the context padding is a hard
+  // contract of the stage, whatever margin a caller requested.
+  const margin = clampLeafMargin(opts.margin);
 
   const kept: LeafDetection[] = [];
   for (const det of detections) {
@@ -196,9 +265,13 @@ export function selectLeafCrop(
     }
   }
 
-  // Pad the cluster box by `margin` of its own size on every side, then clamp.
-  const padX = Math.round((cluster.xmax - cluster.xmin) * opts.margin);
-  const padY = Math.round((cluster.ymax - cluster.ymin) * opts.margin);
+  // Pad the cluster box by `margin` of its own size on every side, then
+  // clamp to the image. The result is a plain rectangular window that
+  // CONTAINS the whole detected cluster — the padding only ever adds
+  // context (stem, margins, neighbouring foliage), it never cuts into the
+  // leaf.
+  const padX = Math.round((cluster.xmax - cluster.xmin) * margin);
+  const padY = Math.round((cluster.ymax - cluster.ymin) * margin);
   const padded = clampBox(
     {
       xmin: cluster.xmin - padX,
@@ -226,5 +299,6 @@ export function selectLeafCrop(
     coverage,
     detections: inCluster.size,
     topScore: kept[0].score,
+    margin,
   };
 }

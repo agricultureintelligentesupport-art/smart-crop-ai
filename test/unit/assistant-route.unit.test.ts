@@ -192,8 +192,10 @@ const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined =
 const MOBILENET_MODEL =
   "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification";
 
-/** Step 0 — primary leaf detector (COCO DETR-ResNet-50), mirrors the route. */
-const LEAF_DETECTOR = "facebook/detr-resnet-50";
+/** Step 0 — primary leaf detector (COCO DETR-ResNet-101), mirrors the route. */
+const LEAF_DETECTOR = "facebook/detr-resnet-101";
+/** Step 0 — fallback detector (COCO DETR-ResNet-50, the previous production id). */
+const LEAF_DETECTOR_FALLBACK = "facebook/detr-resnet-50";
 
 /**
  * Stage 1 model chain, in order — must mirror the route's HF_LLM_MODELS:
@@ -709,7 +711,7 @@ test("hybrid fallback path: Gemini receives the image + the MobileNetV2 referenc
       geminiImage = geminiImagePart(body);
       return geminiReply("أزل الأوراق المصابة ثم عالج بمبيد نحاسي.");
     }
-    // Step 0 — the primary detector (facebook/detr-resnet-50) sees the raw
+    // Step 0 — the primary detector (the DETR-ResNet-101 id) sees the raw
     // frame first; it finds no usable leaf here, so the ORIGINAL frame
     // continues down the pipeline.
     if (isDetectUrl(String(url))) {
@@ -738,7 +740,7 @@ test("hybrid fallback path: Gemini receives the image + the MobileNetV2 referenc
   // Pipeline order: detect → classify → HF LLM (down) → Gemini.
   assert.equal(urls.length, 4, `expected detect + classify + HF + Gemini, got ${urls.length}`);
   assert.ok(isDetectUrl(urls[0]));
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
+  assert.match(urls[0], /facebook\/detr-resnet-101/);
   // Step 1 is the MobileNetV2 PlantVillage classifier — the sole default.
   assert.ok(isClassifyUrl(urls[1]));
   assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
@@ -1921,6 +1923,30 @@ const LEAF_JPEG = await sharp({
   .toBuffer();
 const LEAF_JPEG_B64 = LEAF_JPEG.toString("base64");
 
+/**
+ * Two-tone 64×48 frame for the "no pixel masking" proof: a solid "soil"
+ * background with a bright "leaf green" rectangle at (12,6)-(52,42). The
+ * Step 0 crop of this frame must be a plain RECTANGULAR extract of the
+ * source — pixel-identical in the window, soil context and leaf both intact.
+ */
+const LEAF_CONTEXT_JPEG = await (async () => {
+  const width = 64;
+  const height = 48;
+  const raw = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const isLeaf = x >= 12 && x < 52 && y >= 6 && y < 42;
+      const [r, g, b] = isLeaf ? [34, 120, 45] : [82, 61, 40];
+      const i = (y * width + x) * 3;
+      raw[i] = r;
+      raw[i + 1] = g;
+      raw[i + 2] = b;
+    }
+  }
+  return sharp(raw, { raw: { width, height, channels: 3 } }).jpeg().toBuffer();
+})();
+const LEAF_CONTEXT_B64 = LEAF_CONTEXT_JPEG.toString("base64");
+
 function imageRequest(data: string, mimeType = "image/jpeg") {
   return new NextRequest("http://localhost/api/assistant", {
     method: "POST",
@@ -1941,8 +1967,8 @@ const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toSt
 
 /**
  * The Step 0 mock answer: one high-confidence leaf box at (10,8)-(50,40).
- * The label must pass the facebook/detr-resnet-50 plant filter
- * (`/plant|leaf/i`) — "potted plant" is the COCO id's plant-flavoured label.
+ * The label must pass the plant filter (`/plant|leaf/i`) — "potted plant"
+ * is the COCO label served by both DETR ids of the default chain.
  */
 const leafDetection = () =>
   Response.json([{ label: "potted plant", score: 0.87, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
@@ -1982,9 +2008,11 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   // Pipeline order: detect → classify → HF LLM (down) → Gemini fallback.
   assert.equal(urls.length, 4);
   assert.ok(isDetectUrl(urls[0]));
-  // The PRIMARY detector is the COCO facebook/detr-resnet-50 — the obsolete
-  // fine-tuned PlantDoc checkpoint is gone from the default chain.
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
+  // The PRIMARY detector is the higher-precision COCO DETR-ResNet-101 (the
+  // ResNet-50 id is only the chain fallback), and the obsolete fine-tuned
+  // PlantDoc checkpoint is gone from the default chain.
+  assert.match(urls[0], /facebook\/detr-resnet-101/);
+  assert.doesNotMatch(urls[0], /detr-resnet-50/);
   assert.doesNotMatch(urls[0], /detr-finetuned-plantdoc/);
   assert.ok(isClassifyUrl(urls[1]));
   assert.equal(urls[2], HF_ROUTER_CHAT_URL);
@@ -1994,7 +2022,8 @@ test("Step 0 detects the leaf and Step 1 receives ONLY the cropped pixels", asyn
   assert.notEqual(classifyBody, LEAF_JPEG_B64);
   assert.equal(classifyContentType, "image/jpeg");
 
-  // Crop window: 40×32 box + 12% padding (5,4) → (5,4) 50×40 on the 64×48 frame.
+  // Crop window: 40×32 box + 13 % context padding (5,4) → (5,4) 50×40 on the
+  // 64×48 frame — the 12–15 % safety band, 13 % by default.
   assert.equal(payload.preprocessing?.status, "cropped");
   assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
   assert.deepEqual(payload.preprocessing?.box, [5, 4, 50, 40]);
@@ -2059,7 +2088,8 @@ test("Step 0 label filter: only plant/leaf boxes are accepted (a person box neve
     if (isGeminiUrl(String(url))) return geminiReply("تم.");
     if (isDetectUrl(String(url))) {
       // The higher-scoring "person" box (full frame) must be REJECTED by the
-      // facebook/detr-resnet-50 plant label filter; the potted-plant box crops.
+      // plant label filter; the "potted plant" box (the COCO plant label of
+      // both DETR ids) crops.
       return Response.json([
         { label: "potted plant", score: 0.8, box: { xmin: 5, ymin: 5, xmax: 45, ymax: 35 } },
         { label: "person", score: 0.99, box: { xmin: 0, ymin: 0, xmax: 64, ymax: 48 } },
@@ -2158,6 +2188,115 @@ test("Step 0 without an HF key is skipped silently and Step 1 keeps its own skip
   assert.equal(payload.preprocessing?.status, "skipped");
   assert.match(warningText(payload), /Step 1 vision unavailable/);
   assert.doesNotMatch(warningText(payload), /Step 0/);
+});
+
+test("Step 0 primary DETR-ResNet-101 down → the chain walks to the ResNet-50 fallback and STILL crops", async () => {
+  configureKeys();
+  const detectUrls: string[] = [];
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) return geminiReply("تم.");
+    if (/router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) && !isClassifyUrl(String(url))) {
+      detectUrls.push(String(url));
+      // The upgraded PRIMARY id 404s (checkpoint retired) — the chain must
+      // walk to the fallback COCO DETR-ResNet-50 id, which then answers.
+      if (/facebook\/detr-resnet-101/.test(String(url))) {
+        return Response.json({ error: "Model not found" }, { status: 404 });
+      }
+      assert.ok(/facebook\/detr-resnet-50/.test(String(url)));
+      return Response.json([
+        { label: "potted plant", score: 0.87, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } },
+      ]);
+    }
+    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  // The chain was walked in order: ResNet-101 primary first, then ResNet-50.
+  assert.deepEqual(
+    detectUrls.map((url) => /models\/(.+)$/.exec(url)?.[1]),
+    ["facebook/detr-resnet-101", "facebook/detr-resnet-50"],
+  );
+  // The fallback id still produced the context-padded crop (13 % of the
+  // 40×32 box → (5,4) 50×40 on the 64×48 frame)…
+  assert.equal(payload.preprocessing?.status, "cropped");
+  assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR_FALLBACK);
+  assert.deepEqual(payload.preprocessing?.box, [5, 4, 50, 40]);
+  // …and ONLY the crop reached the classifier.
+  assert.notEqual(classifyBody, LEAF_JPEG_B64);
+  // A successful chain walk is normal operation — no Step 0 warning.
+  assert.doesNotMatch(warningText(payload), /Step 0/);
+  assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 crop keeps the natural context: plain rectangular extract, NO pixel masking", async () => {
+  configureKeys();
+  let classifyBody = "";
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    // The primary HF LLM is down → the Gemini fallback answers.
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) return geminiReply("تم.");
+    if (isDetectUrl(String(url))) {
+      // The detected leaf box covers the green rectangle of the two-tone
+      // frame: (12,6)-(52,42) on the 64×48 image.
+      return Response.json([
+        { label: "potted plant", score: 0.9, box: { xmin: 12, ymin: 6, xmax: 52, ymax: 42 } },
+      ]);
+    }
+    assert.ok(isClassifyUrl(String(url)));
+    classifyBody = bodyB64(init);
+    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
+  });
+
+  const response = await POST(imageRequest(LEAF_CONTEXT_B64));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.equal(payload.preprocessing?.status, "cropped");
+  // 40×36 box + 13 % context padding (5,5) → (7,1) 50×46 on the 64×48 frame.
+  assert.deepEqual(payload.preprocessing?.box, [7, 1, 50, 46]);
+
+  // Decode the crop the classifier actually received: it must be EXACTLY
+  // the rectangular window of the source photo — pixel-identical, no
+  // masking, no background fill, no alpha compositing.
+  const crop = Buffer.from(classifyBody, "base64");
+  const meta = await sharp(crop).metadata();
+  assert.equal(meta.width, 50);
+  assert.equal(meta.height, 46);
+  // Both inputs are 3-channel JPEGs, so plain raw() output is sRGB.
+  const [srcRaw, cropRaw] = await Promise.all([
+    sharp(LEAF_CONTEXT_JPEG).raw().toBuffer(),
+    sharp(crop).raw().toBuffer(),
+  ]);
+  // Sample points spread over the window: soil corners/edges + leaf centre.
+  const samples: Array<[number, number]> = [
+    [0, 0], // window top-left → source (7,1): soil context
+    [49, 45], // window bottom-right → source (56,46): soil context
+    [46, 1], // near the right edge → source (53,2): soil context
+    [3, 40], // near the bottom edge → source (10,41): soil context
+    [25, 23], // window centre → source (32,24): the leaf itself
+  ];
+  for (const [cx, cy] of samples) {
+    for (let c = 0; c < 3; c++) {
+      const srcPx = srcRaw[((1 + cy) * 64 + (7 + cx)) * 3 + c];
+      const cropPx = cropRaw[(cy * 50 + cx) * 3 + c];
+      assert.ok(
+        Math.abs(srcPx - cropPx) <= 10,
+        `crop pixel (${cx},${cy}) ch${c}=${cropPx} must match source pixel (7+${cx},1+${cy})=${srcPx} — rectangular extract only, no pixel masking`,
+      );
+    }
+  }
+  // The window really contains BOTH materials (nothing whitened/masked out):
+  // the leaf stays green AND the surrounding soil stays at the window edge.
+  const leafGreen = cropRaw[(23 * 50 + 25) * 3 + 1];
+  const soilRed = cropRaw[0 * 50 * 3 + 0];
+  assert.ok(leafGreen > 90, `leaf centre must stay green (G=${leafGreen}) — natural edge preserved`);
+  assert.ok(soilRed > 60 && soilRed < 110, `soil context must be preserved at the window corner (R=${soilRed})`);
 });
 
 /* ------------------------------------------------------------------ */

@@ -7,25 +7,34 @@
  * stages):
  *
  *   Step 0 (when an image is attached): leaf Detection & Cropping — the SAME
- *     free Hugging Face Inference router now ALSO runs an open-source object
- *     detector: the COCO `facebook/detr-resnet-50` (DETR-ResNet-50) with a
- *     plant-only label filter is the primary id (the obsolete fine-tuned
- *     PlantDoc checkpoint is gone — it no longer serves on the free router;
- *     the chain stays overridable via `HF_LEAF_DETECT_MODELS`). The detected
- *     box is grown into a padded, clamped crop window and the photo is
- *     cropped server-side with sharp, so background noise (hands, soil, pots)
- *     NEVER reaches the PlantVillage classifier: Step 1 sees ONLY the
- *     cropped pixels. Strictly an accuracy
- *     pre-step — every failure mode is non-fatal and falls back to the
- *     untouched original frame (the exact pre-Step-0 behaviour): missing HF
- *     key, an undecodable image, an unreachable/loading detector, a payload
- *     that is not object-detection-shaped, or "no leaf above threshold". The
- *     outcome is reported in the new `preprocessing` response field and in
- *     `warnings[]` when the stage could not run at all.
+ *     free Hugging Face Inference router now ALSO runs a high-precision
+ *     open-source object detector: the PRIMARY id is
+ *     `facebook/detr-resnet-101` (COCO DETR-ResNet-101, 43.5 AP on COCO —
+ *     more precise than the old DETR-ResNet-50's 42.0 AP, and natively
+ *     supported by the HF serverless router: same `DetrForObjectDetection`
+ *     family as the detector that already runs here), with a plant-only
+ *     label filter ("potted plant", any *leaf* label). The previous
+ *     production detector `facebook/detr-resnet-50` (COCO DETR-ResNet-50)
+ *     stays in the chain as the FALLBACK id so Step 0 still crops even if
+ *     the ResNet-101 id ever stops serving (the whole chain remains
+ *     overridable via `HF_LEAF_DETECT_MODELS`). The detected box is grown by
+ *     a 12–15 % context padding (clamped safety band, 13 % default) into a
+ *     clamped crop window and the photo is cropped server-side with sharp —
+ *     a plain RECTANGULAR extract, NO pixel masking/background removal: the
+ *     stem, leaf margins and surrounding foliage stay in the frame, so
+ *     background noise (hands, soil, pots) is removed while Step 1
+ *     (MobileNetV2) sees the target leaf in its natural context. Strictly an
+ *     accuracy pre-step — every failure mode is non-fatal and falls back to
+ *     the FULL INTACT original frame (the exact pre-Step-0 behaviour):
+ *     missing HF key, an undecodable image, an unreachable/loading detector,
+ *     a payload that is not object-detection-shaped, or "no leaf above
+ *     threshold". The outcome is reported in the new `preprocessing` response
+ *     field and in `warnings[]` when the stage could not run at all.
  *     Vercel-friendly by design: no model weights ever touch the function
  *     (the detector runs on Hugging Face's free serverless CPU tier) and
  *     sharp adds only a few tens of ms of decode/crop work; the whole stage
- *     is bounded by its own 9 s deadline inside the 60 s `maxDuration`.
+ *     is bounded by a 15 s stage budget (9 s per model attempt) inside the
+ *     60 s `maxDuration`.
  *
  *   Step 1 — MobileNetV2 PlantVillage classification (when an image is
  *     attached), on the Step 0 crop when detection succeeded, the full frame
@@ -233,16 +242,27 @@ const HF_ENDPOINT = (model: string) =>
 
 /**
  * Step 0 model chain (object-detection), tried in order, through the SAME
- * hf-inference router endpoint as the Step 1 classifier:
+ * hf-inference router endpoint as the Step 1 classifier. EVERY id in the
+ * default chain is natively supported by HF Serverless Inference (the
+ * `DetrForObjectDetection` transformers family the free router actually
+ * serves — a RT-DETR checkpoint such as `PekingU/rtdetr_r50vd_coco_o365`
+ * answers HTTP 400 on `hf-inference` and must NOT be used here):
  *
- *   • `facebook/detr-resnet-50` — PRIMARY detector: the open-source
- *     DETR-ResNet-50 trained on COCO. Only its plant-flavoured labels
- *     ("potted plant", …) are accepted, so a plant photo still crops while
- *     a photo of the farmer's hand never passes the label filter. The
- *     obsolete fine-tuned PlantDoc checkpoint
- *     (`suryanshgoel/detr-finetuned-plantdoc`) is REMOVED — it is not
- *     reliably served on the free router anymore and its failures only
- *     cost a round-trip before the COCO id answered anyway.
+ *   • `facebook/detr-resnet-101` — PRIMARY detector: the open-source COCO
+ *     DETR with a ResNet-101 backbone. 43.5 AP on COCO — MORE precise than
+ *     the previous production id (DETR-ResNet-50, 42.0 AP) — while staying
+ *     in the exact same model family that is proven on the free router, so
+ *     the leaf is localised more accurately with zero new serving risk.
+ *     Only its plant-flavoured labels ("potted plant", any *leaf* label)
+ *     are accepted, so a plant photo still crops while a photo of the
+ *     farmer's hand never passes the label filter.
+ *   • `facebook/detr-resnet-50` — FALLBACK detector: the previous
+ *     production id (COCO DETR-ResNet-50), known-good on the free router.
+ *     It keeps Step 0 alive if the ResNet-101 id is ever retired or fails
+ *     to serve — the chain is walked in order and the first id that answers
+ *     with a valid detection payload wins. The obsolete fine-tuned PlantDoc
+ *     checkpoint (`suryanshgoel/detr-finetuned-plantdoc`) is REMOVED — it is
+ *     not reliably served on the free router anymore.
  *
  * Open-source and free — the weights live on Hugging Face's infrastructure,
  * the function only parses the returned boxes, so the serverless bundle and
@@ -254,8 +274,17 @@ interface LeafDetectModel {
   acceptLabel: (label: string) => boolean;
 }
 
+/**
+ * Plant-flavoured label filter for the default chain: both DETR ids carry
+ * the COCO label space whose single plant category is "potted plant" (the
+ * filter matches it), plus any fine-tuned *leaf* label a custom checkpoint
+ * pinned via `HF_LEAF_DETECT_MODELS` might ship.
+ */
+const PLANT_LABEL = /plant|leaf/i;
+
 const DEFAULT_LEAF_DETECT_MODELS: LeafDetectModel[] = [
-  { id: "facebook/detr-resnet-50", acceptLabel: (label) => /plant|leaf/i.test(label) },
+  { id: "facebook/detr-resnet-101", acceptLabel: (label) => PLANT_LABEL.test(label) },
+  { id: "facebook/detr-resnet-50", acceptLabel: (label) => PLANT_LABEL.test(label) },
 ];
 
 /**
@@ -282,6 +311,15 @@ function resolveLeafDetectModels(): LeafDetectModel[] {
  */
 const LEAF_DETECT_TIMEOUT_MS = 9_000;
 
+/**
+ * Whole-Stage-0 wall-clock budget (all model-chain attempts combined). The
+ * two-id chain (DETR-ResNet-101 primary + ResNet-50 fallback) must not push
+ * Step 1 out of the request: each attempt gets `min(LEAF_DETECT_TIMEOUT_MS,
+ * remaining budget)`, so the primary can spend at most 9 s and the fallback
+ * only whatever of the 15 s is left.
+ */
+const LEAF_DETECT_STAGE_BUDGET_MS = 15_000;
+
 /** Re-encoded crop constraints — mirror the client's own downscale. */
 const LEAF_CROP_MAX_EDGE_PX = 1024;
 const LEAF_CROP_JPEG_QUALITY = 88;
@@ -306,8 +344,21 @@ async function detectLeafStrict(
   apiKey: string,
 ): Promise<LeafDetectOutcome> {
   let lastDetail = "no detection model was attempted";
+  // The stage owns a hard wall-clock budget: each attempt's deadline is
+  // capped by whatever of the budget is left, so a sleepy PRIMARY id can
+  // never eat the time the FALLBACK id (and Step 1) still need.
+  const stageDeadline = Date.now() + LEAF_DETECT_STAGE_BUDGET_MS;
 
   for (const model of resolveLeafDetectModels()) {
+    const remaining = stageDeadline - Date.now();
+    if (remaining <= 1_000) {
+      lastDetail =
+        lastDetail === "no detection model was attempted"
+          ? `stage budget exhausted before trying ${model.id}`
+          : `${lastDetail} — stage budget exhausted`;
+      console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+      break;
+    }
     try {
       const res = await fetch(HF_ENDPOINT(model.id), {
         method: "POST",
@@ -318,7 +369,7 @@ async function detectLeafStrict(
           "X-Wait-For-Model": "true",
         },
         body: new Uint8Array(source),
-        signal: AbortSignal.timeout(LEAF_DETECT_TIMEOUT_MS),
+        signal: AbortSignal.timeout(Math.min(LEAF_DETECT_TIMEOUT_MS, remaining)),
       });
 
       if (res.status === 503 || res.status === 530) {
@@ -368,7 +419,15 @@ async function detectLeafStrict(
   throw new Error(`HF Error: leaf detection failed — ${lastDetail}`);
 }
 
-/** Crop the detected window out of the source photo and re-encode it. */
+/**
+ * Crop the detected window out of the source photo and re-encode it.
+ * Plain rectangular `sharp().extract()` — NO pixel masking, background
+ * removal or alpha compositing: the natural edges, stem context and
+ * surrounding foliage inside the window are preserved untouched (the only
+ * transforms are the ≤1024 px downscale of the window itself and the JPEG
+ * re-encode) — a synthetic masked-out background would be an image
+ * MobileNetV2 was never trained on.
+ */
 async function cropLeafImage(source: Buffer, rect: CropRect): Promise<Buffer> {
   return sharp(source)
     .extract(rect)
@@ -439,7 +498,7 @@ async function runLeafDetectionStage(
     const cropped = await cropLeafImage(source, decision.rect);
     const durationMs = Date.now() - startedAt;
     console.log(
-      `[Step 0: Detect Success] model=${model} box=${decision.rect.left},${decision.rect.top}+${decision.rect.width}x${decision.rect.height} coverage=${Math.round(decision.coverage * 100)}% top=${Math.round(decision.topScore * 100)}% ${durationMs}ms — ONLY the crop goes to Step 1`,
+      `[Step 0: Detect Success] model=${model} box=${decision.rect.left},${decision.rect.top}+${decision.rect.width}x${decision.rect.height} coverage=${Math.round(decision.coverage * 100)}% pad=${Math.round(decision.margin * 100)}% top=${Math.round(decision.topScore * 100)}% ${durationMs}ms — ONLY the crop goes to Step 1`,
     );
     return {
       preprocessing: {

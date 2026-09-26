@@ -153,15 +153,20 @@ vision pipeline before the LLM stages run:
 ```
 photo (base64)
   │
-  ├─ Step 0 · Detection & Cropping ── open-source object detector on the FREE
-  │    Hugging Face Inference router (facebook/detr-resnet-50 COCO
-  │    DETR-ResNet-50, plant labels only; chain overridable with
-  │    HF_LEAF_DETECT_MODELS). The dominant detection cluster becomes a
-  │    padded, clamped crop window and sharp crops the photo, so hands, soil
-  │    and pots never reach the classifier.
+  ├─ Step 0 · Detection & Cropping ── high-precision open-source COCO DETR
+  │    on the FREE Hugging Face Inference router (facebook/detr-resnet-101,
+  │    43.5 AP — natively supported by HF serverless inference;
+  │    facebook/detr-resnet-50 COCO DETR as fallback; plant labels only;
+  │    chain overridable with HF_LEAF_DETECT_MODELS). The dominant detection
+  │    cluster gets a 12–15 %
+  │    context padding (13 % default), clamped into the image, and sharp
+  │    crops the photo RECTANGULARLY — no pixel masking, stem and
+  │    surrounding foliage stay in the frame — so hands, soil and pots
+  │    never reach the classifier.
   │    Every failure (no key, undecodable image, detector down/loading, no
-  │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
-  │    frame — the outcome lands in `preprocessing` on the API response.
+  │    leaf, near-full-frame box) is non-fatal and falls back to the FULL
+  │    INTACT ORIGINAL frame — the outcome lands in `preprocessing` on the
+  │    API response.
   │
   ├─ Step 1 · vision classification — PlantVillage classifier, MobileNetV2
   │    (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification, the
