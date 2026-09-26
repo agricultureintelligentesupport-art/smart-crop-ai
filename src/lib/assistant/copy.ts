@@ -51,6 +51,8 @@ export interface AssistantCopy {
     model: string;
     healthy: string;
     alternatives: string;
+    affectedCrops: string;
+    diseaseTypes: Record<import("./plantvillage").DiseaseType, string>;
     confidenceHigh: string;
     confidenceMedium: string;
     confidenceLow: string;
@@ -106,6 +108,11 @@ const AR: AssistantCopy = {
     model: "نموذج التصنيف",
     healthy: "النبتة سليمة",
     alternatives: "احتمالات أخرى",
+    affectedCrops: "مرض يصيب عدة محاصيل تشترك في نفس الأعراض (مثل: البطاطس، الطماطم، الفول، والباذنجان).",
+    diseaseTypes: {
+      fungal: "مرض فطري", bacterial: "مرض بكتيري", viral: "مرض فيروسي",
+      pest: "إصابة بآفة", unknown: "مرض غير محدد النوع",
+    },
     confidenceHigh: "ثقة مرتفعة",
     confidenceMedium: "ثقة متوسطة",
     confidenceLow: "ثقة منخفضة — جرّب صورة أوضح",
@@ -161,6 +168,11 @@ const FR: AssistantCopy = {
     model: "Modèle de classification",
     healthy: "Plante saine",
     alternatives: "Autres possibilités",
+    affectedCrops: "Maladie touchant plusieurs cultures présentant les mêmes symptômes (par exemple : pomme de terre, tomate, fève et aubergine).",
+    diseaseTypes: {
+      fungal: "Maladie fongique", bacterial: "Maladie bactérienne", viral: "Maladie virale",
+      pest: "Infestation de ravageurs", unknown: "Type de maladie indéterminé",
+    },
     confidenceHigh: "Confiance élevée",
     confidenceMedium: "Confiance moyenne",
     confidenceLow: "Confiance faible — photo plus nette conseillée",

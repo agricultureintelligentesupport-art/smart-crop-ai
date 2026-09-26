@@ -17,6 +17,7 @@ export default function DiagnosisCard({
   diagnosis: AssistantDiagnosis;
   copy: AssistantCopy["diagnosis"];
 }) {
+  const parsed = parsePlantLabel(diagnosis.label);
   const pct = Math.round(diagnosis.confidence * 100);
   const bucket = confidenceBucket(diagnosis.confidence);
   const bucketLabel =
@@ -40,8 +41,17 @@ export default function DiagnosisCard({
 
       <div className="space-y-2.5 px-3 py-2.5">
         <p className="text-[14.5px] font-black leading-6 text-emerald-950">
-          {diagnosis.healthy ? `${copy.healthy} ✅` : diagnosis.labelAr}
+          {diagnosis.healthy ? `${copy.healthy} ✅` : parsed.diseaseName}
         </p>
+
+        {!diagnosis.healthy && (
+          <>
+            <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-[10.5px] font-bold text-emerald-800 ring-1 ring-emerald-200/70">
+              {copy.diseaseTypes[parsed.diseaseType]}
+            </span>
+            <p className="text-[11px] leading-5 text-emerald-900/70">{copy.affectedCrops}</p>
+          </>
+        )}
 
         <div>
           <div className="mb-1 flex items-center justify-between gap-2">

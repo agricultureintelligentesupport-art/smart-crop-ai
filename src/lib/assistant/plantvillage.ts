@@ -11,12 +11,17 @@
  * Server-safe: no browser APIs, no React.
  */
 
+export type DiseaseType = "fungal" | "bacterial" | "viral" | "pest" | "unknown";
+
 export interface ParsedPlantLabel {
   /** Raw label as returned by the model. */
   raw: string;
   cropAr: string | null;
   diseaseAr: string | null;
   healthy: boolean;
+  /** Disease-only card title; independent of crop-qualified prompt labels. */
+  diseaseName: string;
+  diseaseType: DiseaseType;
   /** "الطماطم — اللفحة المتأخرة" or the raw label when unknown. */
   labelAr: string;
 }
@@ -86,6 +91,30 @@ const DISEASES_AR: [string, string][] = [
   ["mildew", "البياض"],
 ];
 
+/** Extract the disease while retaining unfamiliar disease names as readable text. */
+function diseaseFragment(raw: string): string {
+  const parts = raw.split(/_{2,}/);
+  if (parts.length > 1) return parts.slice(1).join(" ").replace(/_/g, " ").trim();
+  const readable = raw.replace(/_/g, " ").trim();
+  const withDisease = readable.match(/^.+?\s+with\s+(.+)$/i);
+  if (withDisease) return withDisease[1].trim();
+  const crop = Object.keys(CROPS_AR)
+    .sort((a, b) => b.length - a.length)
+    .find((key) => readable.toLowerCase().startsWith(`${key} `));
+  return crop ? readable.slice(crop.length).replace(/^\s*(?:[—–:-]\s*)?/, "").trim() : readable;
+}
+
+function classifyDisease(fragment: string, healthy: boolean): DiseaseType {
+  if (healthy) return "unknown";
+  const key = norm(fragment);
+  if (/virus/.test(key)) return "viral";
+  if (/bacterial|haunglongbing|huanglongbing|citrus greening/.test(key)) return "bacterial";
+  if (/spider mite/.test(key)) return "pest";
+  // Includes fungus-like blights, grouped with fungal diseases for display.
+  if (/blight|rust|rot|mildew|mold|scab|esca|cercospora|septoria|leaf spot|target spot|leaf scorch/.test(key)) return "fungal";
+  return "unknown";
+}
+
 /** Parse a raw PlantVillage-style label into crop + disease, localised. */
 export function parsePlantLabel(rawLabel: string): ParsedPlantLabel {
   const raw = rawLabel.trim();
@@ -127,7 +156,10 @@ export function parsePlantLabel(rawLabel: string): ParsedPlantLabel {
     labelAr = raw.replace(/_{2,}/g, " — ").replace(/_/g, " ");
   }
 
-  return { raw, cropAr, diseaseAr, healthy, labelAr };
+  const fragment = diseaseFragment(raw);
+  const diseaseName = healthy ? "نبتة سليمة ✅" : diseaseAr ?? fragment;
+  const diseaseType = classifyDisease(fragment, healthy);
+  return { raw, cropAr, diseaseAr, healthy, labelAr, diseaseName, diseaseType };
 }
 
 /** Confidence bucket used for wording (server + UI share the thresholds). */
