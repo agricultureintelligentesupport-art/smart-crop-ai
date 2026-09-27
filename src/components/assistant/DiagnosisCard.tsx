@@ -4,20 +4,25 @@ import { motion, useReducedMotion } from "framer-motion";
 import { Microscope, ShieldCheck, TriangleAlert } from "lucide-react";
 import { EASE_OUT } from "@/components/auth/ui";
 import type { AssistantCopy } from "@/lib/assistant/copy";
+import type { AnalysisSource } from "@/lib/assistant/analysis";
 import { confidenceBucket, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type { AssistantDiagnosis } from "@/lib/assistant/types";
 
 /**
  * Open editorial card for the PlantVillage vision verdict: prominent headline
  * for the disease name, dedicated visual treatment for the confidence metric
- * with a red → yellow → green spectrum meter, runner-up chips, and a subtle
- * model label.
+ * with a red → yellow → green spectrum meter, runner-up chips, and a quiet
+ * coloured dot indicating which vision engine produced the result (no raw
+ * model string is ever shown).
  */
 export default function DiagnosisCard({
   diagnosis,
+  analysisSource,
   copy,
 }: {
   diagnosis: AssistantDiagnosis;
+  /** Display only — which image engine produced this result (existing value from the orchestrator response). */
+  analysisSource?: AnalysisSource | null;
   copy: AssistantCopy["diagnosis"];
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(diagnosis.confidence * 100)));
@@ -65,6 +70,20 @@ export default function DiagnosisCard({
         <div className="mb-2 flex items-center justify-between gap-2">
           <span className="text-[11.5px] font-bold text-emerald-900/70">{copy.confidence}</span>
           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-950/[0.04] px-2.5 py-0.5 text-[11px] font-black text-emerald-950">
+            {/* Quiet vision-engine indicator: green = Gemini (primary), amber = fallback model.
+                Accessibility labels only — the raw model string is never displayed. */}
+            {analysisSource && (
+              <span
+                role="img"
+                aria-label={analysisSource === "gemini" ? copy.byGemini : copy.byFallback}
+                title={analysisSource === "gemini" ? copy.byGemini : copy.byFallback}
+                className={`h-2 w-2 shrink-0 rounded-full ring-1 ring-black/5 ring-inset ${
+                  analysisSource === "gemini"
+                    ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.55)]"
+                    : "bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.55)]"
+                }`}
+              />
+            )}
             {bucket === "low" && (
               <TriangleAlert size={12} strokeWidth={2.8} className="text-amber-500" aria-hidden />
             )}
@@ -131,12 +150,6 @@ export default function DiagnosisCard({
         </div>
       )}
 
-      {/* 5. Classification Model Caption: Subtle, delicate label */}
-      <div dir="ltr" className="flex items-center gap-1.5 pt-0.5 text-[9.5px] font-medium tracking-wide text-emerald-900/45">
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/60" aria-hidden />
-        <span>{copy.model}:</span>
-        <span className="font-mono font-semibold text-emerald-900/70">{diagnosis.model.split("/").pop()}</span>
-      </div>
     </div>
   );
 }

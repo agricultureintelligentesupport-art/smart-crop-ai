@@ -48,7 +48,10 @@ export interface AssistantCopy {
   diagnosis: {
     title: string;
     confidence: string;
-    model: string;
+    /** Accessibility label for the green dot — Gemini (primary) produced the analysis. */
+    byGemini: string;
+    /** Accessibility label for the amber dot — fallback model produced the analysis. */
+    byFallback: string;
     healthy: string;
     alternatives: string;
     confidenceHigh: string;
@@ -59,7 +62,7 @@ export interface AssistantCopy {
 
 const AR: AssistantCopy = {
   header: {
-    title: "المساعد الذكي",
+    title: "PhytoScan AI",
     subtitle: "مستشارك الزراعي الجزائري",
     navDashboard: "لوحة التحكم",
     navHome: "الرئيسية",
@@ -88,7 +91,7 @@ const AR: AssistantCopy = {
   },
   chat: {
     you: "أنت",
-    assistant: "المساعد الذكي",
+    assistant: "PhytoScan AI",
     thinking: "جارٍ تحضير الإجابة…",
     thinkingDetect: "جارٍ تحديد الورقة واقتصاص الخلفية…",
     thinkingVision: "جارٍ تحليل الصورة وتشخيص المرض…",
@@ -103,7 +106,8 @@ const AR: AssistantCopy = {
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
     confidence: "نسبة الثقة",
-    model: "نموذج التصنيف",
+    byGemini: "تم التحليل بواسطة Gemini",
+    byFallback: "تم التحليل بواسطة النموذج الاحتياطي",
     healthy: "النبتة سليمة",
     alternatives: "احتمالات أخرى",
     confidenceHigh: "ثقة مرتفعة",
@@ -114,7 +118,7 @@ const AR: AssistantCopy = {
 
 const FR: AssistantCopy = {
   header: {
-    title: "Assistant intelligent",
+    title: "PhytoScan AI",
     subtitle: "Votre conseiller agricole algérien",
     navDashboard: "Tableau de bord",
     navHome: "Accueil",
@@ -143,7 +147,7 @@ const FR: AssistantCopy = {
   },
   chat: {
     you: "Vous",
-    assistant: "Assistant",
+    assistant: "PhytoScan AI",
     thinking: "Préparation de la réponse…",
     thinkingDetect: "Détection de la feuille et recadrage…",
     thinkingVision: "Analyse de l'image et diagnostic en cours…",
@@ -158,7 +162,8 @@ const FR: AssistantCopy = {
   diagnosis: {
     title: "Résultat du diagnostic visuel",
     confidence: "Confiance",
-    model: "Modèle de classification",
+    byGemini: "Analysé par Gemini",
+    byFallback: "Analysé par le modèle de secours",
     healthy: "Plante saine",
     alternatives: "Autres possibilités",
     confidenceHigh: "Confiance élevée",
