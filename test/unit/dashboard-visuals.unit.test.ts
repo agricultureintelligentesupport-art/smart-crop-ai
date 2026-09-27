@@ -164,11 +164,14 @@ test("the moisture layer averages back to the card's L/ha, to the litre", () => 
 
     const values = map.values.moisture;
     assert.equal(values.length, map.zones.length);
+    // The model path is total: every cell has a value. Only the observed path
+    // may return null, for a cell the satellite could not read.
+    assert.ok(values.every((v): v is number => v !== null), "model mode has no gaps");
     assert.equal(
       values.reduce((sum, v) => sum + v, 0),
       irrigation.litresPerHaDay * map.zones.length,
     );
-    assert.equal(Math.round(layerAverage(map, "moisture")), irrigation.litresPerHaDay);
+    assert.equal(Math.round(layerAverage(map, "moisture") ?? -1), irrigation.litresPerHaDay);
     // Real spatial spread, not a flat fill: some zones differ from the mean.
     assert.ok(values.some((v) => v !== irrigation.litresPerHaDay));
     // Each zone covers exactly one slice of the parcel.
@@ -196,10 +199,11 @@ test("the map is deterministic and every layer stays in range", () => {
   for (const layer of LAYERS) {
     for (const reading of layerReadings(a, layer)) {
       assert.ok(reading.intensity >= 0 && reading.intensity <= 1, `${layer} intensity`);
+      assert.ok(reading.value !== null, `${layer} has a value in model mode`);
       if (layer === "moisture") {
-        assert.ok(reading.value > 0);
+        assert.ok((reading.value as number) > 0);
       } else {
-        assert.ok(reading.value >= 0 && reading.value <= 100, `${layer} value`);
+        assert.ok((reading.value as number) >= 0 && (reading.value as number) <= 100, `${layer} value`);
       }
     }
   }
@@ -214,7 +218,7 @@ test("the map is deterministic and every layer stays in range", () => {
     tempC: 44,
     humidity: 62,
   });
-  assert.ok(layerAverage(hot, "thermal") > layerAverage(a, "thermal"));
+  assert.ok((layerAverage(hot, "thermal") ?? 0) > (layerAverage(a, "thermal") ?? 0));
 });
 
 test("zone readings move with the layer and carry a verdict", () => {
@@ -237,6 +241,7 @@ test("zone readings move with the layer and carry a verdict", () => {
   assert.equal(moisture.value, map.values.moisture[0]);
   assert.equal(thermal.value, map.values.thermal[0]);
   assert.equal(transpiration.value, map.values.transpiration[0]);
+  assert.ok(moisture.value !== null);
   assert.equal(moisture.zone.id, thermal.zone.id);
 
   // Statuses are the ones the card renders as chips.
@@ -246,9 +251,10 @@ test("zone readings move with the layer and carry a verdict", () => {
 
   // The driest zone of the parcel really is the one asking for the most water.
   const readings = layerReadings(map, "moisture");
-  const driest = readings.reduce((max, r) => (r.value > max.value ? r : max), readings[0]);
+  const driest = readings.reduce((max, r) => ((r.value ?? 0) > (max.value ?? 0) ? r : max), readings[0]);
   assert.equal(driest.status, "dry");
-  assert.equal(driest.value, Math.max(...map.values.moisture));
+  const all = map.values.moisture.filter((v): v is number => v !== null);
+  assert.equal(driest.value, Math.max(...all));
 });
 
 test("zone verdicts follow the documented thresholds", () => {
