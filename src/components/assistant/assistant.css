@@ -84,13 +84,24 @@
     pointer-events: none;
   }
 
-  /* ---------- Response reveal ------------------------------------ */
+  /* ---------- Response reveal & typing cursor --------------------- */
 
-  /* Soft top-to-bottom wipe: the answer "arrives" instead of popping in */
+  /* Gentle fade entrance for newly delivered assistant responses */
   .chat-reveal {
-    animation: chat-reveal 0.7s var(--chat-ease) both;
-    -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 calc(var(--reveal, 130%) - 14%), transparent var(--reveal, 130%));
-    mask-image: linear-gradient(180deg, #000 0%, #000 calc(var(--reveal, 130%) - 14%), transparent var(--reveal, 130%));
+    animation: chat-fade 0.25s var(--chat-ease) both;
+  }
+
+  /* Polished emerald typing cursor following progressive text stream */
+  .chat-cursor {
+    display: inline-block;
+    width: 2.5px;
+    height: 1.15em;
+    margin-inline: 2px;
+    vertical-align: -0.15em;
+    background-color: var(--chat-emerald);
+    border-radius: 9999px;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+    animation: chat-cursor-pulse 0.75s ease-in-out infinite;
   }
 
   /* ---------- Typing indicator ----------------------------------- */
@@ -283,19 +294,27 @@
 
 /* ---------- Keyframes ---------------------------------------------- */
 
-@keyframes chat-reveal {
+@keyframes chat-fade {
   from {
-    --reveal: 0%;
+    opacity: 0;
+    transform: translateY(3px);
   }
   to {
-    --reveal: 130%;
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-@property --reveal {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 130%;
+@keyframes chat-cursor-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  50% {
+    opacity: 0.15;
+    transform: scaleY(0.85);
+  }
 }
 
 @keyframes chat-dot {
@@ -350,8 +369,11 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-reveal {
     animation: none;
-    -webkit-mask-image: none;
-    mask-image: none;
+  }
+
+  .chat-cursor {
+    display: none !important;
+    animation: none !important;
   }
 
   .chat-avatar-live::after,
