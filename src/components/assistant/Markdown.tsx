@@ -223,8 +223,23 @@ export default function Markdown({
   useEffect(() => {
     if (reduceMotion || !animate || totalChars === 0) return;
 
-    // Pacing formula: smoothly finishes in ~1.2s to 2.2s
-    const step = Math.max(2, Math.ceil(totalChars / 80));
+    // Relaxed typewriter pacing: the reveal time grows with reply length but
+    // is clamped to ~1.1 s (short line) … ~4 s (long treatment plan), so a
+    // full answer stays readable without feeling sluggish. The per-tick step
+    // stays small (1–3 chars on typical replies) so the text streams in
+    // smoothly instead of appearing in big jumps.
+    const MIN_REVEAL_MS = 1100;
+    const MAX_REVEAL_MS = 4000;
+    const PER_CHAR_MS = 7;
+    const TICK_MS = 18;
+
+    const revealMs = Math.min(
+      MAX_REVEAL_MS,
+      Math.max(MIN_REVEAL_MS, totalChars * PER_CHAR_MS),
+    );
+    const ticks = Math.max(1, Math.round(revealMs / TICK_MS));
+    const step = Math.max(1, Math.round(totalChars / ticks));
+
     const timer = window.setInterval(() => {
       setRevealedCount((prev) => {
         const next = prev + step;
@@ -234,7 +249,7 @@ export default function Markdown({
         }
         return next;
       });
-    }, 20);
+    }, TICK_MS);
 
     return () => window.clearInterval(timer);
   }, [animate, reduceMotion, totalChars]);
@@ -258,7 +273,10 @@ export default function Markdown({
       initial={reduceMotion ? { opacity: 0 } : false}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.2 }}
-      className="space-y-3 break-words text-emerald-950"
+      // `text-start` is the logical alignment: the reply hugs the reading
+      // edge of the active language — right in Arabic (RTL), left in French
+      // (LTR) — mirroring automatically with the `dir` set on the app canvas.
+      className="space-y-3 break-words text-start text-emerald-950"
     >
       {blocks.map((block, i) => {
         // Block has not started typing yet
