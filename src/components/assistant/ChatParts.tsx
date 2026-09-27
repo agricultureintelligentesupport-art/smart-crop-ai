@@ -1,12 +1,17 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { EASE_OUT, GPU, SPRING } from "@/components/auth/ui";
 
 /**
- * Custom PhytoScan AI brand mark: botanical leaf intersected by a diagnostic
- * scan beam and corner viewfinder reticles.
+ * PhytoScanLogo — Direction A: Solid Specimen Chip
+ *
+ * Single cohesive mark: soft teardrop/rounded leaf tilted ~45°,
+ * one curved vein as negative-space cutout, subtle radial gradient
+ * + hairline inner top highlight. No strokes, no brackets.
+ *
+ * Animation: gentle breathing scale + slow shimmer along vein.
  */
 export function PhytoScanLogo({
   size = 20,
@@ -17,29 +22,117 @@ export function PhytoScanLogo({
   strokeWidth?: number;
   className?: string;
 }) {
+  // Stable unique ids for gradients/masks when multiple logos render on same page
+  const reactId = useId();
+  const uid = reactId.replace(/[^a-zA-Z0-9]+/g, "");
+  // strokeWidth kept for API compatibility (header/avatar/hero pass it) — visual is fill-only now
+  void strokeWidth;
+
+  const gradId = `phyto-grad-${uid}`;
+  const maskId = `phyto-mask-${uid}`;
+  const clipId = `phyto-clip-${uid}`;
+
+  // Vertical soft teardrop — later rotated ~38° for the 45° tilt
+  const leafD = "M12 2.7 C 15.05 4.9 19.1 10.05 12 21.5 C 4.9 10.05 8.95 4.9 12 2.7 Z";
+  // Thin spindle following the leaf's central curve, slightly S-curved — becomes the negative cutout
+  const veinShapeD =
+    "M12 5.1 C 12.68 8.15 13.08 12.35 12.18 17.55 C 11.68 12.55 11.42 8.35 12 5.1 Z";
+  // Centerline for the traveling shimmer, inside the cutout
+  const veinCenterD = "M12 5.4 C 12.55 9.2 12.85 12.9 12.18 17.3";
+  // Hairline highlight hugging the top edge inside the leaf
+  const highlightD = "M10.55 5.15 Q 12 3.55 13.45 5.15";
+
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 24 24"
       fill="none"
-      stroke="currentColor"
-      strokeWidth={strokeWidth}
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      xmlns="http://www.w3.org/2000/svg"
       className={className}
       aria-hidden="true"
+      role="img"
     >
-      {/* Viewfinder corner brackets */}
-      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
-      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
-      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
-      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
-      {/* Diagonal botanical leaf with central vein */}
-      <path d="M8 16.5c-1-3 1.5-6.8 8.5-8.5-1 7-4.8 9.5-8.5 8.5z" />
-      <path d="M8 16.5c2-2 4.5-4 7-6" />
-      {/* Laser scan beam */}
-      <line x1="2" y1="12" x2="22" y2="12" strokeDasharray="2 2" opacity="0.9" />
+      <defs>
+        {/* Lighter center, slightly darker edge — gives embossed chip depth while staying white at 17px */}
+        <radialGradient id={gradId} cx="36%" cy="30%" r="72%">
+          <stop offset="0%" stopColor="#FFFFFF" stopOpacity="1" />
+          <stop offset="62%" stopColor="#FFFFFF" stopOpacity="1" />
+          <stop offset="100%" stopColor="#E8F6EC" stopOpacity="0.98" />
+        </radialGradient>
+        {/* Vein as negative space: white = keep leaf, black = cut hole */}
+        <mask id={maskId} maskUnits="userSpaceOnUse">
+          <rect x="0" y="0" width="24" height="24" fill="white" />
+          <path d={veinShapeD} fill="black" />
+        </mask>
+        <clipPath id={clipId}>
+          <path d={veinShapeD} />
+        </clipPath>
+      </defs>
+
+      {/* Lightweight CSS — only inside this mark */}
+      <style>{`
+        @keyframes phytoChipBreathe {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.04); }
+        }
+        @keyframes phytoChipShimmer {
+          0% { stroke-dashoffset: 1; opacity: 0; }
+          12% { opacity: 1; }
+          88% { opacity: 1; }
+          100% { stroke-dashoffset: -1; opacity: 0; }
+        }
+        .phyto-chip-breathe {
+          transform-origin: 12px 12px;
+          transform-box: fill-box;
+          animation: phytoChipBreathe 3s ease-in-out infinite;
+        }
+        .phyto-chip-shimmer {
+          stroke-dasharray: 0.22 0.78;
+          stroke-dashoffset: 0;
+          animation: phytoChipShimmer 2.35s ease-in-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .phyto-chip-breathe,
+          .phyto-chip-shimmer {
+            animation: none !important;
+          }
+        }
+      `}</style>
+
+      {/* Tilt ~38° for the requested 45° feel, keeps mark compact */}
+      <g transform="rotate(38 12 12)">
+        <g className="phyto-chip-breathe">
+          {/* Solid leaf chip with vein cutout */}
+          <path d={leafD} fill={`url(#${gradId})`} mask={`url(#${maskId})`} />
+
+          {/* Inner top hairline highlight — subtle emboss */}
+          <path
+            d={highlightD}
+            fill="none"
+            stroke="#FFFFFF"
+            strokeWidth="0.55"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity="0.82"
+          />
+
+          {/* Shimmer traveling inside the vein gap — clipped to vein shape */}
+          <g clipPath={`url(#${clipId})`}>
+            <path
+              d={veinCenterD}
+              pathLength={1}
+              fill="none"
+              stroke="#FFFFFF"
+              strokeWidth="0.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeOpacity="0.96"
+              className="phyto-chip-shimmer"
+            />
+          </g>
+        </g>
+      </g>
     </svg>
   );
 }
@@ -150,13 +243,9 @@ export function EmptyHero({ greeting, intro }: { greeting: ReactNode; intro: Rea
       <div className="relative mb-4 inline-grid place-items-center">
         <span aria-hidden className="chat-orb-ring" />
         <span className="chat-orb grid h-16 w-16 place-items-center rounded-full text-white">
-          <motion.span
-            animate={reduce ? undefined : { rotate: [0, 10, -6, 0], scale: [1, 1.06, 1] }}
-            transition={{ duration: 4.2, repeat: Infinity, ease: "easeInOut", repeatDelay: 1.4 }}
-            className="grid"
-          >
+          <span className="grid">
             <PhytoScanLogo size={30} strokeWidth={2.2} aria-hidden />
-          </motion.span>
+          </span>
         </span>
       </div>
 
