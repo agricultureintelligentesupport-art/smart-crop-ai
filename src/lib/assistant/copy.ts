@@ -70,9 +70,9 @@ const AR: AssistantCopy = {
     langFr: "Français",
   },
   hero: {
-    greeting: "أهلاً بيك! 👋",
+    greeting: "مرحباً بك في PhytoScan AI 🌿",
     intro:
-      "أنا مستشارك الزراعي الذكي. صوّر ورقة النبتة المريضة أو اسألني عن السقي، التسميد، أو أي شيء يخص محصولك — نجاوبك حسب ولايتك ومحصولك.",
+      "طبيب محاصيلك ومستشارك الزراعي حاضر معك في الحقل. صوّر أي ورقة تبدو عليها علامات المرض للتشخيص الفوري، أو استشرني حول برامج السقي، التسميد والوقاية — خطوة بخطوة حسب مناخ ولايتك ونوع محصولك.",
   },
   chips: [
     { label: "تشخيص مرض الأوراق 📸", message: "شخّص لي مرض هذه الورقة وأعطني خطة علاج مناسبة لمنطقتي.", withImage: true },
@@ -126,9 +126,9 @@ const FR: AssistantCopy = {
     langFr: "Français",
   },
   hero: {
-    greeting: "Bienvenue ! 👋",
+    greeting: "Bienvenue sur PhytoScan AI 🌿",
     intro:
-      "Je suis votre conseiller agricole IA. Photographiez une feuille malade ou posez vos questions d'irrigation et de fertilisation — réponses adaptées à votre wilaya et votre culture.",
+      "Votre expert phytosanitaire et conseiller de terrain au quotidien. Prenez en photo une feuille suspecte pour un diagnostic immédiat des maladies, ou demandez conseil pour vos cycles d'irrigation, de fertilisation et de traitement — des recommandations sur-mesure pour votre wilaya et vos cultures.",
   },
   chips: [
     { label: "Diagnostic de feuille 📸", message: "Diagnostique la maladie de cette feuille et propose un plan de traitement adapté à ma région.", withImage: true },
