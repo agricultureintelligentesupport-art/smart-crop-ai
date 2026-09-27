@@ -441,7 +441,7 @@ export default function AssistantView() {
                       </motion.div>
                     )}
 
-                    <div className={!isUser && !msg.error ? "chat-reveal" : undefined}>
+                    <div>
                       {!isUser && msg.preprocessing?.status === "cropped" && (
                         <p
                           className="chat-note mb-2.5 flex items-start gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-emerald-800"
