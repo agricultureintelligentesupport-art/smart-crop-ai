@@ -1,18 +1,29 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Droplets, Leaf, MapPinned, ThermometerSun, Waves } from "lucide-react";
+import { Droplets, Leaf, MapPinned, Satellite, ThermometerSun, Waves } from "lucide-react";
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { IrrigationResult, WeatherSnapshot } from "@/lib/agronomy";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
 import {
   buildFieldHeatmap,
+  buildObservedHeatmap,
+  heatmapGrid,
   layerAverage,
   zoneReading,
   type FieldHeatmap,
   type HeatmapLayer,
   type ZoneStatus,
 } from "@/lib/dashboard/heatmap";
+import { observationLayers } from "@/lib/field-data/observation";
+import type { FieldDataReason, FieldObservation } from "@/lib/field-data/types";
+
+/** Field mean of the measured NDVI cells — the per-cell deficit reference. */
+function meanNdviOf(observation: FieldObservation): number {
+  const values = observation.cells.map((c) => c.ndvi).filter((v): v is number => v !== null);
+  if (values.length === 0) return 0;
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
 import type { CropKey, Lang } from "@/lib/wilayas";
 import { fmt } from "./WeatherCard";
 import { Card, Chip, Progress } from "./parts";
@@ -79,6 +90,10 @@ export default function FieldHeatmapCard({
   areaHa,
   irrigation,
   weather,
+  observation = null,
+  observationReason = null,
+  plotName = null,
+  onOpenMap,
 }: {
   t: DashboardCopy;
   lang: Lang;
@@ -88,6 +103,17 @@ export default function FieldHeatmapCard({
   /** The same result the hero card renders: the map is centred on it. */
   irrigation: IrrigationResult;
   weather: WeatherSnapshot;
+  /**
+   * A real, measured day for the saved plot (Sentinel-2 NDVI + NASA POWER).
+   * `null` keeps the card on its existing deterministic model estimate.
+   */
+  observation?: FieldObservation | null;
+  /** Why a plot has no observation yet — drives the "no data" treatment. */
+  observationReason?: FieldDataReason | null;
+  /** Name of the saved plot, shown in the provenance line. */
+  plotName?: string | null;
+  /** Opens the field map sheet. Omitted → the map button is not rendered. */
+  onOpenMap?: (() => void) | null;
 }) {
   const reduce = Boolean(useReducedMotion());
   const [layer, setLayer] = useState<HeatmapLayer>("moisture");
@@ -98,25 +124,60 @@ export default function FieldHeatmapCard({
   const shimmerId = useId();
   const clipId = useId();
 
-  const map: FieldHeatmap = useMemo(
-    () =>
-      buildFieldHeatmap({
-        wilayaCode,
-        crop,
+  const map: FieldHeatmap = useMemo(() => {
+    // A real observation wins: same grid, same tabs, same ramp — measured
+    // values instead of the model's seeded estimate.
+    if (observation) {
+      return buildObservedHeatmap({
+        rows: heatmapGrid(areaHa).rows,
+        cols: heatmapGrid(areaHa).cols,
+        layers: observationLayers({
+          observation,
+          meanNdvi: meanNdviOf(observation),
+          litresPerHaDay: irrigation.litresPerHaDay,
+        }),
         areaHa,
         litresPerHaDay: irrigation.litresPerHaDay,
-        et0: irrigation.et0,
-        tempC: weather.tempC,
-        humidity: weather.humidity,
-      }),
-    [wilayaCode, crop, areaHa, irrigation.litresPerHaDay, irrigation.et0, weather.tempC, weather.humidity],
-  );
+        meanNdvi: meanNdviOf(observation),
+      });
+    }
+    return buildFieldHeatmap({
+      wilayaCode,
+      crop,
+      areaHa,
+      litresPerHaDay: irrigation.litresPerHaDay,
+      et0: irrigation.et0,
+      tempC: weather.tempC,
+      humidity: weather.humidity,
+    });
+  }, [
+    observation,
+    wilayaCode,
+    crop,
+    areaHa,
+    irrigation.litresPerHaDay,
+    irrigation.et0,
+    weather.tempC,
+    weather.humidity,
+  ]);
 
   const readings = map.zones.map((zone) => zoneReading(map, zone, layer));
   const active = readings[Math.min(selected, readings.length - 1)];
   const average = layerAverage(map, layer);
   const unit = t.heatmap.units[layer];
   const ramp = LAYER_META[layer].ramp;
+
+  /**
+   * The drawn boundary is the truth about the parcel, so once a plot exists the
+   * card describes *it* — its measured hectares, its cells — rather than the
+   * dashboard's nominal size. The moisture mean still ties to the decision
+   * card; only the area, which is measured, comes from the plot.
+   */
+  const plotAreaHa = useMemo(() => {
+    if (!observation) return areaHa;
+    const measured = observation.cells.reduce((sum, cell) => sum + cell.areaHa, 0);
+    return measured > 0 ? measured : areaHa;
+  }, [observation, areaHa]);
 
   const cellW = (VIEW_W - PAD * 2 - GAP * (map.cols - 1)) / map.cols;
   const cellH = (VIEW_H - PAD * 2 - GAP * (map.rows - 1)) / map.rows;
@@ -125,12 +186,18 @@ export default function FieldHeatmapCard({
   const rtl = lang === "ar";
   const columnX = (col: number) => PAD + (rtl ? map.cols - 1 - col : col) * (cellW + GAP);
 
+  /** True when the active cell has no measurement at all. */
+  const activeMissing = active.value === null;
+  const layerUnavailable = Boolean(map.observed && map.unavailableLayers?.includes(layer));
+
   const deltaText =
-    active.deltaPct === 0
-      ? t.heatmap.deltaEven
-      : active.deltaPct > 0
-        ? t.heatmap.deltaAbove.replace("{pct}", fmt(Math.abs(active.deltaPct)))
-        : t.heatmap.deltaBelow.replace("{pct}", fmt(Math.abs(active.deltaPct)));
+    active.deltaPct === null
+      ? t.heatmap.deltaNone
+      : active.deltaPct === 0
+        ? t.heatmap.deltaEven
+        : active.deltaPct > 0
+          ? t.heatmap.deltaAbove.replace("{pct}", fmt(Math.abs(active.deltaPct)))
+          : t.heatmap.deltaBelow.replace("{pct}", fmt(Math.abs(active.deltaPct)));
 
   const statusText = statusLabel(t, layer, active.status);
   /* Amber means "needs attention" for this layer (a dry zone, a heat-stressed
@@ -144,9 +211,11 @@ export default function FieldHeatmapCard({
   const zoneName = (index: number) =>
     t.heatmap.zoneLabel.replace("{id}", t.heatmap.zoneIds[index] ?? String(index + 1));
 
-  const layerNote = t.heatmap.layerNote[layer]
-    .replace("{value}", fmt(active.value))
-    .replace("{delta}", deltaText);
+  const layerNote = layerUnavailable
+    ? t.heatmap.layerUnavailable
+    : t.heatmap.layerNote[layer]
+        .replace("{value}", active.value === null ? "—" : fmt(active.value))
+        .replace("{delta}", deltaText);
 
   /** Arrow keys walk the grid; Enter/Space select (same as a tap). */
   const onCellKeyDown = (event: KeyboardEvent<SVGRectElement>, index: number) => {
@@ -176,12 +245,34 @@ export default function FieldHeatmapCard({
     <Card
       className="lg:col-span-2"
       title={t.heatmap.title}
-      subtitle={t.heatmap.subtitle
+      subtitle={(map.observed ? t.heatmap.subtitleObserved : t.heatmap.subtitle)
         .replace("{zones}", fmt(map.zones.length))
-        .replace("{area}", fmt(areaHa, 1))}
+        .replace("{area}", fmt(map.observed && observation ? plotAreaHa : areaHa, 1))}
       icon={<MapPinned size={18} strokeWidth={2.4} aria-hidden />}
+      aside={
+        onOpenMap ? (
+          <button
+            type="button"
+            onClick={onOpenMap}
+            className="flex min-h-[2.25rem] items-center gap-1.5 rounded-full bg-emerald-600 px-3 text-[11px] font-extrabold text-white transition-colors hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+          >
+            <MapPinned size={12} strokeWidth={2.8} aria-hidden />
+            {plotName ? t.heatmap.mapEdit : t.heatmap.mapDraw}
+          </button>
+        ) : null
+      }
     >
       <div className="flex flex-col gap-3">
+        {/* No plot yet: the model estimate is still on screen, but it says so
+            and points at the real alternative instead of pretending to be one. */}
+        {onOpenMap && !map.observed && (
+          <div className="flex items-start gap-2 rounded-[1rem] bg-white px-3 py-2.5 ring-1 ring-[rgba(6,78,59,0.08)]">
+            <Satellite size={13} strokeWidth={2.6} aria-hidden className="mt-0.5 shrink-0 text-emerald-600" />
+            <p className="text-[10.5px] font-semibold leading-5 text-emerald-900/70">
+              {t.heatmap.modelBanner}
+            </p>
+          </div>
+        )}
         {/* Layer switcher */}
         <div
           role="radiogroup"
@@ -258,7 +349,10 @@ export default function FieldHeatmapCard({
                 const x = columnX(col);
                 const y = PAD + row * (cellH + GAP);
                 const isSelected = index === active.zone.index;
-                const fill = rampColor(ramp, reading.intensity);
+                /* A cell the satellite could not read is drawn neutral and
+                   hatched, never coloured as if it held a measurement. */
+                const measured = reading.value !== null;
+                const fill = measured ? rampColor(ramp, reading.intensity) : "#e9f1ec";
                 return (
                   <g key={reading.zone.id}>
                     <motion.rect
@@ -276,8 +370,8 @@ export default function FieldHeatmapCard({
                       aria-pressed={isSelected}
                       aria-label={t.heatmap.cellAria
                         .replace("{zone}", zoneName(index))
-                        .replace("{value}", fmt(reading.value))
-                        .replace("{unit}", unit)
+                        .replace("{value}", measured ? fmt(reading.value as number) : "—")
+                        .replace("{unit}", measured ? unit : t.heatmap.noDataShort)
                         .replace("{status}", statusLabel(t, layer, reading.status))}
                       onPointerDown={() => setSelected(index)}
                       onFocus={() => setFocused(index)}
@@ -288,6 +382,24 @@ export default function FieldHeatmapCard({
                       transition={{ duration: 0.4, delay: reduce ? 0 : 0.03 * index, ease: [0.22, 1, 0.36, 1] }}
                       style={{ transformOrigin: `${x + cellW / 2}px ${y + cellH / 2}px`, cursor: "pointer" }}
                     />
+                    {/* Diagonal hatch marks an unmeasured cell (cloud-covered, or
+                        a sliver too thin to average). Decorative — the cell's
+                        own aria-label already says there is no reading. */}
+                    {!measured && (
+                      <g clipPath={`url(#${clipId})`} aria-hidden pointerEvents="none">
+                        {Array.from({ length: Math.ceil((cellW + cellH) / 9) }).map((_, k) => (
+                          <line
+                            key={k}
+                            x1={x + k * 9 - cellH}
+                            y1={y + cellH}
+                            x2={x + k * 9}
+                            y2={y}
+                            stroke="rgba(6,78,59,0.13)"
+                            strokeWidth={1.5}
+                          />
+                        ))}
+                      </g>
+                    )}
                     {/* Zone letter: the key that links a cell to the panel below. */}
                     <text
                       x={rtl ? x + cellW - 9 : x + 9}
@@ -295,7 +407,7 @@ export default function FieldHeatmapCard({
                       textAnchor={rtl ? "end" : "start"}
                       fontSize="10"
                       fontWeight={900}
-                      fill="rgba(255,255,255,0.82)"
+                      fill={measured ? "rgba(255,255,255,0.82)" : "rgba(6,78,59,0.32)"}
                       pointerEvents="none"
                     >
                       {t.heatmap.zoneIds[index] ?? index + 1}
@@ -420,15 +532,25 @@ export default function FieldHeatmapCard({
           </div>
 
           <p dir="ltr" className="text-[24px] font-black leading-none tabular-nums text-emerald-950">
-            {fmt(active.value)}{" "}
-            <span className="text-[12px] font-extrabold text-emerald-900/70">{unit}</span>
+            {active.value === null ? (
+              <span className="text-[15px] font-extrabold text-emerald-900/45">{t.heatmap.noDataShort}</span>
+            ) : (
+              <>
+                {fmt(active.value)}{" "}
+                <span className="text-[12px] font-extrabold text-emerald-900/70">{unit}</span>
+              </>
+            )}
           </p>
 
-          <Progress value={active.intensity * 100} tone={needsAttention ? "amber" : "emerald"} />
+          {!activeMissing && (
+            <Progress value={active.intensity * 100} tone={needsAttention ? "amber" : "emerald"} />
+          )}
 
           <p className="text-[11.5px] font-semibold leading-[1.75] text-emerald-900/75">{layerNote}</p>
           <p className="text-[10px] font-bold text-emerald-800/55">
-            {t.heatmap.zonesCount.replace("{n}", fmt(map.zones.length)).replace("{area}", fmt(areaHa, 1))} ·{" "}
+            {t.heatmap.zonesCount
+              .replace("{n}", fmt(map.zones.length))
+              .replace("{area}", fmt(map.observed ? plotAreaHa : areaHa, 1))} ·{" "}
             {t.heatmap.hint}
           </p>
         </div>
@@ -436,11 +558,52 @@ export default function FieldHeatmapCard({
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-[1rem] bg-white px-3 py-2 ring-1 ring-[rgba(6,78,59,0.08)]">
           <span className="text-[11px] font-bold text-emerald-800/70">{t.heatmap.average}</span>
           <span dir="ltr" className="text-[13px] font-black tabular-nums text-emerald-950">
-            {layer === "moisture" ? `${fmt(average)} ${unit}` : `${fmt(average)} / 100`}
+            {average === null
+              ? t.heatmap.noDataShort
+              : layer === "moisture"
+                ? `${fmt(average)} ${unit}`
+                : `${fmt(average)} / 100`}
           </span>
         </div>
 
-        <p className="text-[10.5px] font-semibold leading-5 text-emerald-900/50">{t.heatmap.note}</p>
+        {/* Provenance. The card's honesty contract: a measured day says so, a
+            failed upstream says why, and neither ever falls back to a number
+            that was not measured. */}
+        {map.observed ? (
+          <div className="flex flex-col gap-1.5 rounded-[1rem] bg-emerald-50/70 px-3 py-2.5 ring-1 ring-[rgba(6,78,59,0.08)]">
+            <p className="text-[11px] font-black text-emerald-900">{t.heatmap.sourceTitle}</p>
+            <ul className="flex flex-col gap-0.5 text-[10.5px] font-semibold leading-5 text-emerald-900/70">
+              <li>
+                {t.heatmap.sourceNdvi
+                  .replace("{scene}", observation?.sceneDate ?? t.heatmap.noDataShort)
+                  .replace("{plot}", plotName ?? t.heatmap.plotFallback)}
+              </li>
+              {observation?.climate ? (
+                <li>
+                  {t.heatmap.sourceClimate
+                    .replace("{date}", observation.climate.date)
+                    .replace("{et0}", fmt(observation.climate.et0, 2))
+                    .replace("{tmax}", observation.climate.tempMaxC === null ? "—" : fmt(observation.climate.tempMaxC, 1))
+                    .replace("{rh}", observation.climate.humidityPct === null ? "—" : fmt(observation.climate.humidityPct))}
+                </li>
+              ) : (
+                <li>{t.heatmap.sourceClimateNone}</li>
+              )}
+              <li>{t.heatmap.sourceScale}</li>
+            </ul>
+          </div>
+        ) : observationReason ? (
+          <div className="flex items-start gap-2 rounded-[1rem] bg-amber-50 px-3 py-2.5 ring-1 ring-amber-200/60">
+            <Satellite size={13} strokeWidth={2.6} aria-hidden className="mt-0.5 shrink-0 text-amber-600" />
+            <p className="text-[10.5px] font-semibold leading-5 text-amber-900/85">
+              {t.fieldDataReason[observationReason]}
+            </p>
+          </div>
+        ) : null}
+
+        <p className="text-[10.5px] font-semibold leading-5 text-emerald-900/50">
+          {map.observed ? t.heatmap.noteObserved : t.heatmap.note}
+        </p>
       </div>
     </Card>
   );

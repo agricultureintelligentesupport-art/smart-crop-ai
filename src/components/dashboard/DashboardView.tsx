@@ -12,10 +12,12 @@ import { computeIrrigation, type IrrigationSystem } from "@/lib/agronomy";
 import { APP_SHELL } from "@/lib/app/copy";
 import { AUTH } from "@/lib/auth/copy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
-import { guestDisplayName, useGuest } from "@/lib/auth/guest";
+import { guestDisplayName, useGuest, GUEST_UID } from "@/lib/auth/guest";
 import { useProfile } from "@/lib/auth/profile";
 import type { AuthRole } from "@/lib/auth/types";
 import { useDailyTasks } from "@/lib/dailyTasks/useDailyTasks";
+import { useFieldData } from "@/lib/field-data/useFieldData";
+import FieldMapSheet from "@/components/map/FieldMapSheet";
 import { CROPS, DEFAULT_WILAYA_CODE, SOILS, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import { useLiveWeather } from "@/lib/weather/useLiveWeather";
@@ -111,6 +113,16 @@ export default function DashboardView() {
   // irrigation calculation and the window detail sheet — same formulas as
   // before, only the climate inputs can now be live.
   const liveWeather = useLiveWeather(wilayaCode);
+
+  /* Real field data: the plot the farmer drew on the map, and the once-a-day
+     Sentinel-2 / NASA POWER observation for it.
+
+     A guest has no Firebase user, so `authUser.uid` is null on the dashboard
+     even though the session is real, stable and device-local. Without this
+     fallback a guest could draw a boundary and it would be discarded. */
+  const plotUid = authUser?.uid ?? (isGuest ? GUEST_UID : null);
+  const fieldData = useFieldData(plotUid, areaHa);
+  const [mapOpen, setMapOpen] = useState(false);
   const weather = liveWeather.snapshot;
   // Parcel inputs: the user's own choice while it belongs to the current
   // wilaya, otherwise that wilaya's defaults (the calculator's old reset rule).
@@ -316,7 +328,8 @@ export default function DashboardView() {
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
               {/* The map reads the same irrigation result as the hero card, so the
-                  moisture layer always averages back to the daily L/ha figure. */}
+                  moisture layer always averages back to the daily L/ha figure.
+                  With a saved plot it is fed real per-cell values instead. */}
               <FieldHeatmapCard
                 t={t}
                 lang={lang}
@@ -325,6 +338,10 @@ export default function DashboardView() {
                 areaHa={areaHa}
                 irrigation={irrigation}
                 weather={weather}
+                observation={fieldData.observation}
+                observationReason={fieldData.activePlot ? fieldData.reason : null}
+                plotName={fieldData.activePlot?.name ?? null}
+                onOpenMap={() => setMapOpen(true)}
               />
               <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
               <ScanCard t={t} wilayaCode={wilayaCode} />
@@ -336,6 +353,23 @@ export default function DashboardView() {
           </p>
         </div>
       </main>
+
+      {/* Field map: draw the parcel boundary that the heatmap's real NDVI is
+          computed from. Rendered last so it sits above every other sheet. */}
+      {mapOpen && (
+        <FieldMapSheet
+          onClose={() => setMapOpen(false)}
+          plots={fieldData.plots}
+          activeId={fieldData.activeId}
+          loading={fieldData.loadingPlots}
+          busy={fieldData.savingPlot}
+          onSave={fieldData.addPlot}
+          onDelete={fieldData.removePlot}
+          onActivate={fieldData.setActivePlot}
+          copy={t.fieldMap}
+          lang={lang}
+        />
+      )}
 
       {/* The account sheet owns the screen while it is open — no competing tab bar. */}
       {!accountOpen && !settingsOpen && (
