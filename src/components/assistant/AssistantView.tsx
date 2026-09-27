@@ -34,6 +34,7 @@ import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
+import type { AnalysisSource } from "@/lib/assistant/analysis";
 import type {
   AssistantPreprocessing,
   AssistantResponseBody,
@@ -70,6 +71,8 @@ interface ChatMessage {
   imageUrl?: string;
   diagnosis?: AssistantDiagnosis | null;
   source?: AssistantSource;
+  /** Display only — which image engine produced `diagnosis` (from the API response). */
+  analysisSource?: AnalysisSource | null;
   /** Step 0 detection & cropping report (image requests only). */
   preprocessing?: AssistantPreprocessing | null;
   error?: boolean;
@@ -283,6 +286,7 @@ export default function AssistantView() {
             text: payload.reply,
             diagnosis: payload.diagnosis ?? null,
             source: payload.source,
+            analysisSource: payload.analysisSource ?? null,
             preprocessing: payload.preprocessing ?? null,
           },
         ]);
@@ -460,7 +464,11 @@ export default function AssistantView() {
 
                       {msg.diagnosis && (
                         <div className="mb-3">
-                          <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
+                          <DiagnosisCard
+                            diagnosis={msg.diagnosis}
+                            analysisSource={msg.analysisSource}
+                            copy={t.diagnosis}
+                          />
                         </div>
                       )}
 

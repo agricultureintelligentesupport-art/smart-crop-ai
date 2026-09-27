@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import AssistantView from "@/components/assistant/AssistantView";
 
 export const metadata: Metadata = {
-  title: "المساعد الذكي · Assistant IA",
+  title: "PhytoScan AI · Assistant IA",
   description:
     "مستشارك الزراعي الجزائري: تشخيص أمراض النباتات بالصور وخطط علاج ووقاية محلية بالذكاء الاصطناعي. / Assistant agricole IA : diagnostic des maladies par photo et plans de traitement localisés.",
 };
