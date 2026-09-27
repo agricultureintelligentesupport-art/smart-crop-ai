@@ -521,25 +521,6 @@ export default function AssistantView() {
       <footer className={`${SHELL_COLUMN} relative z-20 shrink-0 px-4 pb-[calc(var(--app-tab-h)+0.75rem+env(safe-area-inset-bottom,0px))]`}>
         <span aria-hidden className="chat-composer-fade" />
 
-        {/* Quick-action chips */}
-        <div className="scroll-area no-scrollbar -mx-4 mb-2.5 flex gap-2 overflow-x-auto px-4 pb-1 pt-1">
-          {t.chips.map((chip, i) => (
-            <motion.button
-              key={chip.label}
-              type="button"
-              disabled={busy}
-              onClick={() => onChip(chip)}
-              initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.05 * i, duration: 0.35, ease: EASE_OUT }}
-              whileTap={busy ? undefined : { scale: 0.95 }}
-              className={`chat-chip ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-4 py-2.5 text-[12px] font-black disabled:opacity-50`}
-            >
-              {chip.label}
-            </motion.button>
-          ))}
-        </div>
-
         <div className="chat-composer p-2">
           <AnimatePresence>
             {pendingImage && (
