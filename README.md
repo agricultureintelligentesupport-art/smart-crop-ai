@@ -145,10 +145,11 @@ can now be live.
 
 Values are labelled as decision-support estimates, not measurements.
 
-## The leaf diagnosis pipeline (Detection & Cropping → MobileNetV2 classification)
+## The leaf diagnosis orchestrator (Gemini analysis → MobileNetV2 fallback → text)
 
-`/api/assistant` processes an attached photo through a staged, fail-proof
-vision pipeline before the LLM stages run:
+`/api/assistant` runs a photo through a strict, fail-proof priority chain. A
+text-only question skips the image stage entirely and goes straight to the
+text stages.
 
 ```
 photo (base64)
@@ -158,42 +159,117 @@ photo (base64)
   │    DETR-ResNet-50, plant labels only; chain overridable with
   │    HF_LEAF_DETECT_MODELS). The dominant detection cluster becomes a
   │    padded, clamped crop window and sharp crops the photo, so hands, soil
-  │    and pots never reach the classifier.
-  │    Every failure (no key, undecodable image, detector down/loading, no
-  │    leaf, near-full-frame box) is non-fatal and falls back to the ORIGINAL
-  │    frame — the outcome lands in `preprocessing` on the API response.
+  │    and pots never reach a classifier. Every failure (no key, undecodable
+  │    image, detector down/loading, no leaf) is non-fatal and falls back to
+  │    the ORIGINAL frame — the outcome lands in `preprocessing`. The crop
+  │    feeds the MobileNetV2 fallback ONLY; Gemini reasons over the full
+  │    scene and gets the untouched photo.
   │
-  ├─ Step 1 · vision classification — PlantVillage classifier, MobileNetV2
-  │    (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification, the
-  │    single clean default; overridable with HF_VISION_MODEL) on the free
-  │    Hugging Face router; receives ONLY the Step 0 crop when detection
-  │    succeeded, the full frame otherwise. STREAMLINED: the former CodeCraft
-  │    vision engine (the OpenAI-compatible gateway at codecraftapi.com) was
-  │    REMOVED from the chain — its WAF 403 stalls and the extra network
-  │    round-trip only added latency, so every photo now goes DIRECTLY to
-  │    MobileNetV2 with no intermediate vision call. A vision outage stays
-  │    non-fatal: the degradation is logged in `warnings[]` and the request
-  │    continues to the LLM stages.
+  ├─ Step 1 · IMAGE ANALYSIS
+  │    PRIMARY   — Google Gemini (gemini-3.8-flash → 3.5-flash →
+  │      3.5-flash-lite on a retired-id 404, overridable with GEMINI_MODEL)
+  │      inspects the photo and
+  │      is pinned by `responseMimeType: "application/json"` + a
+  │      `responseSchema` to answer with a structured AnalysisData object:
+  │      { plant_type, disease_detected, disease_name, confidence,
+  │        affected_parts, severity, symptoms_observed, notes }.
+  │    FALLBACK  — MobileNetV2 PlantVillage
+  │      (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification,
+  │      overridable with HF_VISION_MODEL) on the free Hugging Face router.
+  │      Reached ONLY after the Gemini analysis failed; its raw { label, score }
+  │      is mapped into the SAME AnalysisData shape, so the text stage is
+  │      source-agnostic.
+  │    BOTH DOWN  — Step 4: no text model is ever called with empty data. The
+  │      user gets a pre-written, polite "retry with a clearer photo" reply.
   │
-  └─ Stages 1–3 · Stage 1 = PRIMARY LLM — the Hugging Face Inference
-     Providers router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507,
-     Bearer HUGGINGFACE_API_KEY / HF_TOKEN)
-     → Stage 2 = FALLBACK LLM — Google Gemini (gemini-3.6 → 2.5-flash →
-     2.0-flash-exp on a retired-id 404), reached ONLY when the primary HF
-     stage failed, timed out or has no token. Gemini inspects the image itself
-     (inlineData) with the reference diagnosis when Step 1 produced one
-     (HYBRID path) and independently when it did not (Fallback A); when every
-     LLM stage is down the built-in formatter answers from the Step 1
-     findings (direct diagnosis card, Fallback B).
-     Gemini key pool: GEMINI_API_KEY + GEMINI_API_KEYS + numbered
-     GEMINI_API_KEY_N — rotated on 429 / RESOURCE_EXHAUSTED / quota.
+  ├─ Step 2 · TEXT GENERATION (PRIMARY) — the Hugging Face Inference Providers
+  │    router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507, Bearer
+  │    HUGGINGFACE_API_KEY / HF_TOKEN) narrates the AnalysisData into a clear,
+  │    user-facing explanation with a practical recommendation. Fails on a
+  │    transport error/timeout, an empty or nonsensical reply, or a reply that
+  │    does not correspond to the AnalysisData.
+  │
+  └─ Step 3 · TEXT FALLBACK (Google Gemini, FORMAT-ONLY) — reached ONLY after
+       Step 2 failed. Same model chain and key pool (GEMINI_API_KEY +
+       GEMINI_API_KEYS + numbered GEMINI_API_KEY_N, rotated on 429 /
+       RESOURCE_EXHAUSTED / quota; one shared 18 s AbortController). It gets
+       the AnalysisData and NO image, so it formats the data and never
+       re-analyses the photo — including the edge case where the analysis came
+       from MobileNetV2. If both text models are down, the built-in formatter
+       answers 200 from the analysis (direct diagnosis card) or with a
+       greeting-aware basic-mode reply for a text-only question.
 ```
 
-Vision is therefore SINGLE-ENGINE: every photo is classified by the
-known-good MobileNetV2 PlantVillage checkpoint and the diagnosis is handed to
-the dual-tiered LLM chain — Hugging Face first (Qwen/Qwen3-4B-Instruct-2507),
-Google Gemini as the seamless fallback. The CodeCraft gateway and its
-`CODECRAFT_*` environment variables are gone; leftover values are ignored.
+### The Gemini model chain
+
+Every Gemini model id in the repo comes from a single definition:
+`src/lib/assistant/gemini-models.ts`. The route, the daily-task generator and
+the `check:models` CLI all import it, so a fix applied in one place cannot be
+missed in another.
+
+| Role | Model id | Why |
+| --- | --- | --- |
+| Primary | `gemini-3.8-flash` | Current stable Flash with vision support |
+| Fallback 1 | `gemini-3.5-flash` | Supported until at least 2027-05-19 |
+| Fallback 2 | `gemini-3.5-flash-lite` | Supported until at least 2027-07-21 |
+
+The mix is deliberate. Google designates the 3.6/3.7/3.8 Flash ids as
+*short-availability* models that rotate, and the `latest` aliases move with
+them, so a chain built only from those can 404 in full at once — which is
+exactly how this orchestrator ended up answering every photo from MobileNetV2.
+At least one long-lived id is always in the chain.
+
+Ids excluded on purpose: `gemini-2.0-flash*` (shut down 2026-06-01),
+`gemini-2.5-flash` (refused for new API keys) and `gemini-3.6` — a bare
+`gemini-3.6` was never a real id; the real one is `gemini-3.6-flash`.
+`test/unit/gemini-models.unit.test.ts` fails if any of them reappear.
+
+### Verifying the chain
+
+```bash
+npm run check:models                 # human-readable
+npm run check:models -- --json      # machine-readable, for CI
+```
+
+It calls `GET /v1beta/models` with your first `GEMINI_API_KEY*`, compares the
+live catalog against the configured chain, and exits `0` when every id is
+present, `1` when one is missing or the catalog could not be reached. The same
+check runs automatically inside the server — once per process, on a 6-hour TTL —
+and logs a single `[Gemini Health]` verdict. Ids it proves unavailable are then
+dropped from the request chain, so a retired id costs no round-trip and never
+reaches a photo as a silent MobileNetV2 downgrade.
+
+```bash
+[Gemini Health] ✅ chain gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite — 3/3 configured model ids are live.
+[Gemini Health] ❌ 1 of 3 configured model ids are NOT available: gemini-3.8-flash.
+[Gemini Health]   set GEMINI_MODEL=gemini-3.7-flash (or update GEMINI_FALLBACK_MODELS in src/lib/assistant/gemini-models.ts).
+```
+
+Set `GEMINI_MODEL` to pin a different primary; the built-in fallbacks still
+apply, so an override can never brick the stage. A `GEMINI_MODEL` override is
+sent without `thinkingConfig`, since only the bundled ids are known to accept
+`thinkingLevel`.
+
+**What counts as a Gemini Step 1 failure** — and therefore triggers the
+MobileNetV2 fallback: (a) an API/network error or timeout; (b) Gemini refusing
+or returning no usable text; (c) a response that is not valid JSON, is not an
+object, or is missing a required field.
+
+**A low `confidence` is explicitly NOT a failure.** The orchestrator has no
+confidence threshold: an unsure but well-formed Gemini verdict is legitimate
+data and is passed straight through to the text stage, which simply hedges its
+wording. MobileNetV2 is never consulted because a score was low.
+
+Every response carries `analysisSource` (`"gemini"` | `"mobilenet"` | `null`)
+and `textSource` (`"huggingface"` | `"gemini_fallback"` | `null`) for logging
+and analytics; the user only ever sees the final `reply`. The same
+information is logged server-side, with a final `[Orchestrator]` line
+summarising the whole route.
+
+Gemini key pool: `GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered
+`GEMINI_API_KEY_N` — rotated on 429 / RESOURCE_EXHAUSTED / quota. The
+CodeCraft gateway and its `CODECRAFT_*` environment variables are gone;
+leftover values are ignored.
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
 
