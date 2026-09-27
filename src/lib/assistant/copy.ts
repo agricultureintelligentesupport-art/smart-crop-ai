@@ -78,7 +78,7 @@ const AR: AssistantCopy = {
     { label: "وقاية من الآفات 🛡️", message: "كيف أحمي محصولي من الآفات والأمراض الشائعة في ولايتي هذا الموسم؟" },
   ],
   composer: {
-    placeholder: "اكتب سؤالك… أو أرفق صورة ورقة النبتة",
+    placeholder: "اكتب سؤالك…",
     send: "إرسال",
     attach: "إرفاق صورة",
     removeImage: "إزالة الصورة",
