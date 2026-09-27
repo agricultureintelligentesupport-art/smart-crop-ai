@@ -5,8 +5,8 @@ import type { ReactNode } from "react";
 import { EASE_OUT, GPU, SPRING } from "@/components/auth/ui";
 
 /**
- * Custom PhytoScan AI brand mark: botanical leaf intersected by a diagnostic
- * scan beam and corner viewfinder reticles.
+ * Custom PhytoScan AI brand mark: a botanical P monogram with a leaf-shaped
+ * counter and a quietly animated central vein.
  */
 export function PhytoScanLogo({
   size = 20,
@@ -30,16 +30,77 @@ export function PhytoScanLogo({
       className={className}
       aria-hidden="true"
     >
-      {/* Viewfinder corner brackets */}
-      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
-      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
-      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
-      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
-      {/* Diagonal botanical leaf with central vein */}
-      <path d="M8 16.5c-1-3 1.5-6.8 8.5-8.5-1 7-4.8 9.5-8.5 8.5z" />
-      <path d="M8 16.5c2-2 4.5-4 7-6" />
-      {/* Laser scan beam */}
-      <line x1="2" y1="12" x2="22" y2="12" strokeDasharray="2 2" opacity="0.9" />
+      <style>{`
+        .phyto-logo__vein {
+          stroke-dasharray: 7.2;
+          stroke-dashoffset: 7.2;
+          opacity: 0.18;
+          animation: phyto-logo-vein-draw 4.2s ease-in-out infinite;
+        }
+
+        .phyto-logo__glint {
+          opacity: 0;
+          animation: phyto-logo-glint 5.8s ease-in-out infinite;
+        }
+
+        @keyframes phyto-logo-vein-draw {
+          0%, 32%, 100% {
+            stroke-dashoffset: 7.2;
+            opacity: 0.18;
+          }
+          12%, 21% {
+            stroke-dashoffset: 0;
+            opacity: 0.96;
+          }
+        }
+
+        @keyframes phyto-logo-glint {
+          0%, 64%, 100% { opacity: 0; }
+          70% { opacity: 0.95; }
+          74% { opacity: 0.35; }
+          78% { opacity: 0; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .phyto-logo__vein {
+            animation: none !important;
+            stroke-dashoffset: 0;
+            opacity: 0.9;
+          }
+
+          .phyto-logo__glint {
+            animation: none !important;
+            opacity: 0.8;
+          }
+        }
+      `}</style>
+      {/* The outer P-shaped stroke keeps the monogram bold at small sizes. */}
+      <path d="M5.5 20.5V5.4a2.1 2.1 0 0 1 2.1-2.1h5.1c3.8 0 5.9 1.85 5.9 4.8s-2.1 4.8-5.9 4.8H5.5" />
+      {/* Soft leaf silhouette in the counter; the animated stroke is its vein. */}
+      <path
+        d="M8.45 10.55C9.65 7.9 11.85 6.6 15.2 6.4c-.15 2.95-1.6 5-4 5.65-1.1.3-2.2-.18-2.75-1.2Z"
+        fill="currentColor"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeOpacity="0.72"
+        strokeWidth={Math.max(1, strokeWidth * 0.58)}
+      />
+      <path
+        className="phyto-logo__vein"
+        d="M9.1 10.8c1.5-1.6 3.35-3.05 5.45-3.95"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={Math.max(1.05, strokeWidth * 0.56)}
+        strokeDasharray={7.2}
+        strokeDashoffset={7.2}
+      />
+      {/* A restrained four-point sparkle, kept tiny in the header mark. */}
+      <path
+        className="phyto-logo__glint"
+        d="M18.1 2.25c.12.7.34.92 1.04 1.04-.7.12-.92.34-1.04 1.04-.12-.7-.34-.92-1.04-1.04.7-.12.92-.34 1.04-1.04Z"
+        fill="currentColor"
+        stroke="none"
+      />
     </svg>
   );
 }
@@ -150,13 +211,9 @@ export function EmptyHero({ greeting, intro }: { greeting: ReactNode; intro: Rea
       <div className="relative mb-4 inline-grid place-items-center">
         <span aria-hidden className="chat-orb-ring" />
         <span className="chat-orb grid h-16 w-16 place-items-center rounded-full text-white">
-          <motion.span
-            animate={reduce ? undefined : { rotate: [0, 10, -6, 0], scale: [1, 1.06, 1] }}
-            transition={{ duration: 4.2, repeat: Infinity, ease: "easeInOut", repeatDelay: 1.4 }}
-            className="grid"
-          >
+          <span className="grid">
             <PhytoScanLogo size={30} strokeWidth={2.2} aria-hidden />
-          </motion.span>
+          </span>
         </span>
       </div>
 
