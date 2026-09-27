@@ -1,9 +1,48 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Bot, Sparkles } from "lucide-react";
 import type { ReactNode } from "react";
 import { EASE_OUT, GPU, SPRING } from "@/components/auth/ui";
+
+/**
+ * Custom PhytoScan AI brand mark: botanical leaf intersected by a diagnostic
+ * scan beam and corner viewfinder reticles.
+ */
+export function PhytoScanLogo({
+  size = 20,
+  strokeWidth = 2.2,
+  className = "",
+}: {
+  size?: number;
+  strokeWidth?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      {/* Viewfinder corner brackets */}
+      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+      {/* Diagonal botanical leaf with central vein */}
+      <path d="M8 16.5c-1-3 1.5-6.8 8.5-8.5-1 7-4.8 9.5-8.5 8.5z" />
+      <path d="M8 16.5c2-2 4.5-4 7-6" />
+      {/* Laser scan beam */}
+      <line x1="2" y1="12" x2="22" y2="12" strokeDasharray="2 2" opacity="0.9" />
+    </svg>
+  );
+}
 
 /**
  * Presentation-only building blocks for the assistant chat screen.
@@ -36,7 +75,7 @@ export function AssistantAvatar({ live = false, size = 30 }: { live?: boolean; s
       className={`chat-avatar ${live ? "chat-avatar-live" : ""} relative grid shrink-0 place-items-center rounded-full text-white`}
       style={{ width: size, height: size }}
     >
-      <Bot size={Math.round(size * 0.53)} strokeWidth={2.5} />
+      <PhytoScanLogo size={Math.round(size * 0.58)} strokeWidth={2.3} />
     </span>
   );
 }
@@ -112,11 +151,11 @@ export function EmptyHero({ greeting, intro }: { greeting: ReactNode; intro: Rea
         <span aria-hidden className="chat-orb-ring" />
         <span className="chat-orb grid h-16 w-16 place-items-center rounded-full text-white">
           <motion.span
-            animate={reduce ? undefined : { rotate: [0, 12, -8, 0], scale: [1, 1.08, 1] }}
+            animate={reduce ? undefined : { rotate: [0, 10, -6, 0], scale: [1, 1.06, 1] }}
             transition={{ duration: 4.2, repeat: Infinity, ease: "easeInOut", repeatDelay: 1.4 }}
             className="grid"
           >
-            <Sparkles size={26} strokeWidth={2.2} aria-hidden />
+            <PhytoScanLogo size={30} strokeWidth={2.2} aria-hidden />
           </motion.span>
         </span>
       </div>

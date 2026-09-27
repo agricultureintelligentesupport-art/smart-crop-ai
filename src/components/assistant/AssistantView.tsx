@@ -8,7 +8,6 @@ import {
   useScroll,
 } from "framer-motion";
 import {
-  Bot,
   ImagePlus,
   LoaderCircle,
   RotateCcw,
@@ -30,7 +29,6 @@ import {
 import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
-import LanguageSwitch from "@/components/auth/LanguageSwitch";
 import { EASE_OUT, FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
@@ -47,7 +45,7 @@ import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { APP_SHELL } from "@/lib/app/copy";
 import { useLang } from "@/lib/use-lang";
-import { AssistantAvatar, EmptyHero, POP, TypingIndicator, bubbleVariants } from "./ChatParts";
+import { AssistantAvatar, EmptyHero, PhytoScanLogo, POP, TypingIndicator, bubbleVariants } from "./ChatParts";
 import DiagnosisCard from "./DiagnosisCard";
 import Markdown from "./Markdown";
 import "./assistant.css";
@@ -128,7 +126,7 @@ async function prepareImage(file: File): Promise<PendingImage> {
 
 export default function AssistantView() {
   const router = useRouter();
-  const { lang, setLang } = useLang("ar");
+  const { lang } = useLang("ar");
   const t = ASSISTANT[lang];
   const shell = APP_SHELL[lang];
   const { profile, ready } = useProfile();
@@ -371,18 +369,9 @@ export default function AssistantView() {
         elevated={elevated}
         leading={
           <AppBarBrand
-            icon={<Bot size={17} strokeWidth={2.4} className="text-white" aria-hidden />}
+            icon={<PhytoScanLogo size={18} strokeWidth={2.4} className="text-white" aria-hidden />}
             title={t.header.title}
             subtitle={t.header.subtitle}
-          />
-        }
-        trailing={
-          <LanguageSwitch
-            lang={lang}
-            onChange={setLang}
-            ariaLabel={lang === "ar" ? "اختيار اللغة" : "Choix de la langue"}
-            labels={{ ar: t.header.langAr, fr: t.header.langFr }}
-            layoutId="assistant-lang-thumb"
           />
         }
       />
