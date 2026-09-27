@@ -97,15 +97,16 @@ function parseBlocks(markdown: string): Block[] {
 export default function Markdown({ text }: { text: string }) {
   const blocks = parseBlocks(text);
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-3 text-emerald-950">
       {blocks.map((block, i) => {
         switch (block.kind) {
           case "h2":
             return (
               <h3
                 key={i}
-                className="mt-1 flex items-center gap-1.5 text-[14px] font-black leading-6 text-emerald-900"
+                className="mt-1.5 flex items-center gap-2 text-[14.5px] font-black leading-6 tracking-tight text-emerald-900 first:mt-0"
               >
+                <span aria-hidden className="h-4 w-1 shrink-0 rounded-full bg-gradient-to-b from-emerald-400 to-emerald-600" />
                 {renderInline(block.text, `h2-${i}`)}
               </h3>
             );
@@ -120,7 +121,7 @@ export default function Markdown({ text }: { text: string }) {
               <ul key={i} className="space-y-1.5">
                 {block.items.map((item, j) => (
                   <li key={j} className="flex gap-2 text-[13px] font-semibold leading-6">
-                    <span aria-hidden className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                    <span aria-hidden className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-[0_0_6px_rgba(16,185,129,0.6)]" />
                     <span className="min-w-0">{renderInline(item, `ul-${i}-${j}`)}</span>
                   </li>
                 ))}
@@ -133,7 +134,7 @@ export default function Markdown({ text }: { text: string }) {
                   <li key={j} className="flex gap-2 text-[13px] font-semibold leading-6">
                     <span
                       aria-hidden
-                      className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-100 text-[10.5px] font-black text-emerald-800"
+                      className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-100 to-emerald-200/80 text-[10.5px] font-black text-emerald-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"
                     >
                       {j + 1}
                     </span>
@@ -146,7 +147,7 @@ export default function Markdown({ text }: { text: string }) {
             return (
               <p
                 key={i}
-                className="rounded-xl border-s-4 border-amber-400 bg-amber-50/80 px-3 py-2 text-[12.5px] font-semibold leading-6 text-amber-900"
+                className="rounded-xl border-s-4 border-amber-400 bg-gradient-to-br from-amber-50 to-orange-50/60 px-3 py-2 text-[12.5px] font-semibold leading-6 text-amber-900 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]"
               >
                 {renderInline(block.text, `q-${i}`)}
               </p>

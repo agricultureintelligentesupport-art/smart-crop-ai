@@ -1,14 +1,21 @@
 "use client";
 
-import { AnimatePresence, motion, useMotionValueEvent, useScroll } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useMotionValueEvent,
+  useReducedMotion,
+  useScroll,
+} from "framer-motion";
 import {
   Bot,
   ImagePlus,
   LoaderCircle,
+  RotateCcw,
   ScanSearch,
   Scissors,
   Send,
-  Sparkles,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -24,7 +31,7 @@ import AppBar, { AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
 import LanguageSwitch from "@/components/auth/LanguageSwitch";
-import { EASE_OUT, FOCUS_RING, GPU } from "@/components/auth/ui";
+import { EASE_OUT, FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
 import type {
@@ -39,8 +46,10 @@ import { guestDisplayName, useGuest } from "@/lib/auth/guest";
 import { CROPS, getWilaya, wilayaName, type CropKey } from "@/lib/wilayas";
 import { APP_SHELL } from "@/lib/app/copy";
 import { useLang } from "@/lib/use-lang";
+import { AssistantAvatar, EmptyHero, POP, TypingIndicator, bubbleVariants } from "./ChatParts";
 import DiagnosisCard from "./DiagnosisCard";
 import Markdown from "./Markdown";
+import "./assistant.css";
 
 /* ------------------------------------------------------------------ */
 /*  Local chat model                                                   */
@@ -341,6 +350,8 @@ export default function AssistantView() {
 
   const canSend = (draft.trim().length > 0 || pendingImage !== null) && !busy;
   const emptyChat = messages.length === 0;
+  /** Presentation only: collapses entrance motion for users who ask for less. */
+  const reduceMotion = useReducedMotion();
 
   return (
     <div
@@ -378,176 +389,227 @@ export default function AssistantView() {
         className="scroll-area scroll-pad-top relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
         aria-live="polite"
       >
-        <div className={`${SHELL_COLUMN} flex flex-col gap-3 px-4 pb-4 pt-2`}>
-          {emptyChat && (
-            <motion.section
-              initial={{ opacity: 0, y: 14 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.45, ease: EASE_OUT }}
-              className={`app-surface ${GPU} mt-4 p-5 sm:mt-8 sm:p-6`}
-            >
-              <span className="mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 shadow-[0_0_28px_rgba(16,185,129,0.45)]">
-                <Sparkles size={24} strokeWidth={2.2} className="text-white" aria-hidden />
-              </span>
-              <h1 className="text-[19px] font-black leading-7 text-emerald-950">{t.hero.greeting}</h1>
-              <p className="mt-1.5 max-w-[52ch] text-[13px] font-semibold leading-6 text-emerald-900/70">
-                {t.hero.intro}
-              </p>
-            </motion.section>
-          )}
+        <div className={`${SHELL_COLUMN} flex flex-col gap-4 px-4 pb-12 pt-3`}>
+          {emptyChat && <EmptyHero greeting={t.hero.greeting} intro={t.hero.intro} />}
 
           <AnimatePresence initial={false}>
-            {messages.map((msg) => (
-              <motion.div
-                key={msg.id}
-                initial={{ opacity: 0, y: 12, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ duration: 0.32, ease: EASE_OUT }}
-                className={`${GPU} flex ${msg.author === "user" ? "justify-start flex-row-reverse" : "justify-start"}`}
-              >
-                <div
-                  className={`max-w-[92%] sm:max-w-[78%] ${
-                    msg.author === "user"
-                      ? "rounded-3xl rounded-es-lg bg-gradient-to-br from-emerald-500 to-green-600 px-4 py-3 text-white shadow-[0_10px_28px_rgba(16,185,129,0.32)]"
-                      : "app-surface rounded-[1.35rem] rounded-ss-lg px-4 py-3.5"
+            {messages.map((msg) => {
+              const isUser = msg.author === "user";
+              return (
+                <motion.div
+                  key={msg.id}
+                  variants={bubbleVariants}
+                  initial="hidden"
+                  animate="show"
+                  exit="exit"
+                  transition={reduceMotion ? { duration: 0 } : SPRING}
+                  className={`${GPU} flex items-end gap-2.5 ${
+                    isUser
+                      ? "justify-end origin-bottom-right rtl:origin-bottom-left"
+                      : "justify-start origin-bottom-left rtl:origin-bottom-right"
                   }`}
                 >
-                  {msg.author === "assistant" && (
-                    <p className="mb-1.5 flex items-center gap-1.5 text-[10px] font-black text-emerald-700/70">
-                      <Bot size={11} strokeWidth={2.8} aria-hidden />
-                      {t.chat.assistant}
-                    </p>
-                  )}
+                  {!isUser && <AssistantAvatar />}
 
-                  {msg.imageUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element -- local data-URL preview, next/image cannot optimise it
-                    <img
-                      src={msg.imageUrl}
-                      alt={t.composer.imageAlt}
-                      className="mb-2 max-h-56 w-full rounded-2xl object-cover"
-                    />
-                  )}
+                  <div
+                    className={`min-w-0 max-w-[88%] sm:max-w-[76%] ${
+                      isUser
+                        ? "chat-bubble-user px-4 py-3"
+                        : `chat-bubble-assistant px-4 py-3.5 ${msg.error ? "chat-bubble-error" : ""}`
+                    }`}
+                  >
+                    {!isUser && (
+                      <p className="mb-2 flex items-center gap-1.5 text-[10.5px] font-black uppercase tracking-[0.08em] text-emerald-700/70">
+                        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        {t.chat.assistant}
+                      </p>
+                    )}
 
-                  {msg.author === "assistant" && msg.preprocessing?.status === "cropped" && (
-                    <p
-                      className="mb-2 flex items-start gap-1.5 rounded-2xl bg-emerald-50/80 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-800 ring-1 ring-emerald-200/70"
-                      title={msg.preprocessing.detector ?? undefined}
-                    >
-                      <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
-                      {t.chat.cropApplied}
-                    </p>
-                  )}
-                  {msg.author === "assistant" && msg.preprocessing?.status === "no-leaf" && (
-                    <p className="mb-2 flex items-start gap-1.5 rounded-2xl bg-white/70 px-2.5 py-1.5 text-[10px] font-bold leading-4 text-emerald-900/70 ring-1 ring-[#E2F1E8]">
-                      <ScanSearch size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
-                      {t.chat.cropNotFound}
-                    </p>
-                  )}
+                    {msg.imageUrl && (
+                      <motion.div
+                        initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ delay: 0.08, duration: 0.4, ease: EASE_OUT }}
+                        className="chat-image mb-2.5 overflow-hidden rounded-2xl"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element -- local data-URL preview, next/image cannot optimise it */}
+                        <img
+                          src={msg.imageUrl}
+                          alt={t.composer.imageAlt}
+                          className="max-h-60 w-full object-cover"
+                        />
+                      </motion.div>
+                    )}
 
-                  {msg.diagnosis && (
-                    <div className="mb-3">
-                      <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
+                    <div className={!isUser && !msg.error ? "chat-reveal" : undefined}>
+                      {!isUser && msg.preprocessing?.status === "cropped" && (
+                        <p
+                          className="chat-note mb-2.5 flex items-start gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-emerald-800"
+                          title={msg.preprocessing.detector ?? undefined}
+                        >
+                          <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
+                          {t.chat.cropApplied}
+                        </p>
+                      )}
+                      {!isUser && msg.preprocessing?.status === "no-leaf" && (
+                        <p className="chat-note-muted mb-2.5 flex items-start gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-emerald-900/70">
+                          <ScanSearch size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
+                          {t.chat.cropNotFound}
+                        </p>
+                      )}
+
+                      {msg.diagnosis && (
+                        <div className="mb-3">
+                          <DiagnosisCard diagnosis={msg.diagnosis} copy={t.diagnosis} />
+                        </div>
+                      )}
+
+                      {!isUser ? (
+                        <Markdown text={msg.text} />
+                      ) : (
+                        msg.text && (
+                          <p className="whitespace-pre-wrap text-[14px] font-bold leading-6 [text-shadow:0_1px_0_rgba(0,0,0,0.08)]">
+                            {msg.text}
+                          </p>
+                        )
+                      )}
+
+                      {msg.source === "direct" && (
+                        <p className="mt-2.5 flex items-start gap-1.5 rounded-xl bg-amber-50 px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-amber-800 ring-1 ring-amber-200/70">
+                          <TriangleAlert size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-amber-500" />
+                          {t.chat.visionOnlyNote}
+                        </p>
+                      )}
+                      {msg.error && (
+                        <motion.button
+                          type="button"
+                          whileHover={{ y: -1 }}
+                          whileTap={{ scale: 0.96 }}
+                          transition={POP}
+                          onClick={retryLast}
+                          className={`mt-3 inline-flex items-center gap-1.5 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-700 px-3.5 py-2 text-[11.5px] font-black text-white shadow-[0_10px_22px_-12px_rgba(5,150,105,0.9)] ${FOCUS_RING}`}
+                        >
+                          <RotateCcw size={12} strokeWidth={2.8} aria-hidden />
+                          {t.chat.retry}
+                        </motion.button>
+                      )}
                     </div>
-                  )}
-
-                  {msg.author === "assistant" ? (
-                    <Markdown text={msg.text} />
-                  ) : (
-                    msg.text && (
-                      <p className="whitespace-pre-wrap text-[13.5px] font-bold leading-6">{msg.text}</p>
-                    )
-                  )}
-
-                  {msg.source === "direct" && (
-                    <p className="mt-2 text-[10px] font-bold text-amber-700/80">⚠️ {t.chat.visionOnlyNote}</p>
-                  )}
-                  {msg.error && (
-                    <button
-                      type="button"
-                      onClick={retryLast}
-                      className={`mt-2 rounded-xl bg-emerald-100 px-3 py-1.5 text-[11px] font-black text-emerald-800 transition-colors hover:bg-emerald-200 ${FOCUS_RING}`}
-                    >
-                      {t.chat.retry}
-                    </button>
-                  )}
-                </div>
-              </motion.div>
-            ))}
+                  </div>
+                </motion.div>
+              );
+            })}
           </AnimatePresence>
 
-          {busy && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={`${GPU} flex justify-start`}
-            >
-              <div className="app-surface flex items-center gap-2.5 rounded-[1.35rem] rounded-ss-lg px-4 py-3">
-                <LoaderCircle size={15} strokeWidth={2.6} className="animate-spin text-emerald-600" aria-hidden />
-                <span className="text-[12px] font-bold text-emerald-900/70">
-                  {busyWithImage
+          <AnimatePresence>
+            {busy && (
+              <TypingIndicator
+                key="typing"
+                label={
+                  busyWithImage
                     ? visionPhase === 0
                       ? t.chat.thinkingDetect
                       : t.chat.thinkingVision
-                    : t.chat.thinking}
-                </span>
-              </div>
-            </motion.div>
-          )}
+                    : t.chat.thinking
+                }
+              />
+            )}
+          </AnimatePresence>
         </div>
       </main>
 
       {/* Composer */}
       <footer className={`${SHELL_COLUMN} relative z-20 shrink-0 px-4 pb-[calc(var(--app-tab-h)+0.75rem+env(safe-area-inset-bottom,0px))]`}>
+        <span aria-hidden className="chat-composer-fade" />
+
         {/* Quick-action chips */}
-        <div className="scroll-area mb-2 flex gap-1.5 overflow-x-auto pb-0.5">
-          {t.chips.map((chip) => (
-            <button
+        <div className="scroll-area no-scrollbar -mx-4 mb-2.5 flex gap-2 overflow-x-auto px-4 pb-1 pt-1">
+          {t.chips.map((chip, i) => (
+            <motion.button
               key={chip.label}
               type="button"
               disabled={busy}
               onClick={() => onChip(chip)}
-              className={`app-surface ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-4 py-2.5 text-[12px] font-black text-emerald-800 transition-colors hover:border-emerald-300 disabled:opacity-50`}
+              initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 * i, duration: 0.35, ease: EASE_OUT }}
+              whileTap={busy ? undefined : { scale: 0.95 }}
+              className={`chat-chip ${GPU} ${FOCUS_RING} shrink-0 whitespace-nowrap rounded-full px-4 py-2.5 text-[12px] font-black disabled:opacity-50`}
             >
               {chip.label}
-            </button>
+            </motion.button>
           ))}
         </div>
 
-        <div className="app-surface p-2">
+        <div className="chat-composer p-2">
           <AnimatePresence>
             {pendingImage && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.24, ease: EASE_OUT }}
+                transition={{ duration: 0.28, ease: EASE_OUT }}
                 className="overflow-hidden"
               >
-                <div className="relative m-1 mb-2 w-fit">
-                  {/* eslint-disable-next-line @next/next/no-img-element -- local data-URL preview */}
-                  <img
-                    src={pendingImage.previewUrl}
-                    alt={t.composer.imageAlt}
-                    className="h-24 w-24 rounded-2xl object-cover ring-2 ring-emerald-200"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPendingImage(null)}
-                    aria-label={t.composer.removeImage}
-                    className={`absolute -end-2 -top-2 grid h-7 w-7 place-items-center rounded-full bg-emerald-900 text-white shadow-md transition-colors hover:bg-emerald-700 ${FOCUS_RING}`}
+                <div className="flex items-center gap-3 px-1.5 pb-2.5 pt-1.5">
+                  <motion.div
+                    initial={reduceMotion ? false : { scale: 0.7, opacity: 0, rotate: -4 }}
+                    animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                    transition={POP}
+                    className="relative w-fit shrink-0"
                   >
-                    <X size={13} strokeWidth={3} aria-hidden />
-                  </button>
+                    {/* eslint-disable-next-line @next/next/no-img-element -- local data-URL preview */}
+                    <img
+                      src={pendingImage.previewUrl}
+                      alt={t.composer.imageAlt}
+                      className="chat-thumb h-[76px] w-[76px] rounded-2xl object-cover"
+                    />
+                    <span
+                      aria-hidden
+                      className="absolute -bottom-1.5 -start-1.5 grid h-6 w-6 place-items-center rounded-full bg-white text-emerald-600 shadow-md ring-1 ring-emerald-100"
+                    >
+                      <ImagePlus size={12} strokeWidth={2.8} />
+                    </span>
+                    <motion.button
+                      type="button"
+                      onClick={() => setPendingImage(null)}
+                      aria-label={t.composer.removeImage}
+                      initial={reduceMotion ? false : { scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ ...POP, delay: 0.12 }}
+                      whileHover={{ scale: 1.08 }}
+                      whileTap={{ scale: 0.9 }}
+                      className={`absolute -end-2 -top-2 grid h-7 w-7 place-items-center rounded-full bg-emerald-950 text-white shadow-[0_6px_14px_-4px_rgba(4,47,46,0.7)] transition-colors hover:bg-emerald-800 ${FOCUS_RING}`}
+                    >
+                      <X size={13} strokeWidth={3} aria-hidden />
+                    </motion.button>
+                  </motion.div>
+                  <motion.p
+                    initial={reduceMotion ? false : { opacity: 0, x: -6 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.1, duration: 0.3, ease: EASE_OUT }}
+                    className="min-w-0 text-[11.5px] font-bold leading-5 text-emerald-900/60"
+                  >
+                    {t.composer.imageAlt}
+                  </motion.p>
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
 
-          {composerError && (
-            <p role="alert" className="mx-2 mb-1.5 text-[11px] font-bold text-orange-600">
-              {composerError}
-            </p>
-          )}
+          <AnimatePresence>
+            {composerError && (
+              <motion.p
+                role="alert"
+                initial={{ opacity: 0, y: -4, height: 0 }}
+                animate={{ opacity: 1, y: 0, height: "auto" }}
+                exit={{ opacity: 0, y: -4, height: 0 }}
+                transition={{ duration: 0.22, ease: EASE_OUT }}
+                className="mx-2 overflow-hidden text-[11px] font-bold text-orange-600"
+              >
+                <span className="block pb-1.5">{composerError}</span>
+              </motion.p>
+            )}
+          </AnimatePresence>
 
           <div className="flex items-end gap-1.5">
             <input
@@ -557,15 +619,20 @@ export default function AssistantView() {
               className="hidden"
               onChange={(e) => void onPickFile(e)}
             />
-            <button
+            <motion.button
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label={t.composer.attach}
               disabled={busy}
-              className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 transition-colors hover:bg-emerald-100 disabled:opacity-50 ${FOCUS_RING}`}
+              whileHover={busy ? undefined : { scale: 1.04 }}
+              whileTap={busy ? undefined : { scale: 0.92 }}
+              transition={POP}
+              className={`chat-attach ${GPU} ${FOCUS_RING} grid h-11 w-11 shrink-0 place-items-center rounded-full disabled:opacity-50 ${
+                pendingImage ? "chat-attach-filled" : ""
+              }`}
             >
               <ImagePlus size={17} strokeWidth={2.4} aria-hidden />
-            </button>
+            </motion.button>
 
             <textarea
               ref={textareaRef}
@@ -575,22 +642,51 @@ export default function AssistantView() {
               placeholder={t.composer.placeholder}
               rows={1}
               disabled={busy}
-              className="max-h-32 min-h-[44px] flex-1 resize-none bg-transparent px-2 py-2.5 text-[13.5px] font-bold leading-6 text-emerald-950 outline-none placeholder:text-emerald-900/40 disabled:opacity-60"
+              className="max-h-32 min-h-[44px] flex-1 resize-none bg-transparent px-2.5 py-2.5 text-[14px] font-bold leading-6 text-emerald-950 outline-none transition-opacity placeholder:text-emerald-900/40 disabled:opacity-60"
             />
 
             <motion.button
               type="button"
-              whileTap={canSend ? { scale: 0.92 } : undefined}
+              whileHover={canSend ? { scale: 1.04 } : undefined}
+              whileTap={canSend ? { scale: 0.9 } : undefined}
+              transition={POP}
               onClick={() => void send(draft, pendingImage)}
               disabled={!canSend}
               aria-label={t.composer.send}
-              className={`glow-emerald ${GPU} ${FOCUS_RING} grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-500 via-emerald-500 to-green-600 text-white transition-all hover:from-emerald-400 hover:to-green-500 disabled:cursor-not-allowed disabled:opacity-45`}
+              className={`chat-send ${GPU} ${FOCUS_RING} relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-full disabled:cursor-not-allowed ${
+                canSend ? "chat-send-armed" : ""
+              }`}
             >
-              {busy ? (
-                <LoaderCircle size={17} strokeWidth={2.6} className="animate-spin" aria-hidden />
-              ) : (
-                <Send size={16} strokeWidth={2.5} className={lang === "ar" ? "-scale-x-100" : ""} aria-hidden />
-              )}
+              <AnimatePresence mode="wait" initial={false}>
+                {busy ? (
+                  <motion.span
+                    key="busy"
+                    initial={{ opacity: 0, scale: 0.6 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.6 }}
+                    transition={{ duration: 0.18, ease: EASE_OUT }}
+                    className="grid"
+                  >
+                    <LoaderCircle size={17} strokeWidth={2.6} className="animate-spin text-emerald-700" aria-hidden />
+                  </motion.span>
+                ) : (
+                  <motion.span
+                    key="send"
+                    initial={{ opacity: 0, scale: 0.6, rotate: lang === "ar" ? 20 : -20 }}
+                    animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                    exit={{ opacity: 0, scale: 0.6 }}
+                    transition={POP}
+                    className="grid"
+                  >
+                    <Send
+                      size={16}
+                      strokeWidth={2.5}
+                      className={`${lang === "ar" ? "-scale-x-100" : ""} ${canSend ? "-translate-y-px translate-x-px" : ""}`}
+                      aria-hidden
+                    />
+                  </motion.span>
+                )}
+              </AnimatePresence>
             </motion.button>
           </div>
         </div>
