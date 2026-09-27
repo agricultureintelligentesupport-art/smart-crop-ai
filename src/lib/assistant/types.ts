@@ -1,10 +1,10 @@
 /**
  * Shared contracts between the assistant UI (`/assistant`) and the
  * fail-proof orchestrator behind `/api/assistant`:
- *   Step 1  image analysis — Gemini (`gemini-3.6`, PRIMARY) → MobileNetV2
+ *   Step 1  image analysis — Gemini (`gemini-3.8-flash`, PRIMARY) → MobileNetV2
  *           PlantVillage on Hugging Face (FALLBACK),
  *   Step 2  Hugging Face LLM chain (primary text model),
- *   Step 3  Google Gemini (`gemini-3.6`, format-only text fallback),
+ *   Step 3  Google Gemini (`gemini-3.8-flash`, format-only text fallback),
  *   Step 4  built-in TypeScript direct formatters (never fails).
  *
  * The inter-stage payload exchanged by the image and text stages is
@@ -84,7 +84,7 @@ export interface DiagnosisCandidate {
 
 /**
  * Which vision engine produced a {@link AssistantDiagnosis}.
- *   • `gemini-vision`     — Gemini (`gemini-3.6`) image analysis, the
+ *   • `gemini-vision`     — Gemini (`gemini-3.8-flash`) image analysis, the
  *     PRIMARY image model of the orchestrator;
  *   • `plantvillage-hf`   — Hugging Face MobileNetV2 PlantVillage classifier,
  *     the FALLBACK image model, reached only when Gemini's analysis failed.
@@ -137,7 +137,7 @@ export type AssistantSource =
   | "hybrid"
   /**
    * Text-model reasoning only (no image analysis) — the Hugging Face chain
-   * when it answers, otherwise the Gemini (`gemini-3.6`) fallback.
+   * when it answers, otherwise the Gemini (`gemini-3.8-flash`) fallback.
    */
   | "llm"
   /**

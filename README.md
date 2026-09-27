@@ -166,8 +166,9 @@ photo (base64)
   │    scene and gets the untouched photo.
   │
   ├─ Step 1 · IMAGE ANALYSIS
-  │    PRIMARY   — Google Gemini (gemini-3.6 → 2.5-flash → 2.0-flash-exp on a
-  │      retired-id 404, overridable with GEMINI_MODEL) inspects the photo and
+  │    PRIMARY   — Google Gemini (gemini-3.8-flash → 3.5-flash →
+  │      3.5-flash-lite on a retired-id 404, overridable with GEMINI_MODEL)
+  │      inspects the photo and
   │      is pinned by `responseMimeType: "application/json"` + a
   │      `responseSchema` to answer with a structured AnalysisData object:
   │      { plant_type, disease_detected, disease_name, confidence,
@@ -198,6 +199,56 @@ photo (base64)
        answers 200 from the analysis (direct diagnosis card) or with a
        greeting-aware basic-mode reply for a text-only question.
 ```
+
+### The Gemini model chain
+
+Every Gemini model id in the repo comes from a single definition:
+`src/lib/assistant/gemini-models.ts`. The route, the daily-task generator and
+the `check:models` CLI all import it, so a fix applied in one place cannot be
+missed in another.
+
+| Role | Model id | Why |
+| --- | --- | --- |
+| Primary | `gemini-3.8-flash` | Current stable Flash with vision support |
+| Fallback 1 | `gemini-3.5-flash` | Supported until at least 2027-05-19 |
+| Fallback 2 | `gemini-3.5-flash-lite` | Supported until at least 2027-07-21 |
+
+The mix is deliberate. Google designates the 3.6/3.7/3.8 Flash ids as
+*short-availability* models that rotate, and the `latest` aliases move with
+them, so a chain built only from those can 404 in full at once — which is
+exactly how this orchestrator ended up answering every photo from MobileNetV2.
+At least one long-lived id is always in the chain.
+
+Ids excluded on purpose: `gemini-2.0-flash*` (shut down 2026-06-01),
+`gemini-2.5-flash` (refused for new API keys) and `gemini-3.6` — a bare
+`gemini-3.6` was never a real id; the real one is `gemini-3.6-flash`.
+`test/unit/gemini-models.unit.test.ts` fails if any of them reappear.
+
+### Verifying the chain
+
+```bash
+npm run check:models                 # human-readable
+npm run check:models -- --json      # machine-readable, for CI
+```
+
+It calls `GET /v1beta/models` with your first `GEMINI_API_KEY*`, compares the
+live catalog against the configured chain, and exits `0` when every id is
+present, `1` when one is missing or the catalog could not be reached. The same
+check runs automatically inside the server — once per process, on a 6-hour TTL —
+and logs a single `[Gemini Health]` verdict. Ids it proves unavailable are then
+dropped from the request chain, so a retired id costs no round-trip and never
+reaches a photo as a silent MobileNetV2 downgrade.
+
+```bash
+[Gemini Health] ✅ chain gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite — 3/3 configured model ids are live.
+[Gemini Health] ❌ 1 of 3 configured model ids are NOT available: gemini-3.8-flash.
+[Gemini Health]   set GEMINI_MODEL=gemini-3.7-flash (or update GEMINI_FALLBACK_MODELS in src/lib/assistant/gemini-models.ts).
+```
+
+Set `GEMINI_MODEL` to pin a different primary; the built-in fallbacks still
+apply, so an override can never brick the stage. A `GEMINI_MODEL` override is
+sent without `thinkingConfig`, since only the bundled ids are known to accept
+`thinkingLevel`.
 
 **What counts as a Gemini Step 1 failure** — and therefore triggers the
 MobileNetV2 fallback: (a) an API/network error or timeout; (b) Gemini refusing

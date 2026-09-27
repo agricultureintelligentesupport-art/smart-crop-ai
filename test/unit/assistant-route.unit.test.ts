@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
-import { dynamic, POST } from "../../src/app/api/assistant/route";
+import { dynamic, geminiModelHealth, POST } from "../../src/app/api/assistant/route";
 
 /** Provider keys used across the suite (values are deliberately padded). */
 const GEMINI_KEY = "test-gemini";
@@ -27,9 +27,9 @@ const GEMINI_TIMEOUT_MS = 18_000;
  * ids walked when a generation is retired.
  */
 const GEMINI_FALLBACK_ORDER = [
-  "gemini-3.6",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash-exp",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
 ] as const;
 
 /**
@@ -56,6 +56,11 @@ beforeEach(() => {
   for (const name of Object.keys(process.env)) {
     if (SCRUBBED_ENV_PATTERN.test(name)) delete process.env[name];
   }
+  // The health verdict is cached per process for 6 h. Each test starts from a
+  // known-clean verdict so an earlier test's dead-id set cannot leak forward;
+  // the health-check tests below `reset()` to force a real ListModels call.
+  geminiModelHealth.reset();
+  geminiModelHealth.markVerified();
   // No test may accidentally call a paid provider.
   mock.method(globalThis, "fetch", async () => {
     throw new Error("Unexpected upstream request");
@@ -102,6 +107,41 @@ function configureKeys({ gemini = true, huggingface = true } = {}) {
 const isGeminiUrl = (url: string) =>
   url.startsWith("https://generativelanguage.googleapis.com/v1beta/models/") &&
   url.includes(":generateContent?key=");
+
+/**
+ * The health check's `GET /v1beta/models` catalog call — issued once per
+ * process (TTL-bounded) before the first Gemini round-trip, so a retired
+ * model id is reported before it is used.
+ */
+const isListModelsUrl = (url: string) =>
+  url.startsWith("https://generativelanguage.googleapis.com/v1beta/models?") &&
+  url.includes("pageSize=");
+
+/** Mirrors a ListModels payload; `ids` are exposed as generateContent-capable. */
+const listModelsReply = (ids: string[]) =>
+  Response.json({
+    models: ids.map((id) => ({
+      name: `models/${id}`,
+      supportedGenerationMethods: ["generateContent", "countTokens"],
+    })),
+  });
+
+/**
+ * Capture what the route writes to the console so a health verdict can be
+ * asserted on. `mock.restoreAll()` in `afterEach` puts the real methods back.
+ */
+function captureConsole() {
+  const lines: string[] = [];
+  for (const level of ["log", "error", "warn"] as const) {
+    mock.method(console, level, (...args: unknown[]) => {
+      lines.push(args.map((arg) => String(arg)).join(" "));
+    });
+  }
+  return {
+    all: () => lines,
+    find: (needle: string) => lines.find((line) => line.includes(needle)),
+  };
+}
 
 /** The Gemini model id extracted from the generateContent URL. */
 const requestedGeminiModel = (url: string) =>
@@ -420,6 +460,8 @@ test("keys are read per request, not when the route module loads", async () => {
   // token the primary LLM is skipped and the Gemini fallback answers.
   process.env.GEMINI_API_KEY = ` ${GEMINI_KEY} `;
   const upstream = mock.method(globalThis, "fetch", async (url: string) => {
+    // `beforeEach` pre-verifies the chain, so the strict single-URL mock below
+    // still holds: only the generation round-trip reaches fetch.
     assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
     return geminiReply("Water in the morning.");
   });
@@ -434,6 +476,100 @@ test("keys are read per request, not when the route module loads", async () => {
   delete process.env.GEMINI_API_KEY;
   assert.equal((await POST(request())).status, 503);
   assert.equal(upstream.mock.callCount(), 1);
+});
+
+/* ------------------------------------------------------------------ */
+/*  The ListModels health check, exercised through the real route       */
+/* ------------------------------------------------------------------ */
+
+test("a model id the health check proves dead is dropped before the first generateContent", async () => {
+  configureKeys();
+  geminiModelHealth.reset();
+  const asked: string[] = [];
+  const [retiredPrimary, liveFallback] = GEMINI_FALLBACK_ORDER;
+  let listCalls = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    // The production incident, reproduced: the primary is gone from the
+    // catalog, the long-lived fallback is still there.
+    if (isListModelsUrl(target)) {
+      listCalls += 1;
+      return listModelsReply(GEMINI_FALLBACK_ORDER.slice(1));
+    }
+    asked.push(requestedGeminiModel(target) as string);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    return geminiAnalysis();
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+
+  // The dead primary was never attempted: the check prevented a known-404.
+  assert.equal(asked.includes(retiredPrimary as string), false, `asked: ${asked.join(", ")}`);
+  assert.equal(asked[0], liveFallback as string, "the first live id is tried first");
+  assert.equal(listCalls, 1);
+
+  // A second request reuses the verdict (6 h TTL) — no second ListModels call.
+  await POST(request(true));
+  assert.equal(listCalls, 1, "the verdict is cached, not re-queried per request");
+});
+
+test("a full catalog outage is reported but never fails the request", async () => {
+  configureKeys();
+  geminiModelHealth.reset();
+  const captured = captureConsole();
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isListModelsUrl(String(url))) throw new Error("ListModels unreachable");
+    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
+    return geminiAnalysis();
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200, "an unrunnable health check must never 500 a request");
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+
+  // Reported loudly, because "could not verify" is a real deployment signal.
+  const report = captured.all().filter((line) => line.includes("Gemini Health")).join("\n");
+  assert.ok(report, "the verdict must be logged even when it cannot verify");
+  assert.match(report, /could not verify the model chain \(ListModels unreachable\)/);
+  assert.match(report, /check:models/, "it must say how to diagnose the failure");
+});
+
+test("a fully dead chain is logged as a total outage, not silently degraded", async () => {
+  configureKeys();
+  geminiModelHealth.reset();
+  const captured = captureConsole();
+  // Every configured id is retired — the exact shape of the 2026-09 incident,
+  // where all eight keys 404'd and every photo fell through to MobileNetV2.
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    if (isListModelsUrl(target)) return listModelsReply(["gemini-1.0-pro"]);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isDetectUrl(target)) return Response.json([]);
+    if (isGeminiUrl(target)) return new Response("not found", { status: 404 });
+    return mobilenetReply("Tomato___Late_blight", 0.9);
+  });
+
+  const response = await POST(request(true));
+  assert.equal(response.status, 200, "a dead chain degrades, it does not 500");
+  const payload = (await response.json()) as AssistantPayload;
+  // With the chain dead the route cannot use Gemini at all — and this is the
+  // degradation that used to happen SILENTLY on every photo. The log below is
+  // the whole point of the health check.
+  assert.equal(payload.analysisSource, "mobilenet");
+
+  // The report spans several lines; the total-outage verdict is the last one.
+  const report = captured.all().filter((line) => line.includes("Gemini Health")).join("\n");
+  assert.match(report, /3 of 3 configured model ids are NOT available/);
+  assert.match(report, /NO configured id is live/);
+  assert.match(
+    report,
+    /degrade to MobileNetV2/,
+    "it must spell out the consequence that was previously silent",
+  );
 });
 
 /* ------------------------------------------------------------------ */
@@ -482,12 +618,12 @@ test("chain order: Gemini is consulted ONLY after the primary LLM failed", async
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   assert.equal(payload.reply, "إجابة الاحتياط.");
-  // Primary first (503), then the Gemini fallback with gemini-3.6.
+  // Primary first (503), then the Gemini fallback with gemini-3.8-flash.
   assert.equal(urls.length, 2);
   assert.equal(urls[0], HF_ROUTER_CHAT_URL);
   assert.equal(
     urls[1],
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.match(warningText(payload), /Step 2 HF text model unavailable/);
 });
@@ -496,7 +632,7 @@ test("chain order: Gemini is consulted ONLY after the primary LLM failed", async
 /*  Stage 2 — Google Gemini fallback LLM                                */
 /* ------------------------------------------------------------------ */
 
-test("Stage 2 answers from gemini-3.6 with 200 { source: \"llm\" }", async () => {
+test("Stage 2 answers from gemini-3.8-flash with 200 { source: \"llm\" }", async () => {
   // Gemini-only deployment: with no Hugging Face token the primary LLM stage
   // is skipped, so the Gemini fallback is the stage that answers.
   configureKeys({ huggingface: false });
@@ -523,7 +659,7 @@ test("Stage 2 answers from gemini-3.6 with 200 { source: \"llm\" }", async () =>
   const { url, init } = calls[0];
   assert.equal(
     url,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_KEY}`,
   );
   assert.equal(requestedGeminiModel(url), GEMINI_FALLBACK_ORDER[0]);
   assert.equal(requestedGeminiKey(url), GEMINI_KEY);
@@ -539,7 +675,7 @@ test("Stage 2 answers from gemini-3.6 with 200 { source: \"llm\" }", async () =>
   });
 });
 
-test("Stage 2 keeps the gemini-3.6 endpoint when the API key rotates", async () => {
+test("Stage 2 keeps the gemini-3.8-flash endpoint when the API key rotates", async () => {
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     urls.push(String(url));
@@ -558,7 +694,7 @@ test("Stage 2 keeps the gemini-3.6 endpoint when the API key rotates", async () 
     urls,
     keys.map(
       (key) =>
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${key}`,
     ),
   );
 });
@@ -1463,21 +1599,32 @@ test("Stage 2 sends each model generation its own thinking payload (thinkingLeve
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as AssistantPayload).source, "llm");
 
-  // Gemini 3.x: `thinkingLevel: "low"` — the generation reasons by default
-  // and rejects the legacy numeric budget…
-  const flash36 = bodies.get(GEMINI_FALLBACK_ORDER[0]);
-  assert.ok(flash36, `no request body captured for ${GEMINI_FALLBACK_ORDER[0]}`);
-  assert.deepEqual(flash36.generationConfig?.thinkingConfig, { thinkingLevel: "low" });
-  // …Gemini 2.5: numeric zero budget (reasoning skipped, answer-first)…
-  const flash25 = bodies.get("gemini-2.5-flash");
-  assert.ok(flash25, "no request body captured for gemini-2.5-flash");
-  assert.equal(flash25.generationConfig?.thinkingConfig?.thinkingBudget, 0);
-  assert.equal(flash25.generationConfig?.thinkingConfig?.thinkingLevel, undefined);
-  // …Gemini 2.0: NO thinkingConfig at all — the generation predates thinking
-  // and 400s on either parameter shape.
-  const flash20 = bodies.get("gemini-2.0-flash-exp");
-  assert.ok(flash20, "no request body captured for gemini-2.0-flash-exp");
-  assert.equal(flash20.generationConfig?.thinkingConfig, undefined);
+  // Every id in the current chain is a Gemini 3.x generation, which reasons
+  // by default and takes `thinkingLevel: "low"` (the legacy numeric
+  // `thinkingBudget` is rejected on this generation).
+  for (const model of GEMINI_FALLBACK_ORDER) {
+    const body = bodies.get(model);
+    assert.ok(body, `no request body captured for ${model}`);
+    assert.deepEqual(
+      body.generationConfig?.thinkingConfig,
+      { thinkingLevel: "low" },
+      `${model} must be sent thinkingLevel: "low"`,
+    );
+  }
+});
+
+/** A `GEMINI_MODEL` override predates nothing: it gets NO thinkingConfig. */
+test("a pinned GEMINI_MODEL override receives no thinkingConfig", async () => {
+  configureKeys();
+  process.env.GEMINI_MODEL = "gemini-3.7-flash";
+  let body: GeminiRequestBody | undefined;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    body = parseGeminiBody(init);
+    return geminiReply();
+  });
+  assert.equal((await POST(request())).status, 200);
+  assert.equal(body?.generationConfig?.thinkingConfig, undefined);
 });
 
 /* ------------------------------------------------------------------ */
@@ -1486,8 +1633,8 @@ test("Stage 2 sends each model generation its own thinking payload (thinkingLeve
 
 test("GEMINI_MODEL overrides the Stage-2 model id (trimmed, single round-trip)", async () => {
   configureKeys();
-  // Pin an older stable id; the padding proves the value is trimmed.
-  process.env.GEMINI_MODEL = " gemini-2.0-flash-exp ";
+  // Pin a different stable id; the padding proves the value is trimmed.
+  process.env.GEMINI_MODEL = " gemini-3.7-flash ";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     if (isChatUrl(String(url))) return new Response(null, { status: 503 });
@@ -1501,21 +1648,21 @@ test("GEMINI_MODEL overrides the Stage-2 model id (trimmed, single round-trip)",
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
   // Exactly one Gemini round-trip against the override — the default
-  // gemini-3.6 id is skipped and the override is not duplicated as its
+  // gemini-3.8-flash id is skipped and the override is not duplicated as its
   // own fallback.
-  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-2.0-flash-exp"]);
+  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-3.7-flash"]);
 });
 
 test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", async () => {
   configureKeys();
-  process.env.GEMINI_MODEL = "gemini-2.0-flash-exp";
+  process.env.GEMINI_MODEL = "gemini-9.9-flash";
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
     if (isChatUrl(String(url))) return new Response(null, { status: 503 });
     urls.push(String(url));
     if (isGeminiUrl(String(url))) {
       const model = requestedGeminiModel(String(url)) ?? "";
-      return model === "gemini-2.0-flash-exp"
+      return model === "gemini-9.9-flash"
         ? geminiModelNotFound(model)
         : geminiReply("اسقِ في الصباح الباكر.");
     }
@@ -1528,14 +1675,16 @@ test("a GEMINI_MODEL override that 404s walks to the built-in fallback ids", asy
   assert.equal(payload.source, "llm");
   // The retired override 404s → the next fallback id answers (the override
   // is deduplicated out of the fallback list, so no doubled attempt).
+  // The override REPLACES the default primary, so the first fallback walked
+  // is the first built-in one.
   assert.deepEqual(urls.map(requestedGeminiModel), [
-    "gemini-2.0-flash-exp",
-    "gemini-2.5-flash",
+    "gemini-9.9-flash",
+    GEMINI_FALLBACK_ORDER[1],
   ]);
   assert.match(warningText(payload), /Gemini unavailable/);
 });
 
-test("a blank GEMINI_MODEL falls back to the gemini-3.6 default", async () => {
+test("a blank GEMINI_MODEL falls back to the gemini-3.8-flash default", async () => {
   configureKeys();
   process.env.GEMINI_MODEL = "   ";
   const urls: string[] = [];

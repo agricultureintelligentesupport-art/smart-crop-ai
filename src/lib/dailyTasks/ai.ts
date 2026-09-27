@@ -8,8 +8,10 @@
  *
  *   Stage 1 — OpenAI-compatible chat endpoint (`OPENAI_API_KEY`,
  *             `OPENAI_MODEL`, default `gpt-4o-mini`) with JSON mode.
- *   Stage 2 — Google Gemini (`GEMINI_MODEL`, default `gemini-3.6`, then
- *             `gemini-2.5-flash` → `gemini-2.0-flash` on a retired-id 404),
+ *   Stage 2 — Google Gemini (the SHARED chain from
+ *             `src/lib/assistant/gemini-models.ts`: `gemini-3.8-flash`, then
+ *             the long-lived `gemini-3.5-flash` → `gemini-3.5-flash-lite` on
+ *             a retired-id 404; `GEMINI_MODEL` overrides the primary),
  *             keyed with the full `GEMINI_API_KEY*` pool (rotated on quota) —
  *             the SECONDARY FALLBACK: it only runs when the primary OpenAI
  *             stage is unconfigured or could not answer.
@@ -19,6 +21,7 @@
  * caller falls back to the rule engine. Nothing here throws.
  */
 
+import { resolveGeminiModels as resolveGeminiChain } from "@/lib/assistant/gemini-models";
 import type { DailyContext } from "./context";
 import type { DailyTask, TaskCategory, TaskPriority } from "./types";
 
@@ -41,12 +44,15 @@ export const AI_TIMEOUT_MS = 15_000;
 
 /**
  * Model chain for Gemini — a retired primary 404s onto its successor.
- * Ordered from the newest generation to the oldest.
+ *
+ * Resolved from the single shared definition in
+ * `src/lib/assistant/gemini-models.ts` rather than restated here: this file
+ * previously carried its own copy of the chain, which is exactly how a dead
+ * id survived a fix applied to the other pipeline. A Google deprecation must be
+ * corrected in one place.
  */
 export function resolveGeminiModels(): string[] {
-  const override = (process.env.GEMINI_MODEL ?? "").trim();
-  const chain = ["gemini-3.6", "gemini-2.5-flash", "gemini-2.0-flash"];
-  return override ? [override, ...chain.filter((m) => m !== override)] : chain;
+  return resolveGeminiChain(process.env.GEMINI_MODEL).map((model) => model.id);
 }
 
 /**

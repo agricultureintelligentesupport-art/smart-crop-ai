@@ -5,7 +5,7 @@
  * The orchestrator runs a strict priority order:
  *
  *   Step 1 · IMAGE ANALYSIS
- *     PRIMARY   Gemini (`gemini-3.6`, overridable with `GEMINI_MODEL`) — a
+ *     PRIMARY   Gemini (`gemini-3.8-flash`, overridable with `GEMINI_MODEL`) — a
  *               multimodal model that inspects the photo and answers with a
  *               structured JSON object matching {@link AnalysisData}.
  *     FALLBACK  MobileNetV2 PlantVillage on the Hugging Face router — reached
@@ -410,7 +410,7 @@ export function analysisToDiagnosis(
   data: AnalysisData,
   source: AnalysisSource,
   options: {
-    /** Model id shown on the card, e.g. `gemini-3.6`. */
+    /** Model id shown on the card, e.g. `gemini-3.8-flash`. */
     model: string;
     lang?: "ar" | "fr";
     /**

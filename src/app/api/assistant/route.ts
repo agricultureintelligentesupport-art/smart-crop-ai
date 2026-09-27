@@ -7,8 +7,9 @@
  * skips the image stage entirely and goes straight to the text stages.
  *
  *   STEP 1 — IMAGE ANALYSIS (photo requests)
- *     PRIMARY  · Google Gemini (`gemini-3.6`, overridable with `GEMINI_MODEL`
- *               → `gemini-2.5-flash` → `gemini-2.0-flash-exp` on a retired
+ *     PRIMARY  · Google Gemini (`gemini-3.8-flash`, overridable with
+ *               `GEMINI_MODEL` → `gemini-3.5-flash` → `gemini-3.5-flash-lite`
+ *               on a retired
  *               id). A multimodal model that inspects the photo and is
  *               constrained by `responseMimeType: "application/json"` +
  *               `responseSchema` to answer with an `AnalysisData` object
@@ -102,6 +103,12 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import sharp from "sharp";
+import {
+  GeminiModelHealthMonitor,
+  formatGeminiHealthReport,
+  resolveGeminiModels as resolveGeminiChain,
+  type GeminiModel,
+} from "@/lib/assistant/gemini-models";
 import {
   ANALYSIS_RESPONSE_SCHEMA,
   SEVERITY_AR,
@@ -410,60 +417,22 @@ async function runLeafDetectionStage(
 /* ---- Google Gemini — shared by Step 1 (analysis) and Step 3 (text)  */
 
 /**
- * The Gemini id — used for BOTH the Step 1 image analysis and the Step 3
- * text fallback — defaults to:
- * `gemini-3.6`. Gemini only runs when the primary Hugging Face stage
- * ({@link askHfLlmStrict}) could not answer, using the explicitly configured
- * Gemini model instead of the older free-tier line. `GEMINI_MODEL`
- * overrides it at request time (e.g. to pin `gemini-2.0-flash-exp`); the
- * fallback ids below still catch a retired or mistyped override.
- */
-const GEMINI_MODEL_DEFAULT: GeminiModel = {
-  id: "gemini-3.6",
-  // Gemini 3.x reasons by default: `thinkingLevel` keeps the model in fast,
-  // answer-first mode so the 18 s budget is spent on the reply (the legacy
-  // numeric `thinkingBudget` is rejected on this generation).
-  thinking: { thinkingLevel: "low" },
-};
-
-/**
- * Gemini model chain entry. `thinking` carries the per-generation
- * `thinkingConfig` — OPTIONAL, because each generation 400s on the wrong
- * shape: Gemini 3.x takes `thinkingLevel` (`"low"` = answer-first), Gemini
- * 2.5 takes a numeric `thinkingBudget` (`0` = skip the reasoning pass,
- * answer-first), while the stable 1.5/2.0 Flash ids (and unknown
- * `GEMINI_MODEL` overrides) predate thinking entirely and reject the
- * parameter — `undefined` means "send no `thinkingConfig` at all".
- */
-interface GeminiModel {
-  id: string;
-  thinking?: { thinkingLevel: "low" } | { thinkingBudget: number };
-}
-
-/**
- * Built-in fallback ids walked (within the remaining Stage-2 budget) when
- * the primary answers 404 / model-not-found — a retired or mistyped id
- * never kills the stage while a successor can still answer. Ordered from
- * the newest generation to the oldest.
- */
-const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
-  { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
-  { id: "gemini-2.0-flash-exp" },
-];
-
-/**
- * Resolve the ordered Stage-2 model chain at request time: the
- * `GEMINI_MODEL` override (whitespace-trimmed) or
- * {@link GEMINI_MODEL_DEFAULT} first, then the built-in fallback ids —
- * deduplicated, so pinning an id that is also a fallback never doubles it.
- * Reading the environment per request (like the Gemini key pool) lets a
- * deployment switch models without a restart; tests can override it too.
+ * The ordered Gemini chain — used for BOTH the Step 1 image analysis and the
+ * Step 3 text fallback — is resolved per request from the shared
+ * `@/lib/assistant/gemini-models` module, so the route, the
+ * `tools/check-gemini-models.mjs` CLI and the health check below can never
+ * drift apart. That drift is the failure mode that let `gemini-3.6` (a model
+ * id Google never shipped) sit in production until every request 404'd and
+ * every photo silently degraded to MobileNetV2.
+ *
+ * The default is `gemini-3.8-flash`; `GEMINI_MODEL` pins a different primary
+ * and ids the health check proved unavailable are dropped from the chain, so a
+ * retired id costs no round-trip.
  */
 function resolveGeminiModels(): GeminiModel[] {
-  const override = process.env.GEMINI_MODEL?.trim();
-  const primary: GeminiModel = override ? { id: override } : GEMINI_MODEL_DEFAULT;
-  return [primary, ...GEMINI_FALLBACK_MODELS.filter((model) => model.id !== primary.id)];
+  return resolveGeminiChain(process.env.GEMINI_MODEL, geminiModelHealth.unavailableModels);
 }
+
 
 /**
  * Hard timeout for the WHOLE Gemini model chain: 18 s. A full Arabic
@@ -829,26 +798,61 @@ async function classifyPlantImageStrict(
  * and is passed through to the text stage unchanged, which simply hedges its
  * wording.
  */
+/**
+ * True when a failure is specifically Gemini rejecting the structured-output
+ * parameters we sent (`responseSchema` / `response_format`) rather than the
+ * model id or the key. Gemini has been migrating that surface (the newer
+ * Interactions API uses `response_format`), so a freshly-rotated model id can
+ * legitimately refuse a `generationConfig` field the previous one accepted.
+ */
+function isStructuredOutputRejection(error: unknown): boolean {
+  if (!(error instanceof GeminiError) || error.status !== 400) return false;
+  return /response[_]?schema|response[_]?format|generationConfig/i.test(
+    error.message,
+  );
+}
+
 async function analyzeImageWithGemini(
   image: AssistantImagePayload,
   geminiApiKeys: readonly string[],
   lang: "ar" | "fr",
 ): Promise<AnalysisResult> {
-  const result = await runGeminiWithKeyPool(
-    {
-      systemInstruction: buildAnalysisInstruction(lang),
-      userContent:
-        lang === "fr"
-          ? "Analyse la photo de la plante jointe et renvoie uniquement l'objet JSON demandé."
-          : "حلّل صورة النبتة المرفقة وأعد كائن JSON المطلوب.",
-      image,
-      extraConfig: {
-        responseMimeType: "application/json",
-        responseSchema: ANALYSIS_RESPONSE_SCHEMA,
+  const userContent =
+    lang === "fr"
+      ? "Analyse la photo de la plante jointe et renvoie uniquement l'objet JSON demandé."
+      : "حلّل صورة النبتة المرفقة وأعد كائن JSON المطلوب.";
+
+  const runAnalysis = async (
+    extraConfig: Record<string, unknown>,
+  ): Promise<GeminiResult> =>
+    runGeminiWithKeyPool(
+      {
+        systemInstruction: buildAnalysisInstruction(lang),
+        userContent,
+        image,
+        extraConfig,
       },
-    },
-    geminiApiKeys,
-  );
+      geminiApiKeys,
+    );
+
+  let result: GeminiResult;
+  try {
+    result = await runAnalysis({
+      responseMimeType: "application/json",
+      responseSchema: ANALYSIS_RESPONSE_SCHEMA,
+    });
+  } catch (error) {
+    if (!isStructuredOutputRejection(error)) throw error;
+    // The model would not take the schema constraint. Retry once with only
+    // the JSON MIME hint: `parseAnalysisJson` still validates the result, and
+    // a schema-less reply that does not conform fails the stage exactly like
+    // any other malformed payload.
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[Step 1: Gemini Analysis] responseSchema rejected by the model — retrying with responseMimeType only: ${detail}`,
+    );
+    result = await runAnalysis({ responseMimeType: "application/json" });
+  }
 
   // (c) — the payload must be a complete AnalysisData object.
   const data = parseAnalysisJson(result.text);
@@ -1214,12 +1218,20 @@ function geminiText(payload: GeminiPayload | null): string {
 
 /**
  * Message fragments Google returns when the *model id* is the problem rather
- * than the request: a retired or mistyped id answers
- * `404 — models/gemini-3.6 is not found for API version v1beta, or is
- * not supported for generateContent`. Together with an HTTP 404 these are the
- * only Stage-2 failures that walk the Gemini model chain — invalid keys
- * (400/403), quota (429), safety blocks, 5xx, network errors and the timeout
- * abort are surfaced immediately, because another model id can't fix them.
+ * than the request. Three distinct shapes must all walk the chain:
+ *
+ *   • a mistyped/retired id — `models/gemini-3.6 is not found for API version
+ *     v1beta, or is not supported for generateContent`;
+ *   • an id withheld from this key — `models/gemini-2.5-flash is no longer
+ *     available to new users. Please update your code to use …` (Google has
+ *     shipped this with both 404 and 400, so the status check alone is not
+ *     enough);
+ *   • an id that exists but cannot serve this method.
+ *
+ * Together with an HTTP 404 these are the only Gemini failures that walk the
+ * model chain — invalid keys (400/403), quota (429), safety blocks, 5xx,
+ * network errors and the timeout abort are surfaced immediately, because
+ * another model id can't fix them.
  */
 const GEMINI_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /\bmodel not found\b/i,
@@ -1227,6 +1239,9 @@ const GEMINI_MODEL_ERROR_PATTERNS: readonly RegExp[] = [
   /not supported for generateContent/i,
   /\bunknown model\b/i,
   /\bno such model\b/i,
+  // Withheld from this key rather than globally retired.
+  /no longer available to (?:new )?users/i,
+  /not available (?:to|for) (?:new )?users/i,
 ];
 
 /** True when the failure looks like "this Gemini model id is retired/gone". */
@@ -1356,19 +1371,55 @@ interface GeminiResult {
   warnings: string[];
 }
 
+/* ---- Health check — validate the chain against ListModels ---------- */
+
+/**
+ * One monitor per process: single-flight, 6-hour TTL, and the source of the
+ * "these ids are dead" set that {@link resolveGeminiModels} filters the chain
+ * with. Exported so tests can reset it between cases.
+ */
+export const geminiModelHealth = new GeminiModelHealthMonitor();
+
+/**
+ * Validate the configured Gemini chain against `GET /v1beta/models` and log a
+ * one-line verdict, at most once per monitor TTL and always from the single
+ * Gemini entry point — so both Gemini roles are covered by one check.
+ *
+ * Never throws: a ListModels outage degrades to one "could not verify" warning.
+ */
+async function ensureGeminiModelHealth(
+  geminiApiKeys: readonly string[],
+): Promise<void> {
+  if (geminiApiKeys.length === 0) return;
+
+  const report = await geminiModelHealth.ensure(resolveGeminiModels(), {
+    apiKey: geminiApiKeys[0],
+  });
+  if (!report) return;
+
+  for (const line of formatGeminiHealthReport(report, resolveGeminiModels())) {
+    // A broken chain is a deployment problem, not a request problem — it must
+    // be impossible to miss in the platform logs.
+    if (line.includes("❌") || line.includes("⚠")) console.error(line);
+    else console.log(line);
+  }
+}
+
 /**
  * Run the per-request Gemini model chain ({@link resolveGeminiModels}) against
- * a single credential, starting at `gemini-3.6` (or the `GEMINI_MODEL`
- * override) and walking to the older ids on a model-availability failure.
+ * a single credential, starting at the shared default (`gemini-3.8-flash`, or
+ * the `GEMINI_MODEL` override) and walking to the long-lived fallbacks on a
+ * model-availability failure.
  *
  * The whole chain is bounded by ONE 18 s `AbortController` deadline
  * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
- * model-availability failure (404 / model-not-found — the signature of a
- * retired generation) walks to the next id with whatever budget remains (each
- * walk is recorded in the result's `warnings` so the client still sees the
- * degradation), while any other failure — invalid/missing key (400/403),
- * safety block, empty candidate list, network error or the timeout abort —
- * throws {@link GeminiError} immediately for the outer key-rotation loop.
+ * model-availability failure (404 / model-not-found / "no longer available to
+ * new users" — the signature of a retired generation) walks to the next id
+ * with whatever budget remains (each walk is recorded in the result's
+ * `warnings` so the client still sees the degradation), while any other
+ * failure — invalid/missing key (400/403), safety block, empty candidate list,
+ * network error or the timeout abort — throws {@link GeminiError} immediately
+ * for the outer key-rotation loop.
  * Quota and transient upstream failures (HTTP 429/500/503) are likewise
  * surfaced to that loop, which backs off and tries the next credential.
  */
@@ -1467,6 +1518,11 @@ async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
   geminiApiKeys: readonly string[],
 ): Promise<GeminiResult> {
+  // Once per process (TTL-bounded): proves the configured model ids still
+  // exist BEFORE they are used, so a Google deprecation surfaces as one loud
+  // log line instead of 404-ing silently on every request.
+  await ensureGeminiModelHealth(geminiApiKeys);
+
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
 
@@ -2377,8 +2433,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 
   // ---- STEP 3: Google Gemini (FALLBACK text model) -------------------
   // Runs ONLY when the primary Hugging Face stage produced nothing.
-  // gemini-3.6 or the GEMINI_MODEL override (→ 2.5-flash → 2.0-flash-exp on a
-  // retired-id 404) via the Generative Language REST API, keyed with the full
+  // gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
+  // 3.5-flash-lite on a retired-id 404) via the Generative Language REST API,
+  // keyed with the full
   // Gemini key pool and bounded by a shared 18 s AbortController.
   // Gemini is a FORMATTER here: the prompt is ANALYSIS_DATA and NO image is
   // attached, so it cannot re-analyse the photo even by accident. This also
