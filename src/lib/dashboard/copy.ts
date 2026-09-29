@@ -129,10 +129,16 @@ export interface DashboardCopy {
     openMaps: string;
     mapTitle: string;
     use: string;
-    /** Location search (Nominatim) input placeholder — Arabic or French place names. */
+    /** Location search (/api/geocode → Nominatim) input placeholder — Arabic or French place names. */
     searchPlaceholder: string;
-    /** No result / geocoder failure, in the farmer's language. */
+    /** Network/geocoder failure — retryable, shown with the retry action. */
     searchError: string;
+    /** Search answered with zero results. */
+    searchNoResults: string;
+    /** Retry action after a search failure. */
+    searchRetry: string;
+    /** Clear the search input (✕ button). */
+    searchClear: string;
     /** Accessible name of the search input. */
     searchLabel: string;
     /** Remove the last vertex placed while drawing. */
@@ -539,7 +545,10 @@ const AR: DashboardCopy = {
     mapTitle: "خريطة الحقول — صور فضائية",
     use: "استخدام هذه القطعة",
     searchPlaceholder: "ابحث عن مكان في الجزائر…",
-    searchError: "تعذّر إتمام البحث. حاول مرة أخرى.",
+    searchError: "تعذّر إتمام البحث. تحقّق من الاتصال.",
+    searchNoResults: "لا توجد نتائج",
+    searchRetry: "إعادة المحاولة",
+    searchClear: "مسح البحث",
     searchLabel: "البحث عن موقع على الخريطة",
     undo: "تراجع",
     locate: "موقعي",
@@ -931,7 +940,10 @@ const FR: DashboardCopy = {
     mapTitle: "Carte des parcelles — imagerie satellite",
     use: "Utiliser cette parcelle",
     searchPlaceholder: "Chercher un lieu en Algérie…",
-    searchError: "La recherche a échoué. Réessayez.",
+    searchError: "La recherche a échoué. Vérifiez la connexion.",
+    searchNoResults: "Aucun résultat",
+    searchRetry: "Réessayer",
+    searchClear: "Effacer la recherche",
     searchLabel: "Rechercher un lieu sur la carte",
     undo: "Annuler le point",
     locate: "Ma position",

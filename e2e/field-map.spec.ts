@@ -83,55 +83,31 @@ test("the heatmap still advertises itself as an estimate until a plot is drawn",
 });
 
 test("the map offers location search and a GPS jump before any drawing starts", async ({ page }) => {
-  // Deterministic geocoding: the real Nominatim is never contacted. Two
-  // results, so the control shows its alternatives list (a single hit jumps
-  // straight to the place by design).
-  await page.route("https://nominatim.openstreetmap.org/**", (route) =>
+  // Deterministic geocoding: `/api/geocode` (the Nominatim proxy) is stubbed,
+  // in exactly the shape the route emits — the real upstream is never
+  // contacted. Two results, so the dropdown lists rows instead of jumping.
+  await page.route("**/api/geocode*", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify([
-        {
-          place_id: 1,
-          licence: "test",
-          osm_type: "relation",
-          osm_id: 1,
-          boundingbox: ["34.75", "34.95", "5.65", "5.85"],
-          lat: "34.85",
-          lon: "5.73",
-          display_name: "بسكرة, الجزائر",
-          class: "boundary",
-          type: "administrative",
-          importance: 0.8,
-          address: { state: "بسكرة", country: "الجزائر", country_code: "dz" },
-        },
-        {
-          place_id: 2,
-          licence: "test",
-          osm_type: "relation",
-          osm_id: 2,
-          boundingbox: ["34.70", "35.00", "5.60", "5.90"],
-          lat: "34.85",
-          lon: "5.72",
-          display_name: "ولاية بسكرة, الجزائر",
-          class: "boundary",
-          type: "administrative",
-          importance: 0.6,
-          address: { state: "ولاية بسكرة", country: "الجزائر", country_code: "dz" },
-        },
-      ]),
+      body: JSON.stringify({
+        results: [
+          { id: "1-0", name: "بسكرة", secondary: "بسكرة", lat: 34.85, lng: 5.73 },
+          { id: "2-1", name: "ولاية بسكرة", secondary: null, lat: 34.85, lng: 5.72 },
+        ],
+      }),
     }),
   );
 
   const dialog = await openMap(page);
 
-  // Search box (Nominatim via leaflet-control-geocoder), in the farmer's
-  // language. The plugin's input is `type="search"`, i.e. role `searchbox`.
-  const search = dialog.getByRole("searchbox", { name: "البحث عن موقع على الخريطة" });
+  // Search pill (the custom MapSearch over /api/geocode), in the farmer's
+  // language. The old leaflet-control-geocoder is gone from the DOM.
+  await expect(dialog.locator(".leaflet-control-geocoder")).toHaveCount(0);
+  const search = dialog.getByRole("combobox", { name: "البحث عن موقع على الخريطة" });
   await expect(search).toBeVisible();
   await search.fill("بسكرة");
-  await search.press("Enter");
-  await expect(dialog.getByText("بسكرة", { exact: false }).first()).toBeVisible();
+  await expect(dialog.getByRole("option").first()).toContainText("بسكرة");
 
   // GPS jump for thumb use, labelled in Arabic.
   await expect(dialog.getByRole("button", { name: "موقعي" })).toBeVisible();

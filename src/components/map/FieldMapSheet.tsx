@@ -42,6 +42,8 @@ import { Loader2, LocateFixed, Map as MapIcon, Trash2, Undo2 } from "lucide-reac
 import type { Lang } from "@/lib/wilayas";
 import type { Plot } from "@/lib/field-data/types";
 import { ringAreaHa, validatePlot, type Ring } from "@/lib/geo/polygon";
+import type { Place } from "@/lib/geo/places";
+import MapSearch from "./MapSearch";
 
 export interface FieldMapSheetCopy {
   title: string;
@@ -68,10 +70,16 @@ export interface FieldMapSheetCopy {
   openMaps: string;
   mapTitle: string;
   use: string;
-  /** Location search (Nominatim) input placeholder — Arabic or French place names. */
+  /** Location search (/api/geocode → Nominatim) input placeholder — Arabic or French place names. */
   searchPlaceholder: string;
-  /** No result / geocoder failure, in the farmer's language. */
+  /** Network/geocoder failure — retryable, shown with the retry action. */
   searchError: string;
+  /** Search answered with zero results. */
+  searchNoResults: string;
+  /** Retry action after a search failure. */
+  searchRetry: string;
+  /** Clear the search input (✕ button). */
+  searchClear: string;
   /** Accessible name of the search input. */
   searchLabel: string;
   /** Remove the last vertex placed while drawing. */
@@ -85,6 +93,9 @@ export interface FieldMapSheetCopy {
   /** `{area}` — live area of the boundary being drawn. */
   liveArea: string;
 }
+
+/** Zoom after choosing a search result — single-field drawing scale. */
+const SEARCH_RESULT_ZOOM = 16;
 
 /** Imperative commands the toolbar can issue to the map. */
 export interface MapHandle {
@@ -100,6 +111,8 @@ export interface MapHandle {
   isDrawing: () => boolean;
   /** Fly the map to the device's current location. Resolves false when denied. */
   locate: () => Promise<boolean>;
+  /** Fly the map to a searched place. Draws nothing — the jump is the feature. */
+  flyTo: (lat: number, lng: number, zoom?: number) => void;
   /** Repaint the saved-plot layer and optionally frame the active plot. */
   syncPlots: (plots: Plot[], activeId: string | null, fit?: boolean) => void;
 }
@@ -193,6 +206,11 @@ export default function FieldMapSheet({
     if (!ok) setError(copy.locateDenied);
   }, [copy.locateDenied]);
 
+  /** Search result chosen: fly there at single-field drawing scale. */
+  const flyToPlace = useCallback((place: Place) => {
+    handleRef.current?.flyTo(place.lat, place.lng, SEARCH_RESULT_ZOOM);
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (!draft) return;
     if (!valid) {
@@ -261,15 +279,32 @@ export default function FieldMapSheet({
             }}
             lang={lang}
             ariaLabel={copy.mapTitle}
-            geocoderCopy={{
-              placeholder: copy.searchPlaceholder,
-              errorMessage: copy.searchError,
-              iconLabel: copy.searchLabel,
-            }}
           />
 
+          {/* Place search: floats over the canvas, top-centre (opposite corner
+              from the zoom buttons), and only ever flies the map — it draws
+              nothing. Hidden while drawing, whose toolbar owns the sheet. */}
+          {!drawing && (
+            <MapSearch
+              copy={{
+                placeholder: copy.searchPlaceholder,
+                label: copy.searchLabel,
+                noResults: copy.searchNoResults,
+                error: copy.searchError,
+                retry: copy.searchRetry,
+                clear: copy.searchClear,
+              }}
+              lang={lang}
+              onSelect={flyToPlace}
+            />
+          )}
+
           {loading && (
-            <div className="absolute inset-x-0 top-3 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white">
+            <div
+              className={`absolute inset-x-0 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white ${
+                drawing ? "top-3" : "top-[4.6rem]"
+              }`}
+            >
               {copy.loading}
             </div>
           )}
