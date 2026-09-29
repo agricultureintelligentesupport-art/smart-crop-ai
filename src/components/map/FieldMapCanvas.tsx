@@ -27,29 +27,26 @@
  *
  * LOCATION SEARCH
  * ---------------
- * `leaflet-control-geocoder` with its Nominatim backend: free, keyless, and it
- * answers Arabic and French place names (wilaya / commune / city) in Algeria.
- * Usage-policy compliance is the geocoder's own: identical responses are
- * cached, requests are queued at least one second apart, and client-side
- * auto-complete is refused outright because Nominatim forbids it. The browser
- * sends an identifying `Referer` automatically and does not allow scripts to
- * override `User-Agent`, which satisfies the policy's "Referer or User-Agent"
- * requirement. Queries are restricted to Algeria (`countrycodes=dz`) and asked
- * for in the app's current language.
+ * Not here any more. `leaflet-control-geocoder` fetched Nominatim from the
+ * browser, could not identify the app to it (no script-settable User-Agent),
+ * and — the bug that actually broke "خنشلة" — crashed while mapping the
+ * `addressdetails=0` responses this app requested: its default template reads
+ * `result.address.road`, the field was missing, and the thrown TypeError was
+ * an unhandled rejection inside the control, so its throbber spun forever and
+ * neither results nor an error ever appeared. Search now lives in the
+ * `MapSearch` React component (owned by `FieldMapSheet`) and talks to Nominatim
+ * through `/api/geocode`. This canvas exposes one command for it,
+ * `MapHandle.flyTo`: move the view, draw nothing.
  */
 
 import { useEffect, useRef } from "react";
 // Type-only: erased at build time, so importing them does not pull in the
 // `window`-touching Leaflet runtime. The runtime itself is dynamically imported
 // inside the effect below.
-import type { FeatureGroup, LatLngBounds, LayerGroup, Map as LeafletMap, Polygon as LeafletPolygon } from "leaflet";
+import type { FeatureGroup, LayerGroup, Map as LeafletMap, Polygon as LeafletPolygon } from "leaflet";
 import type { MapHandle } from "./FieldMapSheet";
 import type { Plot } from "@/lib/field-data/types";
 import { isSimpleRing, ringAreaHa, type Ring } from "@/lib/geo/polygon";
-// The plugin's stylesheet is NOT imported by its JS bundle (the built dist
-// strips it), so the app loads it explicitly — before map.css, whose rules
-// override it.
-import "leaflet-control-geocoder/dist/Control.Geocoder.css";
 import "./map.css";
 
 const TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -62,9 +59,6 @@ const DEFAULT_CENTER: [number, number] = [36.4, 3.2];
 const FALLBACK_ZOOM = 15;
 /** Zoom after a GPS fix — single-field drawing scale. */
 const GPS_ZOOM = 17;
-/** Zoom bounds applied to a search result (never a whole-country frame). */
-const SEARCH_ZOOM_MIN = 15;
-const SEARCH_ZOOM_MAX = 17;
 /** Last map centre, so reopening lands where the farmer last worked. */
 const LAST_VIEW_KEY = "smart-crop.map.v1";
 /** GPS fix budget: after this the fallback view simply stays. */
@@ -154,37 +148,6 @@ function writeLastView(map: LeafletMap): void {
   }
 }
 
-interface GeocoderLike {
-  options?: { geocodingQueryParams?: Record<string, unknown> };
-}
-
-/**
- * The plugin's control as this file uses it. `_input` is private on the class
- * (there is no public handle on the input), so the few internals needed here
- * are read through this structural view instead of intersecting the class.
- */
-interface GeocoderControlInternals {
-  on: (type: string, fn: (event: unknown) => void) => unknown;
-  _input?: HTMLInputElement;
-  geocoder?: GeocoderLike;
-}
-
-/** Push the app language into the geocoder (query params + input chrome). */
-function syncGeocoderLanguage(
-  control: GeocoderControlInternals | null,
-  lang: "ar" | "fr",
-  copy: { placeholder: string; iconLabel: string },
-): void {
-  if (!control) return;
-  const params = control.geocoder?.options?.geocodingQueryParams;
-  if (params) params["accept-language"] = lang;
-  const input = control._input;
-  if (input) {
-    input.placeholder = copy.placeholder;
-    input.setAttribute("aria-label", copy.iconLabel);
-  }
-}
-
 export default function FieldMapCanvas({
   plots,
   activeId,
@@ -198,7 +161,6 @@ export default function FieldMapCanvas({
   onLocateResult,
   lang,
   ariaLabel,
-  geocoderCopy,
 }: {
   plots: Plot[];
   activeId: string | null;
@@ -217,11 +179,9 @@ export default function FieldMapCanvas({
   onLocateResult: (ok: boolean) => void;
   lang: "ar" | "fr";
   ariaLabel: string;
-  geocoderCopy: { placeholder: string; errorMessage: string; iconLabel: string };
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<MapHandle | null>(null);
-  const geocoderRef = useRef<GeocoderControlInternals | null>(null);
   // Callbacks are read through a ref so the map — created once — is never torn
   // down just because a parent callback identity changed on a re-render.
   // Map events fire long after render, so they must read the newest callbacks.
@@ -237,7 +197,6 @@ export default function FieldMapCanvas({
     onLocateResult,
     fallbackCenter,
     lang,
-    geocoderCopy,
   });
   useEffect(() => {
     latest.current = {
@@ -250,7 +209,6 @@ export default function FieldMapCanvas({
       onLocateResult,
       fallbackCenter,
       lang,
-      geocoderCopy,
     };
   });
 
@@ -263,7 +221,6 @@ export default function FieldMapCanvas({
       await import("leaflet/dist/leaflet.css");
       await import("leaflet-draw");
       await import("leaflet-draw/dist/leaflet.draw.css");
-      const { default: GeocoderControl, geocoders } = await import("leaflet-control-geocoder");
       if (disposed || !hostRef.current) return;
 
       /* The opening view resolves along the documented fallback chain. The
@@ -366,46 +323,6 @@ export default function FieldMapCanvas({
       map.on("draw:drawstop", () => latest.current.onDrawingChange(false));
       map.on(L.Draw.Event.DRAWVERTEX, publishProgress);
 
-      /* ---- location search (Nominatim via leaflet-control-geocoder) ---- */
-
-      const geocoder = geocoders.nominatim({
-        geocodingQueryParams: {
-          // Algeria only: a farmer searching "Biskra" must get Biskra, DZ.
-          countrycodes: "dz",
-          addressdetails: 0,
-          limit: 5,
-          "accept-language": latest.current.lang,
-        },
-      });
-      const geocoderControl = new GeocoderControl({
-        position: "topright",
-        geocoder,
-        // The jump is ours to make: pin nothing, frame the result at a zoom
-        // that is close enough to draw a field at.
-        defaultMarkGeocode: false,
-        collapsed: false,
-        expand: "touch",
-        placeholder: latest.current.geocoderCopy.placeholder,
-        errorMessage: latest.current.geocoderCopy.errorMessage,
-        iconLabel: latest.current.geocoderCopy.iconLabel,
-        queryMinLength: 2,
-        suggestMinLength: 3,
-        suggestTimeout: 1000,
-        showResultIcons: false,
-      }).addTo(map) as unknown as GeocoderControlInternals;
-      geocoderControl.on("markgeocode", (event: unknown) => {
-        const { center, bbox } = (event as { geocode: { center: { lat: number; lng: number }; bbox: LatLngBounds } }).geocode;
-        const zoom = Math.min(SEARCH_ZOOM_MAX, Math.max(SEARCH_ZOOM_MIN, map.getBoundsZoom(bbox)));
-        map.setView([center.lat, center.lng], zoom);
-      });
-      // Arabic place names read best right-to-left even inside the LTR map.
-      const geocoderInput = geocoderControl._input;
-      if (geocoderInput) {
-        geocoderInput.dir = "auto";
-        geocoderInput.setAttribute("aria-label", latest.current.geocoderCopy.iconLabel);
-      }
-      geocoderRef.current = geocoderControl;
-
       /* ---- GPS ---- */
 
       /**
@@ -464,6 +381,11 @@ export default function FieldMapCanvas({
           latest.current.onLocateResult(true);
           return true;
         },
+        flyTo(lat, lng, zoom = 16) {
+          // The search's whole contract: move the view, draw nothing. 16 is
+          // single-field drawing scale — never a whole-country frame.
+          map.flyTo([lat, lng], zoom);
+        },
         syncPlots(list: Plot[], active: string | null, fit = false) {
           savedGroup.clearLayers();
           let activeLayer: LeafletPolygon | null = null;
@@ -513,7 +435,6 @@ export default function FieldMapCanvas({
         cancelAnimationFrame(raf);
         window.removeEventListener("resize", onWindowResize);
         handleRef.current = null;
-        geocoderRef.current = null;
         map.remove();
       };
     })();
@@ -538,13 +459,6 @@ export default function FieldMapCanvas({
     if (!handle) return;
     handle.syncPlots(plots, activeId, prev !== undefined && prev !== activeId);
   }, [plots, activeId]);
-
-  /* The sheet language can change while the map is up: keep the search
-     speaking it (the geocoder asks Nominatim in the right language and the
-     input placeholder follows). */
-  useEffect(() => {
-    syncGeocoderLanguage(geocoderRef.current, lang, geocoderCopy);
-  }, [lang, geocoderCopy]);
 
   return <div ref={hostRef} className="h-full w-full" dir="ltr" role="region" aria-label={ariaLabel} />;
 }

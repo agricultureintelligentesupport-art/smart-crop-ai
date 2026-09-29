@@ -1,8 +1,9 @@
 /*
- * Field-map styling that Leaflet itself owns the shape of: draw vertices and
- * the geocoder control. Scoped to the map module — the sheet that hosts the
- * canvas is styled with the dashboard's Tailwind tokens; these are the parts
- * Leaflet renders into the canvas DOM, which Tailwind never sees.
+ * Field-map styling that Leaflet itself owns the shape of: the draw vertices.
+ * Scoped to the map module — the sheet that hosts the canvas is styled with
+ * the dashboard's Tailwind tokens; these are the parts Leaflet renders into
+ * the canvas DOM, which Tailwind never sees. (Place search is a React
+ * component now — `MapSearch.tsx` — so its styles live in its JSX.)
  */
 
 /*
@@ -40,68 +41,19 @@
   border-radius: 8px !important;
 }
 
-/* Geocoder control: mobile-first touch targets, Arabic-friendly input. */
-.leaflet-control-geocoder {
-  max-width: min(19rem, calc(100vw - 6.5rem));
-  border: 1px solid rgba(6, 78, 59, 0.18);
-  border-radius: 14px;
-  box-shadow: 0 14px 30px -18px rgba(6, 78, 59, 0.55);
-  background: rgba(255, 255, 255, 0.97);
-  overflow: hidden;
-}
-
-.leaflet-control-geocoder-expanded {
-  width: min(19rem, calc(100vw - 6.5rem));
-}
-
-.leaflet-control-geocoder-icon {
-  margin: 6px;
-  width: 32px;
-  height: 32px;
-}
-
-.leaflet-control-geocoder-input {
-  min-height: 44px;
-  padding: 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #022c22;
-  background: transparent;
-}
-
-.leaflet-control-geocoder-input:focus-visible,
-.leaflet-control-geocoder-form input:focus-visible {
-  outline: 3px solid rgba(52, 211, 153, 0.55);
-  outline-offset: 1px;
-}
-
-.leaflet-control-geocoder-alternatives li,
-.leaflet-control-geocoder-button {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  font-size: 13px;
-  font-weight: 600;
-  color: #022c22;
-}
-
-.leaflet-control-geocoder-alternatives li:hover,
-.leaflet-control-geocoder-alternatives li:focus {
-  background: rgba(16, 185, 129, 0.12);
-}
-
-/* Keep the collapse/reset buttons tappable and the error line readable. */
-.leaflet-control-geocoder-error {
-  padding: 10px 12px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: #92400e;
+/*
+ * The search pill owns the map's top strip (top-3, 48 px tall); the zoom
+ * control — Leaflet's default top-left — would tuck under its edge on a
+ * 360–412 px screen, so it lives just below the pill. Fixed position: moving
+ * controls between states would break the thumb's memory of them.
+ */
+.leaflet-top.leaflet-left {
+  top: 4.25rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .field-map-vertex,
-  .leaflet-control-geocoder,
-  .leaflet-control-geocoder-alternatives li {
+  .leaflet-editing-icon {
     transition: none !important;
   }
 }
