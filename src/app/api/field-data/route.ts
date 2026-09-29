@@ -54,6 +54,27 @@ const MAX_ROWS = 6;
 const MAX_COLS = 6;
 
 /**
+ * How long a cache read/write may hold up the response.
+ *
+ * An unreachable Firestore must cost freshness, never the answer — the same
+ * ceiling the client plot store uses (`lib/field-data/plots.ts`). Without it a
+ * blackholed connection parks this request (and whatever else the shared
+ * server process is serving) until the caller gives up.
+ */
+const REMOTE_CEILING_MS = 4000;
+
+function withCeiling<T>(work: Promise<T>, ms = REMOTE_CEILING_MS): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("field-data: cache access timed out")), ms);
+      // A pending cache miss must not keep the process warm on its own.
+      (timer as unknown as { unref?: () => void }).unref?.();
+    }),
+  ]);
+}
+
+/**
  * Content-addressed cache id. Coordinates are rounded to ~1 m (5 decimals)
  * because a 2 ha parcel is ~140 m across: below that, rounding noise would
  * create a new cache entry on every drag.
@@ -69,7 +90,7 @@ export function cacheKeyFor(uid: string, ring: Ring): string {
 async function readCache(uid: string, ring: Ring, firestore: Firestore): Promise<FieldObservation | null> {
   if (!isFirestoreReady(firestore)) return null;
   try {
-    const snap = await getDoc(doc(firestore, CACHE_COLLECTION, cacheKeyFor(uid, ring)));
+    const snap = await withCeiling(getDoc(doc(firestore, CACHE_COLLECTION, cacheKeyFor(uid, ring))));
     if (!snap.exists()) return null;
     const data = snap.data() as { observation?: FieldObservation };
     return data.observation ?? null;
@@ -81,10 +102,12 @@ async function readCache(uid: string, ring: Ring, firestore: Firestore): Promise
 async function writeCache(uid: string, ring: Ring, observation: FieldObservation, firestore: Firestore): Promise<void> {
   if (!isFirestoreReady(firestore)) return;
   try {
-    await setDoc(
-      doc(firestore, CACHE_COLLECTION, cacheKeyFor(uid, ring)),
-      { observation, updatedAt: new Date().toISOString() },
-      { merge: false },
+    await withCeiling(
+      setDoc(
+        doc(firestore, CACHE_COLLECTION, cacheKeyFor(uid, ring)),
+        { observation, updatedAt: new Date().toISOString() },
+        { merge: false },
+      ),
     );
   } catch {
     /* a cache write failure must never fail the response */

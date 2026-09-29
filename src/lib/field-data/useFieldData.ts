@@ -60,6 +60,13 @@ const responseCache = new Map<string, CachedResponse>();
 /** Only one request in flight per plot at a time. */
 const inFlight = new Map<string, Promise<CachedResponse>>();
 
+/**
+ * Ceiling on our own route. The route already bounds its upstreams; this
+ * bounds the round trip, so a stalled connection reports "timeout" (a real
+ * `FieldDataReason`) instead of pinning the card on a spinner forever.
+ */
+const OBSERVATION_TIMEOUT_MS = 45_000;
+
 async function requestObservation(plot: Plot, areaHa: number, force: boolean): Promise<CachedResponse> {
   const cached = responseCache.get(plot.id);
   if (!force && cached) return cached;
@@ -67,6 +74,8 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
   if (existing) return existing;
 
   const job = (async (): Promise<CachedResponse> => {
+    const abort = new AbortController();
+    const cancel = setTimeout(() => abort.abort(), OBSERVATION_TIMEOUT_MS);
     try {
       const { rows, cols } = heatmapGrid(areaHa);
       const res = await fetch("/api/field-data", {
@@ -81,6 +90,7 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
           areaHa,
           force,
         }),
+        signal: abort.signal,
       });
       const payload = (await res.json()) as {
         ok?: boolean;
@@ -98,8 +108,14 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
       return result;
     } catch {
       // A network error to our OWN route is still "no data", never a number.
-      return { observation: null, reason: "network", stale: false, fetchedAt: Date.now() };
+      return {
+        observation: null,
+        reason: abort.signal.aborted ? "timeout" : "network",
+        stale: false,
+        fetchedAt: Date.now(),
+      };
     } finally {
+      clearTimeout(cancel);
       inFlight.delete(plot.id);
     }
   })();

@@ -146,6 +146,46 @@ function byRecency(plots: Plot[]): Plot[] {
   return [...plots].sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : b.updatedAt < a.updatedAt ? -1 : 0));
 }
 
+/**
+ * Firestore document shape for a plot.
+ *
+ * Firestore rejects nested arrays ("Nested arrays are not supported"), so the
+ * ring cannot be stored as `number[][]`. The document therefore carries a flat
+ * `[lon, lat, lon, lat, …]` `ringFlat`; the in-memory `Plot` — and everything
+ * downstream of it, including the `/api/field-data` contract — keeps
+ * `ring: [number, number][]` unchanged. Encoding lives only at this storage
+ * boundary.
+ */
+interface FirestorePlotDoc extends Omit<Plot, "ring"> {
+  ringFlat: number[];
+}
+
+/**
+ * Exported for tests: the encoding must survive a round trip with the
+ * in-memory `Plot` shape — including `[lon, lat]` pair order — because that
+ * shape is the `/api/field-data` contract.
+ */
+export function toFirestoreDoc(plot: Plot): FirestorePlotDoc {
+  const { ring, ...rest } = plot;
+  return { ...rest, ringFlat: ring.flat() };
+}
+
+/** Accepts both the flat encoding and (defensively) a `ring` array of pairs. */
+export function fromFirestoreDoc(data: unknown): Plot | null {
+  if (!data || typeof data !== "object") return null;
+  const doc = data as Partial<Plot> & { ringFlat?: unknown };
+  if (Array.isArray(doc.ringFlat) && doc.ringFlat.length >= 6 && doc.ringFlat.length % 2 === 0) {
+    const flat = doc.ringFlat as number[];
+    const ring: Ring = [];
+    for (let i = 0; i < flat.length; i += 2) ring.push([flat[i], flat[i + 1]]);
+    const rest: Record<string, unknown> = { ...doc };
+    delete rest.ringFlat;
+    const rebuilt = { ...rest, ring } as Plot;
+    return isPlot(rebuilt) ? rebuilt : null;
+  }
+  return isPlot(data) ? (data as Plot) : null;
+}
+
 function mergeById(...groups: Plot[][]): Plot[] {
   const map = new Map<string, Plot>();
   for (const plot of groups.flat()) {
@@ -187,7 +227,9 @@ export async function listPlots(uid: string, firestore: Firestore = db): Promise
   }
   try {
     const snap = await withTimeout(getDocs(plotsCollection(firestore, uid)), REMOTE_SYNC_TIMEOUT_MS);
-    const remote = snap.docs.map((d) => d.data() as Plot).filter(isPlot);
+    const remote = snap.docs
+      .map((d) => fromFirestoreDoc(d.data()))
+      .filter((p): p is Plot => p !== null);
     const merged = mergeById(local, remote);
     // Keep the device copy fresh so a later offline load still has everything.
     writeLocal(uid, merged, defaultStorage());
@@ -247,7 +289,7 @@ export async function savePlot(
 
   if (isFirestoreReady(firestore)) {
     try {
-      await setDoc(doc(firestore, "users", uid, "plots", id), plot);
+      await setDoc(doc(firestore, "users", uid, "plots", id), toFirestoreDoc(plot));
     } catch (error) {
       // The local copy stands; the next listPlots() retries nothing, so say so.
       logAuthError("plots savePlot", error);
@@ -288,7 +330,7 @@ export async function renamePlot(
   writeLocal(uid, mergeById(readLocal(uid, defaultStorage()).filter((p) => p.id !== plotId), [updated]), defaultStorage());
   if (isFirestoreReady(firestore)) {
     try {
-      await setDoc(doc(firestore, "users", uid, "plots", plotId), updated);
+      await setDoc(doc(firestore, "users", uid, "plots", plotId), toFirestoreDoc(updated));
     } catch (error) {
       logAuthError("plots renamePlot", error);
     }
@@ -301,6 +343,6 @@ export async function replacePlots(uid: string, plots: Plot[], firestore: Firest
   writeLocal(uid, byRecency(plots), defaultStorage());
   if (!isFirestoreReady(firestore)) return;
   const batch = writeBatch(firestore);
-  for (const plot of plots) batch.set(doc(firestore, "users", uid, "plots", plot.id), plot);
+  for (const plot of plots) batch.set(doc(firestore, "users", uid, "plots", plot.id), toFirestoreDoc(plot));
   await batch.commit();
 }

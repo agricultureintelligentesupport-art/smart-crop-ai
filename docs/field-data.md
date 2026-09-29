@@ -137,3 +137,18 @@ production build.
 outbound TLS to CDSE, so no claim is made that a real Sentinel-2 job has
 completed. The 8 pre-existing `auth-flow` / `onboarding` e2e failures reproduce
 identically on the base commit and are unrelated.
+
+## Follow-ups (map-UX branch)
+
+- **Plot persistence encoding.** Firestore rejects nested arrays, so the
+  account-plot documents store `ring` as a flat `ringFlat: number[]`
+  (`[lon, lat, lon, lat, …]`). The conversion happens only at the storage
+  boundary (`src/lib/field-data/plots.ts`); `Plot`, the API contract and the
+  satellite pipeline are unchanged. Legacy documents with pair arrays still
+  decode.
+- **Bounded I/O.** The route's Firestore round-trip is capped at 2 s per leg
+  (4 s total, within `REMOTE_CEILING_MS = 4000`), and the client gives the
+  observation fetch 45 s before aborting with `reason: "timeout"` — the saved
+  polygon is never lost.
+- **Assistant isolation** is enforced by `test/unit/map-assistant-isolation.unit.test.ts`
+  and `e2e/assistant-regression.spec.ts` (no stubs on `/api/assistant`).
