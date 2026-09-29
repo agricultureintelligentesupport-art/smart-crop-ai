@@ -111,7 +111,7 @@ export interface DashboardCopy {
     drawing: string;
     clear: string;
     cancel: string;
-    save: string;
+    /** Shown while the boundary is being persisted (auto-saved on «تم»). */
     saving: string;
     delete: string;
     namePlaceholder: string;
@@ -151,6 +151,16 @@ export interface DashboardCopy {
     locateDenied: string;
     /** `{area}` — live area of the boundary being drawn. */
     liveArea: string;
+    /** Review state after «تم»: caption above the isolated plot's area. */
+    isolatedAreaLabel: string;
+    /** The stage-2 action — rendered disabled until the satellite pipeline is wired to it. */
+    analyze: string;
+    /** Tooltip / accessible explanation of why the action is disabled for now. */
+    analyzeSoon: string;
+    /** Leave the review and draw the boundary again. */
+    redraw: string;
+    /** Confirmation that the boundary was saved. */
+    saved: string;
   };
   /**
    * Field heatmap: the parcel split into zones, with three switchable layers
@@ -527,7 +537,6 @@ const AR: DashboardCopy = {
     drawing: "انقر على الخريطة لإضافة النقاط، ثم اضغط «تم» لإغلاق الشكل",
     clear: "مسح",
     cancel: "إغلاق",
-    save: "حفظ",
     saving: "جارٍ الحفظ…",
     delete: "حذف القطعة",
     namePlaceholder: "اسم القطعة",
@@ -555,6 +564,11 @@ const AR: DashboardCopy = {
     locating: "جارٍ تحديد موقعك…",
     locateDenied: "تعذّر الوصول إلى موقعك الحالي. تعرض الخريطة آخر منطقة استخدمتها.",
     liveArea: "المساحة حتى الآن: {area} هكتار",
+    isolatedAreaLabel: "مساحة القطعة",
+    analyze: "تحليل القطعة",
+    analyzeSoon: "تحليل الأقمار الصناعية سيُفعَّل في الخطوة التالية",
+    redraw: "إعادة الرسم",
+    saved: "تم حفظ الحدود",
   },
   heatmap: {
     title: "الخريطة الحرارية للقطعة",
@@ -922,7 +936,6 @@ const FR: DashboardCopy = {
     drawing: "Touchez la carte pour ajouter des points, puis appuyez sur « Terminer » pour fermer",
     clear: "Effacer",
     cancel: "Fermer",
-    save: "Enregistrer",
     saving: "Enregistrement…",
     delete: "Supprimer la parcelle",
     namePlaceholder: "Nom de la parcelle",
@@ -950,6 +963,11 @@ const FR: DashboardCopy = {
     locating: "Localisation en cours…",
     locateDenied: "Impossible d'accéder à votre position. La carte affiche la dernière zone utilisée.",
     liveArea: "Surface pour l'instant : {area} ha",
+    isolatedAreaLabel: "Surface de la parcelle",
+    analyze: "Analyser la parcelle",
+    analyzeSoon: "L'analyse satellite sera activée à l'étape suivante",
+    redraw: "Redessiner",
+    saved: "Limites enregistrées",
   },
   heatmap: {
     title: "Carte thermique de la parcelle",

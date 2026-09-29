@@ -47,6 +47,7 @@ import type { FeatureGroup, LayerGroup, Map as LeafletMap, Polygon as LeafletPol
 import type { MapHandle } from "./FieldMapSheet";
 import type { Plot } from "@/lib/field-data/types";
 import { isSimpleRing, ringAreaHa, type Ring } from "@/lib/geo/polygon";
+import { createPlotIsolator } from "./plotIsolate";
 import "./map.css";
 
 const TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -159,6 +160,7 @@ export default function FieldMapCanvas({
   onDrawingChange,
   onInvalid,
   onLocateResult,
+  isolateRing,
   lang,
   ariaLabel,
 }: {
@@ -177,16 +179,27 @@ export default function FieldMapCanvas({
   onInvalid: () => void;
   /** GPS result after an explicit locate: `false` means denied/unavailable. */
   onLocateResult: (ok: boolean) => void;
+  /**
+   * The ring to spotlight (the post-«تم» review), or `null`. While set, the
+   * isolation overlay owns the viewport: saved plots step aside, and the
+   * automatic "frame the active plot" refits are suppressed so nothing can
+   * yank the view away from the plot being reviewed.
+   */
+  isolateRing: Ring | null;
   lang: "ar" | "fr";
   ariaLabel: string;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<MapHandle | null>(null);
+  /** Set by the one-shot effect below; the isolate effect drives it. */
+  const applyIsolateRef = useRef<((ring: Ring | null) => void) | null>(null);
   // Callbacks are read through a ref so the map — created once — is never torn
   // down just because a parent callback identity changed on a re-render.
   // Map events fire long after render, so they must read the newest callbacks.
   // Assigning in an effect (not during render) keeps the ref write out of the
   // render path while still being current by the time any event can fire.
+  // `plots`/`activeId` ride along so the saved-plot layer can be repainted the
+  // moment isolation ends, without wiring another prop through the handle.
   const latest = useRef({
     onDraftChange,
     onDrawingArea,
@@ -197,6 +210,8 @@ export default function FieldMapCanvas({
     onLocateResult,
     fallbackCenter,
     lang,
+    plots,
+    activeId,
   });
   useEffect(() => {
     latest.current = {
@@ -209,8 +224,16 @@ export default function FieldMapCanvas({
       onLocateResult,
       fallbackCenter,
       lang,
+      plots,
+      activeId,
     };
   });
+
+  /* Drive the isolation overlay from the prop. The map applies it through the
+     one-shot effect's closure — the only place the Leaflet instance lives. */
+  useEffect(() => {
+    applyIsolateRef.current?.(isolateRing);
+  }, [isolateRing]);
 
   useEffect(() => {
     let disposed = false;
@@ -245,6 +268,65 @@ export default function FieldMapCanvas({
       map.addLayer(draftGroup);
       const savedGroup: LayerGroup = new L.LayerGroup();
       map.addLayer(savedGroup);
+
+      /* ---- isolation (post-«تم» review) ---- */
+
+      // While the spotlight is up it owns the viewport: saved plots step aside
+      // and the automatic refits stay off, so a background data refresh cannot
+      // yank the view away from the plot being reviewed.
+      let isolateActive = false;
+      const isolator = createPlotIsolator(map, L);
+
+      /**
+       * Repaint the saved-plot layer; `fit` frames the active plot. Framing is
+       * an explicit act — the opening chain asks for it, or the farmer picked a
+       * plot — and a background re-sync of the same plot must never move the
+       * view away from where the farmer is looking.
+       */
+      const syncPlots = (list: Plot[], active: string | null, fit = false) => {
+        savedGroup.clearLayers();
+        if (isolateActive) return; // the spotlight overlay owns the map
+        let activeLayer: LeafletPolygon | null = null;
+        for (const plot of list) {
+          const isActive = plot.id === active;
+          const polygon = L.polygon(toLatLngs(plot.ring), isActive ? ACTIVE_STYLE : IDLE_STYLE);
+          polygon.on("click", () => latest.current.onPick(plot));
+          polygon.bindTooltip(`${plot.name} · ${plot.areaHa.toFixed(2)} ha`, {
+            direction: "top",
+            sticky: true,
+          });
+          polygon.addTo(savedGroup);
+          if (isActive) activeLayer = polygon;
+        }
+        if (fit && activeLayer) {
+          map.fitBounds(activeLayer.getBounds(), { padding: [32, 32] });
+        }
+      };
+
+      applyIsolateRef.current = (next: Ring | null) => {
+        isolator.set(next);
+        isolateActive = next !== null;
+        if (next) {
+          // The spotlight replaces every other geometry: the draft layer (whose
+          // ring it is painting) and the saved plots all step aside until the
+          // review ends.
+          draftGroup.clearLayers();
+          savedGroup.clearLayers();
+          // Smoothly frame the plot (fitBounds with padding), leaving room for
+          // the search pill above and the review bar below. Under reduced
+          // motion the frame is a jump cut, not a glide.
+          const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          map.fitBounds(
+            L.latLngBounds(next.map(([lon, lat]) => [lat, lon] as [number, number])),
+            { paddingTopLeft: [40, 76], paddingBottomRight: [40, 176], animate: !reduce },
+          );
+        } else {
+          // Restore the saved-plot layer with the newest data. Framing is
+          // deliberately off — leaving isolation must not move the camera.
+          const { plots: current, activeId: currentActive } = latest.current;
+          syncPlots(current, currentActive, false);
+        }
+      };
 
       /* ---- drawing ---- */
 
@@ -386,27 +468,7 @@ export default function FieldMapCanvas({
           // single-field drawing scale — never a whole-country frame.
           map.flyTo([lat, lng], zoom);
         },
-        syncPlots(list: Plot[], active: string | null, fit = false) {
-          savedGroup.clearLayers();
-          let activeLayer: LeafletPolygon | null = null;
-          for (const plot of list) {
-            const isActive = plot.id === active;
-            const polygon = L.polygon(toLatLngs(plot.ring), isActive ? ACTIVE_STYLE : IDLE_STYLE);
-            polygon.on("click", () => latest.current.onPick(plot));
-            polygon.bindTooltip(`${plot.name} · ${plot.areaHa.toFixed(2)} ha`, {
-              direction: "top",
-              sticky: true,
-            });
-            polygon.addTo(savedGroup);
-            if (isActive) activeLayer = polygon;
-          }
-          // Framing is an explicit act — the opening chain asked for it, or the
-          // farmer picked a plot. A data refresh must never yank the view away
-          // from where the farmer is looking.
-          if (fit && activeLayer) {
-            map.fitBounds(activeLayer.getBounds(), { padding: [32, 32] });
-          }
-        },
+        syncPlots,
       };
       handleRef.current = handle;
       latest.current.onReady(handle);
@@ -434,6 +496,7 @@ export default function FieldMapCanvas({
       teardown = () => {
         cancelAnimationFrame(raf);
         window.removeEventListener("resize", onWindowResize);
+        applyIsolateRef.current = null;
         handleRef.current = null;
         map.remove();
       };

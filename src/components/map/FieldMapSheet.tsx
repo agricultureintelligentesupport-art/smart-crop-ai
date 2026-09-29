@@ -32,13 +32,26 @@
  * reason ("encloses 0.004 ha, under the 0.05 ha minimum") instead of a
  * generic failure.
  *
+ * THE «تم» REVIEW (stage 1)
+ * -------------------------
+ * Tapping «تم» stays in this sheet and enters the review state: the boundary is
+ * saved through the same `onSave` pipeline as before, the map glides to a
+ * fitBounds framing of the polygon, and the plot is isolated — everything
+ * outside it dimmed and frosted by `plotIsolate.ts`, the boundary itself crisp
+ * with a clean emerald outline — with the real area in hectares. The drawing
+ * controls are replaced by exactly two actions: «تحليل القطعة» (disabled until
+ * stage 2 wires the satellite pipeline to it) and «إعادة الرسم» (back to
+ * drawing; the saved boundary stays on the map as the reference to correct,
+ * and the next «تم» replaces it in place).
+ *
  * Coordinates: Leaflet works in `[lat, lng]`, GeoJSON in `[lng, lat]`. The
  * conversion happens at this boundary and nowhere else.
  */
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, LocateFixed, Map as MapIcon, Trash2, Undo2 } from "lucide-react";
+import { motion, useReducedMotion } from "framer-motion";
+import { CheckCircle2, Loader2, LocateFixed, Map as MapIcon, RotateCcw, Sparkles, Trash2, Undo2 } from "lucide-react";
 import type { Lang } from "@/lib/wilayas";
 import type { Plot } from "@/lib/field-data/types";
 import { ringAreaHa, validatePlot, type Ring } from "@/lib/geo/polygon";
@@ -52,7 +65,7 @@ export interface FieldMapSheetCopy {
   drawing: string;
   clear: string;
   cancel: string;
-  save: string;
+  /** Status chip while the boundary is being persisted (auto-saved on «تم»). */
   saving: string;
   delete: string;
   namePlaceholder: string;
@@ -92,10 +105,32 @@ export interface FieldMapSheetCopy {
   locateDenied: string;
   /** `{area}` — live area of the boundary being drawn. */
   liveArea: string;
+  /** Review state after «تم»: caption above the isolated plot's area. */
+  isolatedAreaLabel: string;
+  /** The stage-2 action — disabled until the satellite pipeline is wired to it. */
+  analyze: string;
+  /** Tooltip / accessible explanation of why the action is disabled for now. */
+  analyzeSoon: string;
+  /** Leave the review and draw the boundary again. */
+  redraw: string;
+  /** Confirmation that the boundary was saved. */
+  saved: string;
 }
 
 /** Zoom after choosing a search result — single-field drawing scale. */
 const SEARCH_RESULT_ZOOM = 16;
+
+/**
+ * The plot's real area, in hectares, with precision matched to its size:
+ * a 0.05 ha minimum needs three decimals to be readable; a 400 ha
+ * operation does not.
+ */
+const formatHa = (ha: number | null): string => {
+  if (ha === null) return "—";
+  if (ha >= 100) return ha.toFixed(1);
+  if (ha >= 10) return ha.toFixed(2);
+  return ha.toFixed(3);
+};
 
 /** Imperative commands the toolbar can issue to the map. */
 export interface MapHandle {
@@ -158,6 +193,15 @@ export default function FieldMapSheet({
   const [name, setName] = useState(() => plots.find((p) => p.id === activeId)?.name ?? "");
   const [error, setError] = useState<string | null>(null);
   const [drawing, setDrawing] = useState(false);
+  /**
+   * The post-«تم» review: true while the drawn plot is spotlighted on the map
+   * with the two stage-1 actions. `draft` holds the reviewed ring.
+   */
+  const [isolated, setIsolated] = useState(false);
+  /** Where the automatic save behind «تم» stands — drives the review chip. */
+  const [saveState, setSaveState] = useState<"idle" | "busy" | "saved" | "error">("idle");
+  /** Why the boundary could not be saved, in the farmer's language. */
+  const [saveError, setSaveError] = useState<string | null>(null);
   /** Live area (ha) of the in-progress boundary — the farmer draws to a size. */
   const [drawingArea, setDrawingArea] = useState<number | null>(null);
   /** True while a GPS fix is being requested by the toolbar button. */
@@ -167,7 +211,7 @@ export default function FieldMapSheet({
   const handleRef = useRef<MapHandle | null>(null);
 
   const draftAreaHa = useMemo(() => (draft ? ringAreaHa(draft) : null), [draft]);
-  const valid = useMemo(() => (draft ? validatePlot(draft).ok : false), [draft]);
+  const reduceMotion = useReducedMotion();
 
   // The dashboard mounts this sheet only while the map is open, so every
   // session starts with clean state and a canvas that has not mounted yet.
@@ -211,21 +255,50 @@ export default function FieldMapSheet({
     handleRef.current?.flyTo(place.lat, place.lng, SEARCH_RESULT_ZOOM);
   }, []);
 
-  const handleSave = useCallback(async () => {
-    if (!draft) return;
-    if (!valid) {
-      setError(copy.errorTooSmall);
-      return;
-    }
-    setError(null);
-    const result = await onSave(name, draft);
-    if (!result.ok) setError(result.error ?? copy.errorGeneric);
-    else {
-      setDraft(null);
-      setDrawingArea(null);
-      setDrawing(false);
-    }
-  }, [draft, valid, name, onSave, copy]);
+  /* «تم» = confirm and save, through the exact pipeline «حفظ» used. One
+     attempt per drawn boundary: the ring's object identity marks the commit,
+     so a redraw of the same shape or a plots refresh never saves twice — and
+     the guard doubles as the staleness check when the promise lands. */
+  const committedRef = useRef<Ring | null>(null);
+
+  /** Save the boundary the farmer just confirmed with «تم». */
+  const commitDraft = useCallback(
+    (ring: Ring) => {
+      if (committedRef.current === ring) return;
+      committedRef.current = ring;
+
+      if (!validatePlot(ring).ok) {
+        // Below the minimum or unusable: say why, keep the review open —
+        // «إعادة الرسم» is the way out.
+        setSaveState("error");
+        setSaveError(copy.errorTooSmall);
+        return;
+      }
+      setSaveState("busy");
+      setSaveError(null);
+      onSave(name, ring).then((result) => {
+        // A newer boundary may already own the review; its result wins.
+        if (committedRef.current !== ring) return;
+        if (result.ok) {
+          setSaveState("saved");
+          setSaveError(null);
+        } else {
+          setSaveState("error");
+          setSaveError(result.error ?? copy.errorGeneric);
+        }
+      });
+    },
+    [onSave, name, copy],
+  );
+
+  /** «إعادة الرسم»: leave the review and draw again. The saved boundary stays
+      on the map as the reference to correct; the next «تم» replaces it. */
+  const beginDrawing = useCallback(() => {
+    setIsolated(false);
+    setSaveState("idle");
+    setSaveError(null);
+    void startDraw();
+  }, [startDraw]);
 
   return (
     <div
@@ -255,11 +328,20 @@ export default function FieldMapSheet({
             plots={plots}
             activeId={activeId}
             fallbackCenter={fallbackCenter}
+            isolateRing={isolated ? draft : null}
             onDraftChange={(ring) => {
               setDraft(ring);
               if (ring) {
+                // «تم» closed a usable shape: save it and review it in place.
                 setDrawing(false);
                 setDrawingArea(null);
+                setIsolated(true);
+                commitDraft(ring);
+              } else {
+                // Redraw / clear: the review (if any) is over.
+                setIsolated(false);
+                setSaveState("idle");
+                setSaveError(null);
               }
             }}
             onDrawingArea={setDrawingArea}
@@ -310,8 +392,9 @@ export default function FieldMapSheet({
           )}
 
           {/* GPS jump: thumb-reachable, away from the search control (top-end)
-              and the zoom buttons (top-start). */}
-          {!drawing && mapReady && (
+              and the zoom buttons (top-start). Hidden while drawing or during
+              the «تم» review — the review bar owns the bottom strip. */}
+          {!drawing && !isolated && mapReady && (
             <button
               type="button"
               onClick={locateMe}
@@ -364,29 +447,73 @@ export default function FieldMapSheet({
             </div>
           )}
 
-          {draft && (
-            <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center gap-2 rounded-[1.1rem] bg-white/95 p-2.5 shadow-[0_18px_40px_-22px_rgba(6,78,59,0.7)]">
-              <span className="text-[11.5px] font-black text-emerald-950">
-                {draftAreaHa === null ? copy.drawing : `${draftAreaHa.toFixed(3)} ${copy.areaLabel}`}
-              </span>
-              <div className="ms-auto flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={clearDraft}
-                  className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {copy.clear}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={!valid || busy}
-                  className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-600 px-4 text-[11px] font-extrabold text-white disabled:opacity-45 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {busy ? copy.saving : copy.save}
-                </button>
+          {/* Post-«تم» review: the plot, isolated. The drawing controls are
+              gone; in their place the real area and exactly two actions —
+              «تحليل القطعة» (stage 2 wires it up) and «إعادة الرسم». */}
+          {draft && isolated && (
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, y: 32 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ type: "spring", stiffness: 380, damping: 34 }}
+              className="absolute inset-x-3 bottom-8 z-[600]"
+            >
+              <div className="rounded-[1.35rem] border border-white/70 bg-white/95 p-3 shadow-[0_24px_48px_-22px_rgba(6,78,59,0.55)] backdrop-blur-xl">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[10.5px] font-bold text-emerald-900/55">{copy.isolatedAreaLabel}</p>
+                    <p className="truncate text-[19px] font-black leading-6 tabular-nums text-emerald-950">
+                      {formatHa(draftAreaHa)}{" "}
+                      <span className="text-[12px] font-extrabold text-emerald-700">{copy.areaLabel}</span>
+                    </p>
+                  </div>
+                  {(saveState === "busy" || busy) && (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-900/[0.06] px-2.5 py-1 text-[10.5px] font-extrabold text-emerald-900/70">
+                      <Loader2 size={12} className="animate-spin" aria-hidden />
+                      {copy.saving}
+                    </span>
+                  )}
+                  {saveState === "saved" && (
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10.5px] font-extrabold text-emerald-700 ring-1 ring-emerald-600/20">
+                      <CheckCircle2 size={12} strokeWidth={2.8} aria-hidden />
+                      {copy.saved}
+                    </span>
+                  )}
+                </div>
+
+                {saveError && (
+                  <p
+                    role="alert"
+                    className="mt-2 rounded-[0.9rem] bg-amber-50 px-3 py-2 text-[11px] font-bold leading-5 text-amber-900 ring-1 ring-amber-200/70"
+                  >
+                    {saveError}
+                  </p>
+                )}
+
+                <div className="mt-3 flex gap-2">
+                  {/* Stage 2 wires the satellite pipeline to this action; until
+                      then it stays visibly disabled instead of pretending. */}
+                  <button
+                    type="button"
+                    disabled
+                    aria-disabled="true"
+                    title={copy.analyzeSoon}
+                    aria-label={`${copy.analyze} — ${copy.analyzeSoon}`}
+                    className="flex h-12 flex-1 cursor-not-allowed items-center justify-center gap-1.5 rounded-full bg-emerald-600 text-[12.5px] font-extrabold text-white opacity-45 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                  >
+                    <Sparkles size={15} strokeWidth={2.6} aria-hidden />
+                    {copy.analyze}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={beginDrawing}
+                    className="flex h-12 items-center justify-center gap-1.5 rounded-full bg-emerald-900/[0.07] px-4 text-[12.5px] font-extrabold text-emerald-900 hover:bg-emerald-900/[0.12] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                  >
+                    <RotateCcw size={15} strokeWidth={2.6} aria-hidden />
+                    {copy.redraw}
+                  </button>
+                </div>
               </div>
-            </div>
+            </motion.div>
           )}
         </div>
 
@@ -438,7 +565,7 @@ export default function FieldMapSheet({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={drawing ? () => handleRef.current?.finishDraw() : startDraw}
+              onClick={drawing ? () => handleRef.current?.finishDraw() : isolated ? beginDrawing : startDraw}
               disabled={!mapReady}
               className="flex min-h-[2.75rem] flex-1 items-center justify-center gap-1.5 rounded-[0.9rem] bg-emerald-600 px-4 text-[12px] font-extrabold text-white hover:bg-emerald-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
             >

@@ -51,6 +51,44 @@
   top: 4.25rem;
 }
 
+/*
+ * Isolation overlay (the post-«تم» review) — the panes the spotlight mask
+ * paints into (`plotIsolate.ts` owns the geometry; this is its skin). The
+ * dim/frost/outline polygons render through Leaflet's own per-pane SVG
+ * renderers, so they follow every pan and zoom by themselves. The blur pane
+ * carries the `backdrop-filter`, clipped by an SVG clip-path to everything
+ * outside the plot; its transform is written from JS on zoom events only —
+ * never per frame. Panes fade in over the fitBounds zoom; under reduced
+ * motion or reduced transparency they degrade like the app's `.glass`
+ * surfaces do.
+ */
+.field-map-isolate-pane {
+  opacity: 0;
+  transition: opacity 480ms ease;
+}
+
+.field-map-isolate-on {
+  opacity: 1;
+}
+
+.field-map-isolate-blur {
+  pointer-events: none;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field-map-isolate-pane {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .field-map-isolate-blur {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .field-map-vertex,
   .leaflet-editing-icon {
