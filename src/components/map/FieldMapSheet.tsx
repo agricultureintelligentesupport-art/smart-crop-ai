@@ -38,7 +38,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Map as MapIcon, Trash2 } from "lucide-react";
+import { Loader2, LocateFixed, Map as MapIcon, Trash2, Undo2 } from "lucide-react";
 import type { Lang } from "@/lib/wilayas";
 import type { Plot } from "@/lib/field-data/types";
 import { ringAreaHa, validatePlot, type Ring } from "@/lib/geo/polygon";
@@ -68,6 +68,22 @@ export interface FieldMapSheetCopy {
   openMaps: string;
   mapTitle: string;
   use: string;
+  /** Location search (Nominatim) input placeholder — Arabic or French place names. */
+  searchPlaceholder: string;
+  /** No result / geocoder failure, in the farmer's language. */
+  searchError: string;
+  /** Accessible name of the search input. */
+  searchLabel: string;
+  /** Remove the last vertex placed while drawing. */
+  undo: string;
+  /** Fly the map to the device's current location. */
+  locate: string;
+  /** Shown while the GPS fix is being taken. */
+  locating: string;
+  /** GPS permission denied or unavailable; the map kept its fallback view. */
+  locateDenied: string;
+  /** `{area}` — live area of the boundary being drawn. */
+  liveArea: string;
 }
 
 /** Imperative commands the toolbar can issue to the map. */
@@ -76,10 +92,14 @@ export interface MapHandle {
   startDraw: () => Promise<boolean>;
   /** Close the polygon the farmer has drawn, if it is a usable shape. */
   finishDraw: () => void;
+  /** Remove the last vertex placed while drawing. */
+  undoDraw: () => void;
   /** Discard the in-progress polygon. */
   clear: () => void;
   /** True while a polygon is being drawn. */
   isDrawing: () => boolean;
+  /** Fly the map to the device's current location. Resolves false when denied. */
+  locate: () => Promise<boolean>;
   /** Repaint the saved-plot layer and optionally frame the active plot. */
   syncPlots: (plots: Plot[], activeId: string | null, fit?: boolean) => void;
 }
@@ -104,6 +124,7 @@ export default function FieldMapSheet({
   copy,
   lang,
   busy = false,
+  fallbackCenter,
 }: {
   onClose: () => void;
   plots: Plot[];
@@ -115,6 +136,8 @@ export default function FieldMapSheet({
   copy: FieldMapSheetCopy;
   lang: Lang;
   busy?: boolean;
+  /** Wilaya-capital fallback for the opening view, `[lat, lng]`. */
+  fallbackCenter?: [number, number];
 }) {
   const [draft, setDraft] = useState<Ring | null>(null);
   // Pre-filled with the active plot's name, so "edit boundary" opens on the
@@ -122,6 +145,10 @@ export default function FieldMapSheet({
   const [name, setName] = useState(() => plots.find((p) => p.id === activeId)?.name ?? "");
   const [error, setError] = useState<string | null>(null);
   const [drawing, setDrawing] = useState(false);
+  /** Live area (ha) of the in-progress boundary — the farmer draws to a size. */
+  const [drawingArea, setDrawingArea] = useState<number | null>(null);
+  /** True while a GPS fix is being requested by the toolbar button. */
+  const [locating, setLocating] = useState(false);
   /** The Leaflet canvas reports itself ready; drawing is impossible before that. */
   const [mapReady, setMapReady] = useState(false);
   const handleRef = useRef<MapHandle | null>(null);
@@ -150,8 +177,21 @@ export default function FieldMapSheet({
   const clearDraft = useCallback(() => {
     handleRef.current?.clear();
     setDraft(null);
+    setDrawingArea(null);
     setDrawing(false);
   }, []);
+
+  const undoVertex = useCallback(() => {
+    handleRef.current?.undoDraw();
+  }, []);
+
+  const locateMe = useCallback(async () => {
+    setLocating(true);
+    setError(null);
+    const ok = await (handleRef.current?.locate() ?? Promise.resolve(false));
+    setLocating(false);
+    if (!ok) setError(copy.locateDenied);
+  }, [copy.locateDenied]);
 
   const handleSave = useCallback(async () => {
     if (!draft) return;
@@ -164,6 +204,7 @@ export default function FieldMapSheet({
     if (!result.ok) setError(result.error ?? copy.errorGeneric);
     else {
       setDraft(null);
+      setDrawingArea(null);
       setDrawing(false);
     }
   }, [draft, valid, name, onSave, copy]);
@@ -195,10 +236,15 @@ export default function FieldMapSheet({
           <FieldMapCanvas
             plots={plots}
             activeId={activeId}
+            fallbackCenter={fallbackCenter}
             onDraftChange={(ring) => {
               setDraft(ring);
-              if (ring) setDrawing(false);
+              if (ring) {
+                setDrawing(false);
+                setDrawingArea(null);
+              }
             }}
+            onDrawingArea={setDrawingArea}
             onPick={(plot) => onActivate(plot.id)}
             onReady={(handle) => {
               handleRef.current = handle;
@@ -207,15 +253,79 @@ export default function FieldMapSheet({
             onDrawingChange={setDrawing}
             onInvalid={() => {
               setDrawing(false);
+              setDrawingArea(null);
               setError(copy.errorCrossing);
+            }}
+            onLocateResult={(ok) => {
+              if (!ok) setError(copy.locateDenied);
             }}
             lang={lang}
             ariaLabel={copy.mapTitle}
+            geocoderCopy={{
+              placeholder: copy.searchPlaceholder,
+              errorMessage: copy.searchError,
+              iconLabel: copy.searchLabel,
+            }}
           />
 
           {loading && (
             <div className="absolute inset-x-0 top-3 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white">
               {copy.loading}
+            </div>
+          )}
+
+          {/* GPS jump: thumb-reachable, away from the search control (top-end)
+              and the zoom buttons (top-start). */}
+          {!drawing && mapReady && (
+            <button
+              type="button"
+              onClick={locateMe}
+              disabled={locating}
+              aria-label={locating ? copy.locating : copy.locate}
+              className="absolute bottom-3 end-3 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_14px_28px_-12px_rgba(6,78,59,0.8)] hover:bg-emerald-700 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+            >
+              {locating ? (
+                <Loader2 size={18} className="animate-spin" aria-hidden />
+              ) : (
+                <LocateFixed size={18} strokeWidth={2.6} aria-hidden />
+              )}
+            </button>
+          )}
+
+          {/* While drawing: live area so the farmer can stop at the right size,
+              plus undo / finish / cancel within thumb reach. All ≥ 44 px. */}
+          {drawing && (
+            <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center gap-2 rounded-[1.1rem] bg-white/95 p-2.5 shadow-[0_18px_40px_-22px_rgba(6,78,59,0.7)]">
+              <span className="text-[11.5px] font-black leading-5 text-emerald-950">
+                {drawingArea === null
+                  ? copy.drawing
+                  : copy.liveArea.replace("{area}", drawingArea.toFixed(3))}
+              </span>
+              <div className="ms-auto flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={undoVertex}
+                  aria-label={copy.undo}
+                  className="flex min-h-[2.75rem] items-center gap-1 rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                >
+                  <Undo2 size={14} strokeWidth={2.6} aria-hidden />
+                  {copy.undo}
+                </button>
+                <button
+                  type="button"
+                  onClick={clearDraft}
+                  className="flex min-h-[2.75rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                >
+                  {copy.clear}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRef.current?.finishDraw()}
+                  className="flex min-h-[2.75rem] items-center rounded-full bg-emerald-600 px-4 text-[11px] font-extrabold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                >
+                  {copy.finish}
+                </button>
+              </div>
             </div>
           )}
 

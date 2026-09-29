@@ -121,14 +121,30 @@ export interface DashboardCopy {
     areaLabel: string;
     errorTooSmall: string;
     errorGeneric: string;
-  /** The drawn boundary crosses itself, so it has no area and cannot be used. */
-  errorCrossing: string;
-  /** Close the polygon being drawn. */
-  finish: string;
+    /** The drawn boundary crosses itself, so it has no area and cannot be used. */
+    errorCrossing: string;
+    /** Close the polygon being drawn. */
+    finish: string;
     attribution: string;
     openMaps: string;
     mapTitle: string;
     use: string;
+    /** Location search (Nominatim) input placeholder — Arabic or French place names. */
+    searchPlaceholder: string;
+    /** No result / geocoder failure, in the farmer's language. */
+    searchError: string;
+    /** Accessible name of the search input. */
+    searchLabel: string;
+    /** Remove the last vertex placed while drawing. */
+    undo: string;
+    /** Fly the map to the device's current location. */
+    locate: string;
+    /** Shown while the GPS fix is being taken. */
+    locating: string;
+    /** GPS permission denied or unavailable; the map kept its fallback view. */
+    locateDenied: string;
+    /** `{area}` — live area of the boundary being drawn. */
+    liveArea: string;
   };
   /**
    * Field heatmap: the parcel split into zones, with three switchable layers
@@ -502,7 +518,7 @@ const AR: DashboardCopy = {
     title: "خريطة الحقول",
     subtitle: "ارسم حدود قطعتك على صورة الأقمار الصناعية. تُستخدم الرسم لحساب NDVI لكل منطقة.",
     draw: "رسم الحدود",
-    drawing: "انقر على الخريطة لإضافة النقاط، ثم انقر على النقطة الأولى للإغلاق",
+    drawing: "انقر على الخريطة لإضافة النقاط، ثم اضغط «تم» لإغلاق الشكل",
     clear: "مسح",
     cancel: "إغلاق",
     save: "حفظ",
@@ -522,6 +538,14 @@ const AR: DashboardCopy = {
     openMaps: "الخرائط: Esri World Imagery.",
     mapTitle: "خريطة الحقول — صور فضائية",
     use: "استخدام هذه القطعة",
+    searchPlaceholder: "ابحث عن مكان في الجزائر…",
+    searchError: "تعذّر إتمام البحث. حاول مرة أخرى.",
+    searchLabel: "البحث عن موقع على الخريطة",
+    undo: "تراجع",
+    locate: "موقعي",
+    locating: "جارٍ تحديد موقعك…",
+    locateDenied: "تعذّر الوصول إلى موقعك الحالي. تعرض الخريطة آخر منطقة استخدمتها.",
+    liveArea: "المساحة حتى الآن: {area} هكتار",
   },
   heatmap: {
     title: "الخريطة الحرارية للقطعة",
@@ -886,7 +910,7 @@ const FR: DashboardCopy = {
     title: "Carte des parcelles",
     subtitle: "Tracez le contour de votre parcelle sur l'imagerie satellite. Le contour sert au calcul du NDVI par zone.",
     draw: "Tracer le contour",
-    drawing: "Touchez la carte pour ajouter des points, puis le premier point pour fermer",
+    drawing: "Touchez la carte pour ajouter des points, puis appuyez sur « Terminer » pour fermer",
     clear: "Effacer",
     cancel: "Fermer",
     save: "Enregistrer",
@@ -906,6 +930,14 @@ const FR: DashboardCopy = {
     openMaps: "Fond de carte : Esri World Imagery.",
     mapTitle: "Carte des parcelles — imagerie satellite",
     use: "Utiliser cette parcelle",
+    searchPlaceholder: "Chercher un lieu en Algérie…",
+    searchError: "La recherche a échoué. Réessayez.",
+    searchLabel: "Rechercher un lieu sur la carte",
+    undo: "Annuler le point",
+    locate: "Ma position",
+    locating: "Localisation en cours…",
+    locateDenied: "Impossible d'accéder à votre position. La carte affiche la dernière zone utilisée.",
+    liveArea: "Surface pour l'instant : {area} ha",
   },
   heatmap: {
     title: "Carte thermique de la parcelle",

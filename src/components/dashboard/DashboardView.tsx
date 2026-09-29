@@ -368,6 +368,7 @@ export default function DashboardView() {
           onActivate={fieldData.setActivePlot}
           copy={t.fieldMap}
           lang={lang}
+          fallbackCenter={[wilaya.lat, wilaya.lon]}
         />
       )}
 
