@@ -1,0 +1,107 @@
+/*
+ * Field-map styling that Leaflet itself owns the shape of: draw vertices and
+ * the geocoder control. Scoped to the map module — the sheet that hosts the
+ * canvas is styled with the dashboard's Tailwind tokens; these are the parts
+ * Leaflet renders into the canvas DOM, which Tailwind never sees.
+ */
+
+/*
+ * Draw vertices: 24 px visible target (white diamond, emerald outline) with a
+ * 48 px invisible hit box grown through the pseudo-element, so a finger can
+ * both see and hit the point it just placed. Leaflet centres the icon on the
+ * coordinate, so the hit box is centred the same way.
+ */
+.field-map-vertex {
+  position: relative;
+  width: 24px !important;
+  height: 24px !important;
+  margin: -12px 0 0 -12px !important;
+  background: #ffffff;
+  border: 3px solid #047857;
+  border-radius: 8px;
+  transform: rotate(45deg);
+  box-shadow: 0 2px 8px rgba(4, 120, 87, 0.45);
+  box-sizing: border-box;
+}
+
+.field-map-vertex::after {
+  content: "";
+  position: absolute;
+  inset: -14px;
+  border-radius: 22px;
+}
+
+/* The default editing icon Leaflet.draw uses for an existing polygon's corners. */
+.leaflet-editing-icon {
+  width: 24px !important;
+  height: 24px !important;
+  margin: -12px 0 0 -12px !important;
+  border-width: 3px !important;
+  border-radius: 8px !important;
+}
+
+/* Geocoder control: mobile-first touch targets, Arabic-friendly input. */
+.leaflet-control-geocoder {
+  max-width: min(19rem, calc(100vw - 6.5rem));
+  border: 1px solid rgba(6, 78, 59, 0.18);
+  border-radius: 14px;
+  box-shadow: 0 14px 30px -18px rgba(6, 78, 59, 0.55);
+  background: rgba(255, 255, 255, 0.97);
+  overflow: hidden;
+}
+
+.leaflet-control-geocoder-expanded {
+  width: min(19rem, calc(100vw - 6.5rem));
+}
+
+.leaflet-control-geocoder-icon {
+  margin: 6px;
+  width: 32px;
+  height: 32px;
+}
+
+.leaflet-control-geocoder-input {
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #022c22;
+  background: transparent;
+}
+
+.leaflet-control-geocoder-input:focus-visible,
+.leaflet-control-geocoder-form input:focus-visible {
+  outline: 3px solid rgba(52, 211, 153, 0.55);
+  outline-offset: 1px;
+}
+
+.leaflet-control-geocoder-alternatives li,
+.leaflet-control-geocoder-button {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #022c22;
+}
+
+.leaflet-control-geocoder-alternatives li:hover,
+.leaflet-control-geocoder-alternatives li:focus {
+  background: rgba(16, 185, 129, 0.12);
+}
+
+/* Keep the collapse/reset buttons tappable and the error line readable. */
+.leaflet-control-geocoder-error {
+  padding: 10px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #92400e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field-map-vertex,
+  .leaflet-control-geocoder,
+  .leaflet-control-geocoder-alternatives li {
+    transition: none !important;
+  }
+}

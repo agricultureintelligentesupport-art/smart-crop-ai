@@ -30,7 +30,9 @@ export type ZoneStatus =
   | "moderate"
   | "high"
   | "severe"
-  | "good";
+  | "good"
+  /** No measurement for this cell (cloud, sliver, or a layer with no data). */
+  | "unknown";
 
 export interface HeatZone {
   /** Stable identity: `z-<row>-<col>`. */
@@ -46,12 +48,12 @@ export interface HeatZone {
 /** A zone projected onto the active layer — what the card renders and inspects. */
 export interface ZoneReading {
   zone: HeatZone;
-  /** L/ha for the moisture layer, 0–100 index for the other two. */
-  value: number;
+  /** L/ha for the moisture layer, 0–100 index for the other two; `null` = unmeasured. */
+  value: number | null;
   /** Normalised position on the layer's own scale, 0–1 (drives the colour ramp). */
   intensity: number;
-  /** Signed distance from the layer's field average, %. */
-  deltaPct: number;
+  /** Signed distance from the layer's field average, %; `null` when unmeasured. */
+  deltaPct: number | null;
   status: ZoneStatus;
 }
 
@@ -59,14 +61,31 @@ export interface FieldHeatmap {
   rows: number;
   cols: number;
   zones: HeatZone[];
-  /** The values of every layer, in reading order (moisture = L/ha/day). */
-  values: Record<HeatmapLayer, number[]>;
-  /** Per-layer min/max, for the ramp and the legend. */
+  /**
+   * The values of every layer, in reading order (moisture = L/ha/day).
+   * `null` marks a cell the active source could not measure; it is only ever
+   * populated in observed mode, and the card renders it as "no data".
+   */
+  values: Record<HeatmapLayer, (number | null)[]>;
+  /** Per-layer min/max over the measured cells, for the ramp and the legend. */
   scale: Record<HeatmapLayer, { min: number; max: number }>;
   /** Canonical per-hectare figure the moisture layer averages to (L/ha/day). */
   averagePerHa: number;
   /** Parcel area covered by one zone, hectares. */
   zoneAreaHa: number;
+
+  /* ---- observed mode (a real plot + real satellite/weather data) ---- */
+
+  /** True when these values came from measurements rather than the model. */
+  observed?: boolean;
+  /** Real mean NDVI per zone, or `null` where masked. */
+  ndvi?: (number | null)[];
+  /** Approximate Sentinel-2 pixels averaged per zone. */
+  pixels?: (number | null)[];
+  /** Layers the real data could not support today. */
+  unavailableLayers?: HeatmapLayer[];
+  /** Field mean of the measured NDVI, the reference for per-cell deficits. */
+  meanNdvi?: number | null;
 }
 
 export interface FieldHeatmapInput {
@@ -141,7 +160,9 @@ function largestRemainder(values: number[], total: number): number[] {
   return out;
 }
 
-export function zoneStatus(layer: HeatmapLayer, value: number, deltaPct: number): ZoneStatus {
+export function zoneStatus(layer: HeatmapLayer, value: number | null, deltaPct: number | null): ZoneStatus {
+  // No measurement → no verdict. Never classify a cell we could not read.
+  if (value === null || deltaPct === null) return "unknown";
   if (layer === "moisture") {
     if (deltaPct >= 8) return "dry";
     if (deltaPct >= 2) return "mildDry";
@@ -220,10 +241,18 @@ export function buildFieldHeatmap({
   return { rows, cols, zones, values, scale, averagePerHa: litresPerHaDay, zoneAreaHa: areaHa / count };
 }
 
-/** Mean of one layer across the parcel (moisture → the canonical L/ha figure). */
-export function layerAverage(map: FieldHeatmap, layer: HeatmapLayer): number {
-  const list = map.values[layer];
+/** Mean of one layer across the parcel, ignoring unmeasured cells. */
+export function layerAverage(map: FieldHeatmap, layer: HeatmapLayer): number | null {
+  const list = map.values[layer].filter((v): v is number => v !== null);
+  if (list.length === 0) return null;
   return list.reduce((sum, v) => sum + v, 0) / list.length;
+}
+
+/** Min/max over the measured cells of a layer, for the colour ramp. */
+function scaleOf(values: (number | null)[]): { min: number; max: number } {
+  const measured = values.filter((v): v is number => v !== null);
+  if (measured.length === 0) return { min: 0, max: 0 };
+  return { min: Math.min(...measured), max: Math.max(...measured) };
 }
 
 /**
@@ -232,10 +261,15 @@ export function layerAverage(map: FieldHeatmap, layer: HeatmapLayer): number {
  * move together.
  */
 export function zoneReading(map: FieldHeatmap, zone: HeatZone, layer: HeatmapLayer): ZoneReading {
-  const value = map.values[layer][zone.index];
+  const value = map.values[layer][zone.index] ?? null;
   const { min, max } = map.scale[layer];
   const average = layerAverage(map, layer);
-  const deltaPct = average > 0 ? Math.round(((value - average) / average) * 100) : 0;
+  if (value === null) {
+    // Unmeasured cells get no verdict and no delta; the card renders the
+    // "no data" treatment instead of a number.
+    return { zone, value: null, intensity: 0.5, deltaPct: null, status: "unknown" };
+  }
+  const deltaPct = average !== null && average > 0 ? Math.round(((value - average) / average) * 100) : 0;
   return {
     zone,
     value,
@@ -248,4 +282,70 @@ export function zoneReading(map: FieldHeatmap, zone: HeatZone, layer: HeatmapLay
 /** Every zone of a layer, in reading order. */
 export function layerReadings(map: FieldHeatmap, layer: HeatmapLayer): ZoneReading[] {
   return map.zones.map((zone) => zoneReading(map, zone, layer));
+}
+
+/**
+ * The observed twin of `buildFieldHeatmap`: same grid, same zones, same colour
+ * ramp, same units — but every number comes from a measurement instead of the
+ * seeded model.
+ *
+ * Two invariants survive unchanged, because the UI around them must keep
+ * working exactly as before:
+ *   1. the moisture layer still averages back to `litresPerHaDay`,
+ *   2. cells the satellite could not read are `null`, not interpolated.
+ */
+export function buildObservedHeatmap(input: {
+  rows: number;
+  cols: number;
+  layers: {
+    thermal: (number | null)[];
+    moisture: (number | null)[];
+    transpiration: (number | null)[];
+    ndvi: (number | null)[];
+    pixels: (number | null)[];
+    unavailable: HeatmapLayer[];
+  };
+  areaHa: number;
+  litresPerHaDay: number;
+  meanNdvi: number | null;
+}): FieldHeatmap {
+  const { rows, cols, layers, areaHa, litresPerHaDay } = input;
+  const count = rows * cols;
+  const zones: HeatZone[] = Array.from({ length: count }, (_, index) => ({
+    id: `z-${Math.floor(index / cols)}-${index % cols}`,
+    index,
+    row: Math.floor(index / cols),
+    col: index % cols,
+    offset: 0,
+  }));
+
+  // Pad a short array (a cell can vanish when it is thinner than a pixel) out
+  // to the full grid with `null`, which the card reads as "no data".
+  const fit = (list: (number | null)[]): (number | null)[] =>
+    Array.from({ length: count }, (_, i) => (i < list.length ? list[i] : null));
+
+  const values: FieldHeatmap["values"] = {
+    thermal: fit(layers.thermal),
+    moisture: fit(layers.moisture),
+    transpiration: fit(layers.transpiration),
+  };
+
+  return {
+    rows,
+    cols,
+    zones,
+    values,
+    scale: {
+      thermal: scaleOf(values.thermal),
+      moisture: scaleOf(values.moisture),
+      transpiration: scaleOf(values.transpiration),
+    },
+    averagePerHa: litresPerHaDay,
+    zoneAreaHa: areaHa / count,
+    observed: true,
+    ndvi: fit(layers.ndvi),
+    pixels: fit(layers.pixels),
+    unavailableLayers: layers.unavailable,
+    meanNdvi: input.meanNdvi,
+  };
 }

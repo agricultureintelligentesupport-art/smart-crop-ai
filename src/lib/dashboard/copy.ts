@@ -87,14 +87,77 @@ export interface DashboardCopy {
     syncNote: string;
   };
   /**
+   * Why a saved plot has no measured data yet. One key per `FieldDataReason`;
+   * every one of them promises the same thing — no number is shown.
+   */
+  fieldDataReason: Record<
+    | "noPlot"
+    | "notConfigured"
+    | "auth"
+    | "network"
+    | "timeout"
+    | "http"
+    | "quota"
+    | "noScenes"
+    | "malformed"
+    | "tooSmall",
+    string
+  >;
+  /** Field map sheet: draw and manage field boundaries over satellite imagery. */
+  fieldMap: {
+    title: string;
+    subtitle: string;
+    draw: string;
+    drawing: string;
+    clear: string;
+    cancel: string;
+    save: string;
+    saving: string;
+    delete: string;
+    namePlaceholder: string;
+    noPlots: string;
+    noPlotsHint: string;
+    loading: string;
+    areaLabel: string;
+    errorTooSmall: string;
+    errorGeneric: string;
+    /** The drawn boundary crosses itself, so it has no area and cannot be used. */
+    errorCrossing: string;
+    /** Close the polygon being drawn. */
+    finish: string;
+    attribution: string;
+    openMaps: string;
+    mapTitle: string;
+    use: string;
+    /** Location search (Nominatim) input placeholder — Arabic or French place names. */
+    searchPlaceholder: string;
+    /** No result / geocoder failure, in the farmer's language. */
+    searchError: string;
+    /** Accessible name of the search input. */
+    searchLabel: string;
+    /** Remove the last vertex placed while drawing. */
+    undo: string;
+    /** Fly the map to the device's current location. */
+    locate: string;
+    /** Shown while the GPS fix is being taken. */
+    locating: string;
+    /** GPS permission denied or unavailable; the map kept its fallback view. */
+    locateDenied: string;
+    /** `{area}` — live area of the boundary being drawn. */
+    liveArea: string;
+  };
+  /**
    * Field heatmap: the parcel split into zones, with three switchable layers
-   * and a tap-to-inspect reading per zone. Values are model estimates centred
-   * on the same daily average as the decision card.
+   * and a tap-to-inspect reading per zone. On the model path the values are
+   * estimates centred on the same daily average as the decision card; once a
+   * plot exists they are real Sentinel-2 / NASA POWER measurements.
    */
   heatmap: {
     title: string;
     /** `{area}` `{zones}` */
     subtitle: string;
+    /** `{area}` `{zones}` — used instead of `subtitle` on a measured day. */
+    subtitleObserved: string;
     /** Accessible label of the layer switcher. */
     layersAria: string;
     layers: { thermal: string; moisture: string; transpiration: string };
@@ -106,9 +169,10 @@ export interface DashboardCopy {
     cellAria: string;
     units: { thermal: string; moisture: string; transpiration: string };
     status: {
-      moisture: { wet: string; balanced: string; mildDry: string; dry: string };
-      thermal: { low: string; moderate: string; high: string; severe: string };
-      transpiration: { low: string; moderate: string; good: string; high: string };
+      moisture: { wet: string; balanced: string; mildDry: string; dry: string; unknown: string };
+      thermal: { low: string; moderate: string; high: string; severe: string; unknown: string };
+      /** `unknown` = this cell has no measurement, so it gets no verdict. */
+      transpiration: { low: string; moderate: string; good: string; high: string; unknown: string };
     };
     /** Per-layer inspection sentence: `{value}` `{delta}`. */
     layerNote: { thermal: string; moisture: string; transpiration: string };
@@ -117,6 +181,8 @@ export interface DashboardCopy {
     /** `{pct}` */
     deltaBelow: string;
     deltaEven: string;
+    /** Shown instead of a delta when the cell has no measurement. */
+    deltaNone: string;
     /** Field average of the active layer, synchronised with the decision card. */
     average: string;
     legendLow: string;
@@ -128,6 +194,33 @@ export interface DashboardCopy {
     selectedZone: string;
     /** Honest provenance note for the spatial model. */
     note: string;
+
+    /* ---- real-data (observed) mode ---- */
+
+    /** The whole layer has no real data today (e.g. POWER unreachable). */
+    layerUnavailable: string;
+    /** Stands in for a number in a cell / average with no measurement. */
+    noDataShort: string;
+    /** Header of the provenance block shown on a measured day. */
+    sourceTitle: string;
+    /** `{scene}` `{plot}` */
+    sourceNdvi: string;
+    /** `{date}` `{et0}` `{tmax}` `{rh}` */
+    sourceClimate: string;
+    /** Shown when the POWER day is missing. */
+    sourceClimateNone: string;
+    /** States the true spatial scale of each source, so nothing over-claims. */
+    sourceScale: string;
+    /** Provenance note for a measured day. */
+    noteObserved: string;
+    /** Banner while the card is still on the model estimate. */
+    modelBanner: string;
+    /** Header button: draw a first boundary. */
+    mapDraw: string;
+    /** Header button: edit the saved boundary. */
+    mapEdit: string;
+    /** Plot name fallback when the saved one has none. */
+    plotFallback: string;
   };
   /** Irrigation-window detail sheet: why this window + volume (real inputs only). */
   windowDetail: {
@@ -407,9 +500,57 @@ const AR: DashboardCopy = {
       "نعرض قيم الملليمتر بمنزليتين هنا حتى تكون سلسلة الضرب مطابقة تماماً للرقم النهائي، وبطاقة القرار تعرض نفس الكميات بمنزلة واحدة.",
     syncNote: "الرقمان أعلاه هما نفسهما المعروضان في بطاقة القرار: {litres} لتر لكل هكتار، و{daily} م³ للقطعة.",
   },
+  fieldDataReason: {
+    noPlot: "لا توجد حدود محفوظة بعد. ارسم قطعتك على الخريطة لتحوّل الخريطة الحرارية إلى بيانات حقيقية.",
+    notConfigured:
+      "بيانات الأقمار الصناعية غير مهيّأة في هذا التثبيت. أضف CDSE_CLIENT_ID و CDSE_CLIENT_SECRET إلى إعدادات الخادم.",
+    auth: "رفض فضاء بيانات كوبرنيكوس بيانات الدخول. تحقّق من CDSE_CLIENT_ID و CDSE_CLIENT_SECRET.",
+    network: "تعذّر الوصول إلى خدمة الأقمار الصناعية. لا نعرض أرقاماً لم تُقَس.",
+    timeout: "استغرقت خدمة الأقمار الصناعية وقتاً طويلاً للإجابة. لا نعرض أرقاماً لم تُقَس.",
+    http: "أعادت خدمة الأقمار الصناعية خطأ. لا نعرض أرقاماً لم تُقَس.",
+    quota: "نفدت حصة المعالجة الشهرية في فضاء بيانات كوبرنيكوس. لا نعرض أرقاماً لم تُقَس.",
+    noScenes:
+      "لا توجد لقطة Sentinel-2 خالية من الغيوم فوق هذه القطعة خلال آخر ثلاثة أسابيع. لا نعرض أرقاماً لم تُقَس.",
+    malformed: "أعادت خدمة الأقمار الصناعية رداً غير مفهوم. لا نعرض أرقاماً لم تُقَس.",
+    tooSmall: "هذه القطعة أصغر من أن تعطي قراءة موثوقة. ارسم حدوداً لا تقل عن 0.05 هكتار.",
+  },
+  fieldMap: {
+    title: "خريطة الحقول",
+    subtitle: "ارسم حدود قطعتك على صورة الأقمار الصناعية. تُستخدم الرسم لحساب NDVI لكل منطقة.",
+    draw: "رسم الحدود",
+    drawing: "انقر على الخريطة لإضافة النقاط، ثم اضغط «تم» لإغلاق الشكل",
+    clear: "مسح",
+    cancel: "إغلاق",
+    save: "حفظ",
+    saving: "جارٍ الحفظ…",
+    delete: "حذف القطعة",
+    namePlaceholder: "اسم القطعة",
+    noPlots: "لا توجد قطعات محفوظة بعد.",
+    noPlotsHint: "اضغط «رسم الحدود» فوق صورتك الفضائية لبدء أول قطعة.",
+    loading: "جارٍ تحميل القطعات…",
+    areaLabel: "هكتار",
+    errorTooSmall:
+      "القطعة المرسومة أصغر من أن تعطي قراءة أقمار صناعية موثوقة. ارسم حدوداً لا تقل عن 0.05 هكتار.",
+    errorGeneric: "تعذّر حفظ القطعة. حاول مرة أخرى.",
+    errorCrossing: "الحدود تتقاطع مع نفسها. أعد الرسم دون تداخل الخطوط، ثم اضغط «تم».",
+    finish: "تم",
+    attribution: "الصور © Esri، Maxar، Earthstar Geographics",
+    openMaps: "الخرائط: Esri World Imagery.",
+    mapTitle: "خريطة الحقول — صور فضائية",
+    use: "استخدام هذه القطعة",
+    searchPlaceholder: "ابحث عن مكان في الجزائر…",
+    searchError: "تعذّر إتمام البحث. حاول مرة أخرى.",
+    searchLabel: "البحث عن موقع على الخريطة",
+    undo: "تراجع",
+    locate: "موقعي",
+    locating: "جارٍ تحديد موقعك…",
+    locateDenied: "تعذّر الوصول إلى موقعك الحالي. تعرض الخريطة آخر منطقة استخدمتها.",
+    liveArea: "المساحة حتى الآن: {area} هكتار",
+  },
   heatmap: {
     title: "الخريطة الحرارية للقطعة",
     subtitle: "{zones} منطقة في {area} هكتار، توزيع تقديري حول متوسط اليوم نفسه.",
+    subtitleObserved: "{zones} منطقة في {area} هكتار، مقاسة فعلياً من Sentinel-2.",
     layersAria: "طبقات الخريطة الحرارية",
     layers: { thermal: "الإجهاد الحراري", moisture: "الاحتياج المائي", transpiration: "مؤشر النتح" },
     zoneIds: [
@@ -442,9 +583,9 @@ const AR: DashboardCopy = {
     cellAria: "{zone}: {value} {unit}، {status}",
     units: { thermal: "مؤشر من 100", moisture: "لتر/هكتار", transpiration: "مؤشر من 100" },
     status: {
-      moisture: { wet: "رطوبة عالية", balanced: "رطوبة متوازنة", mildDry: "جفاف خفيف", dry: "جفاف واضح" },
-      thermal: { low: "إجهاد منخفض", moderate: "إجهاد متوسط", high: "إجهاد مرتفع", severe: "إجهاد حرج" },
-      transpiration: { low: "نتح منخفض", moderate: "نتح متوسط", good: "نتح جيد", high: "نتح مرتفع" },
+      moisture: { wet: "رطوبة عالية", balanced: "رطوبة متوازنة", mildDry: "جفاف خفيف", dry: "جفاف واضح", unknown: "بلا قراءة" },
+      thermal: { low: "إجهاد منخفض", moderate: "إجهاد متوسط", high: "إجهاد مرتفع", severe: "إجهاد حرج", unknown: "بلا قراءة" },
+      transpiration: { low: "نتح منخفض", moderate: "نتح متوسط", good: "نتح جيد", high: "نتح مرتفع", unknown: "بلا قراءة" },
     },
     layerNote: {
       moisture: "تحتاج هذه المنطقة {value} لتر/هكتار اليوم، {delta}.",
@@ -454,6 +595,7 @@ const AR: DashboardCopy = {
     deltaAbove: "أعلى بنسبة {pct}% من متوسط القطعة",
     deltaBelow: "أقل بنسبة {pct}% من متوسط القطعة",
     deltaEven: "مطابق تقريباً لمتوسط القطعة",
+    deltaNone: "لا توجد قراءة لهذه المنطقة اليوم",
     average: "متوسط القطعة",
     legendLow: "أدنى",
     legendHigh: "أعلى",
@@ -461,6 +603,19 @@ const AR: DashboardCopy = {
     hint: "اضغط على أي مربع لعرض تفاصيل المنطقة.",
     selectedZone: "المنطقة المحددة",
     note: "تقدير نموذجي للتوزيع المكاني داخل القطعة، مشتق من متوسط اليوم نفسه. يُستبدل بقراءات المستشعرات أو الأقمار الصناعية عند توصيلها.",
+
+    layerUnavailable: "هذه الطبقة لا تتوفر لها بيانات حقيقية اليوم. الخانات فارغة عمداً.",
+    noDataShort: "لا توجد بيانات",
+    sourceTitle: "مصدر القراءات",
+    sourceNdvi: "NDVI من Sentinel-2 L2A، مشهد {scene}، داخل «{plot}».",
+    sourceClimate: "NASA POWER {date}: ET₀ {et0} مم/يوم (FAO-56)، حرارة قصوى {tmax}°م، رطوبة {rh}%.",
+    sourceClimateNone: "لم يصل طقس NASA POWER اليوم؛ الطبقات التي تعتمد عليه فارغة.",
+    sourceScale: "الدقة المكانية: NDVI بدقة 10 م لكل خانة. الطقس من خلية MERRA-2 تقارب 0.5°، لذلك يبقى واحداً للقطعة كلها.",
+    noteObserved: "القيم أعلاه قياسات حقيقية: NDVI مرصودة من Sentinel-2، والطقس من NASA POWER. الخانات المائلة بلا بيانات لم تُملأ بأي قيم تقديرية.",
+    modelBanner: "هذه القيم تقدير نموذجي. ارسم حدود قطعتك على الخريطة للحصول على NDVI حقيقي من Sentinel-2 وبيانات طقس من NASA POWER.",
+    mapDraw: "ارسم قطعتك",
+    mapEdit: "عدّل الحد",
+    plotFallback: "القطعة",
   },
   windowDetail: {
     ariaOpen: "لماذا هذه النافذة والكمية؟",
@@ -737,9 +892,57 @@ const FR: DashboardCopy = {
       "Les millimètres sont affichés avec deux décimales pour que la chaîne de multiplication corresponde exactement au résultat final ; la carte de décision montre les mêmes quantités avec une décimale.",
     syncNote: "Les deux chiffres ci-dessus sont ceux de la carte de décision : {litres} L par hectare et {daily} m³ pour la parcelle.",
   },
+  fieldDataReason: {
+    noPlot: "Aucun contour enregistré. Tracez votre parcelle sur la carte pour basculer la carte thermique sur des données réelles.",
+    notConfigured:
+      "Les données satellite ne sont pas configurées sur ce déploiement. Ajoutez CDSE_CLIENT_ID et CDSE_CLIENT_SECRET à l'environnement du serveur.",
+    auth: "Le Copernicus Data Space a refusé les identifiants. Vérifiez CDSE_CLIENT_ID / CDSE_CLIENT_SECRET.",
+    network: "Impossible de joindre le service satellite. Aucun chiffre non mesuré n'est affiché.",
+    timeout: "Le service satellite a mis trop de temps à répondre. Aucun chiffre non mesuré n'est affiché.",
+    http: "Le service satellite a renvoyé une erreur. Aucun chiffre non mesuré n'est affiché.",
+    quota: "Le quota de traitement mensuel du Copernicus Data Space est épuisé. Aucun chiffre non mesuré n'est affiché.",
+    noScenes:
+      "Aucun passage Sentinel-2 sans nuages au-dessus de cette parcelle depuis trois semaines. Aucun chiffre non mesuré n'est affiché.",
+    malformed: "Le service satellite a renvoyé une réponse illisible. Aucun chiffre non mesuré n'est affiché.",
+    tooSmall: "Cette parcelle est trop petite pour une mesure fiable. Tracez au moins 0,05 ha.",
+  },
+  fieldMap: {
+    title: "Carte des parcelles",
+    subtitle: "Tracez le contour de votre parcelle sur l'imagerie satellite. Le contour sert au calcul du NDVI par zone.",
+    draw: "Tracer le contour",
+    drawing: "Touchez la carte pour ajouter des points, puis appuyez sur « Terminer » pour fermer",
+    clear: "Effacer",
+    cancel: "Fermer",
+    save: "Enregistrer",
+    saving: "Enregistrement…",
+    delete: "Supprimer la parcelle",
+    namePlaceholder: "Nom de la parcelle",
+    noPlots: "Aucune parcelle enregistrée.",
+    noPlotsHint: "Touchez « Tracer le contour » sur l'imagerie pour commencer.",
+    loading: "Chargement des parcelles…",
+    areaLabel: "ha",
+    errorTooSmall:
+      "La parcelle tracée est trop petite pour une mesure satellite fiable. Tracez au moins 0,05 ha.",
+    errorGeneric: "Impossible d'enregistrer la parcelle. Réessayez.",
+    errorCrossing: "Les limites se croisent. Redessinez le contour sans croisement, puis appuyez sur « Terminer ».",
+    finish: "Terminer",
+    attribution: "Imagerie © Esri, Maxar, Earthstar Geographics",
+    openMaps: "Fond de carte : Esri World Imagery.",
+    mapTitle: "Carte des parcelles — imagerie satellite",
+    use: "Utiliser cette parcelle",
+    searchPlaceholder: "Chercher un lieu en Algérie…",
+    searchError: "La recherche a échoué. Réessayez.",
+    searchLabel: "Rechercher un lieu sur la carte",
+    undo: "Annuler le point",
+    locate: "Ma position",
+    locating: "Localisation en cours…",
+    locateDenied: "Impossible d'accéder à votre position. La carte affiche la dernière zone utilisée.",
+    liveArea: "Surface pour l'instant : {area} ha",
+  },
   heatmap: {
     title: "Carte thermique de la parcelle",
     subtitle: "{zones} zones sur {area} hectares, répartition estimée autour de la moyenne du jour.",
+    subtitleObserved: "{zones} zones sur {area} hectares, réellement mesurées par Sentinel-2.",
     layersAria: "Couches de la carte thermique",
     layers: { thermal: "Stress thermique", moisture: "Besoin en eau", transpiration: "Transpiration" },
     zoneIds: [
@@ -772,9 +975,9 @@ const FR: DashboardCopy = {
     cellAria: "{zone} : {value} {unit}, {status}",
     units: { thermal: "indice sur 100", moisture: "L/ha", transpiration: "indice sur 100" },
     status: {
-      moisture: { wet: "humidité élevée", balanced: "humidité équilibrée", mildDry: "léger déficit", dry: "déficit marqué" },
-      thermal: { low: "stress faible", moderate: "stress modéré", high: "stress élevé", severe: "stress critique" },
-      transpiration: { low: "transpiration faible", moderate: "transpiration moyenne", good: "transpiration bonne", high: "transpiration élevée" },
+      moisture: { wet: "humidité élevée", balanced: "humidité équilibrée", mildDry: "léger déficit", dry: "déficit marqué", unknown: "sans mesure" },
+      thermal: { low: "stress faible", moderate: "stress modéré", high: "stress élevé", severe: "stress critique", unknown: "sans mesure" },
+      transpiration: { low: "transpiration faible", moderate: "transpiration moyenne", good: "transpiration bonne", high: "transpiration élevée", unknown: "sans mesure" },
     },
     layerNote: {
       moisture: "Cette zone demande {value} L/ha aujourd'hui, {delta}.",
@@ -784,6 +987,7 @@ const FR: DashboardCopy = {
     deltaAbove: "{pct} % au-dessus de la moyenne de la parcelle",
     deltaBelow: "{pct} % en dessous de la moyenne de la parcelle",
     deltaEven: "proche de la moyenne de la parcelle",
+    deltaNone: "aucune mesure pour cette zone aujourd'hui",
     average: "Moyenne de la parcelle",
     legendLow: "Min",
     legendHigh: "Max",
@@ -791,6 +995,19 @@ const FR: DashboardCopy = {
     hint: "Touchez une cellule pour lire le détail de la zone.",
     selectedZone: "Zone sélectionnée",
     note: "Estimation modèle de la répartition spatiale dans la parcelle, dérivée de la moyenne du jour. Elle sera remplacée par les relevés capteurs ou satellite dès leur branchement.",
+
+    layerUnavailable: "Aucune donnée réelle n'est disponible pour cette couche aujourd'hui. Les cases sont vides à dessein.",
+    noDataShort: "pas de données",
+    sourceTitle: "Source des relevés",
+    sourceNdvi: "NDVI Sentinel-2 L2A, scène du {scene}, sur « {plot} ».",
+    sourceClimate: "NASA POWER {date} : ET₀ {et0} mm/j (FAO-56), maxima {tmax} °C, humidité {rh} %.",
+    sourceClimateNone: "La météo NASA POWER n'a pas répondu aujourd'hui ; les couches qui en dépendent sont vides.",
+    sourceScale: "Résolution spatiale : NDVI à 10 m par case. La météo vient d'une cellule MERRA-2 d'environ 0,5°, donc elle reste unique pour toute la parcelle.",
+    noteObserved: "Les valeurs ci-dessus sont des mesures réelles : NDVI observé par Sentinel-2, météo de NASA POWER. Les cases hachurées n'ont reçu aucune valeur estimée.",
+    modelBanner: "Ces valeurs sont une estimation modèle. Tracez le contour de votre parcelle pour obtenir le NDVI Sentinel-2 et la météo NASA POWER réels.",
+    mapDraw: "Tracer ma parcelle",
+    mapEdit: "Modifier le contour",
+    plotFallback: "la parcelle",
   },
   windowDetail: {
     ariaOpen: "Pourquoi cette fenêtre et ce volume ?",
