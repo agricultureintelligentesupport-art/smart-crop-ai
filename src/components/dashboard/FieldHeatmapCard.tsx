@@ -132,8 +132,10 @@ export default function FieldHeatmapCard({
     // values instead of the model's seeded estimate.
     if (observation) {
       return buildObservedHeatmap({
-        rows: heatmapGrid(areaHa).rows,
-        cols: heatmapGrid(areaHa).cols,
+        // The server cut the grid from the plot's real area and reports it.
+        // Records cached before that lack it and fall back to the old grid.
+        rows: observation.rows ?? heatmapGrid(areaHa).rows,
+        cols: observation.cols ?? heatmapGrid(areaHa).cols,
         layers: observationLayers({
           observation,
           meanNdvi: meanNdviOf(observation),

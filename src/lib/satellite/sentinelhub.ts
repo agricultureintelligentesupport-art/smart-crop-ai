@@ -250,7 +250,9 @@ export async function fetchNdviProcessApi(
   const doFetch = fetchImpl ?? (typeof fetch === "function" ? (fetch as unknown as OpeneoFetch) : undefined);
   if (!doFetch) return { ...empty, reason: "network" };
   const box = options.bbox ?? bboxOf(options.ring);
-  if (!box || options.targets.length === 0) return { ...empty, reason: "malformed" };
+  // Local pre-flight (already checked upstream by `validateAnalysisInput`); this is
+  // NOT a provider answer, so it must never be reported as "malformed".
+  if (!box || options.targets.length === 0) return { ...empty, reason: "invalid-input" };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);

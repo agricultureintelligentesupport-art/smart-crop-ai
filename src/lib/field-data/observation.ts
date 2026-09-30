@@ -29,7 +29,8 @@
  */
 
 import { computeIrrigation, type IrrigationSystem } from "../agronomy";
-import { bboxOf, centroidOf, gridCells, type GridCell, type Ring } from "../geo/polygon";
+import { bboxOf, centroidOf, type GridCell, type Ring } from "../geo/polygon";
+import { validateAnalysisInput } from "./grid";
 import { fetchNdvi, isConfigured, readOpeneoConfig, type NdviResult, type OpeneoFetch, type OpeneoConfig } from "../satellite/openeo";
 import { fetchNdviProcessApi } from "../satellite/sentinelhub";
 import { SatelliteTrace, withStepLogging, type StepLog } from "../satellite/trace";
@@ -100,13 +101,18 @@ export const REASON_TEXT: Record<FieldDataReason, string> = {
   noScenes:
     "No cloud-free Sentinel-2 pass over this field in the last three weeks. Showing no data rather than an estimate.",
   malformed: "The satellite service returned an unreadable answer. Showing no data rather than an estimate.",
+  "invalid-input": "This field boundary could not be analysed (local check failed before any satellite request). See the technical detail.",
   tooSmall: "This field is too small for a reliable satellite mean. Draw a boundary of at least 0.05 ha.",
 };
 
 export interface BuildObservationInput {
   plot: Plot;
-  rows: number;
-  cols: number;
+  /**
+   * Optional override (tests). In production the grid is derived from the
+   * plot's real area by `validateAnalysisInput`; the client's value is ignored.
+   */
+  rows?: number;
+  cols?: number;
   now?: Date;
   env?: NodeJS.ProcessEnv;
   powerFetch?: FetchLike;
@@ -168,15 +174,21 @@ function toClimateObservation(
  * them in parallel keeps a cold cache at the slower of the two, not the sum.
  */
 export async function buildObservation(input: BuildObservationInput): Promise<BuildObservationResult> {
-  const { plot, rows, cols } = input;
+  const { plot } = input;
   const now = input.now ?? new Date();
   const date = todayIso(now);
-  const cells = gridCells(plot.ring, rows, cols);
-  const centroid = centroidOf(plot.ring) ?? plot.centroid;
-  const bbox = bboxOf(plot.ring);
   const config = input.openeoConfig ?? readOpeneoConfig(input.env);
   const trace =
     input.trace ?? new SatelliteTrace({ secrets: [config.clientId, config.clientSecret], tag: `plot=${plot.id.slice(0, 12)}` });
+
+  /* LOCAL VALIDATION — runs before any request and names the exact condition
+     that failed. It is reported as "invalid-input", never as "malformed", which
+     is reserved for an unparsable answer from the provider. */
+  const validation = validateAnalysisInput(plot.ring, { rows: input.rows, cols: input.cols });
+  trace.validation({ ...validation, cells: validation.cells.length });
+  const { rows, cols, cells } = validation;
+  const centroid = centroidOf(plot.ring) ?? plot.centroid;
+  const bbox = bboxOf(plot.ring);
   const finish = (r: {
     ok: boolean;
     reason?: FieldDataReason;
@@ -189,7 +201,6 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
     technical: trace.technical(),
     diagnostics: trace.steps,
   });
-  if (!bbox) return finish({ ok: false, reason: "tooSmall", observation: null, meanNdvi: null, climate: null });
 
   /* POWER daily supplies the day's meteorology; POWER climatology supplies a
      realistic Tmax−Tmin for the location and month, which MERRA-2's smoothed
@@ -211,6 +222,13 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
   ])
     .then(([daily, climatology]) => toClimate(daily, climatology))
     .catch(() => null);
+
+  if (!validation.ok || !bbox) {
+    // POWER is independent of the plot's grid: keep it even though the
+    // satellite step is never attempted.
+    const climateOnly = toClimateObservation(await climatePromise, centroid);
+    return finish({ ok: false, reason: "invalid-input", observation: null, meanNdvi: null, climate: climateOnly });
+  }
 
   const useOpeneo = config.useOpeneo;
   const cellTargets = cells.map((cell) => ({ id: cell.id, ring: cell.ring }));
@@ -254,14 +272,25 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
   }
 
   const byId = new Map(ndvi.cells.map((cell) => [cell.id, cell.ndvi]));
-  const cellReadings: CellObservation[] = cells.map((cell) => ({
-    id: `z-${cell.row}-${cell.col}`,
-    row: cell.row,
-    col: cell.col,
-    ndvi: byId.get(cell.id) ?? null,
-    areaHa: Math.round(cell.areaHa * 10000) / 10000,
-    pixels: Math.max(0, Math.round(cell.areaHa / SENTINEL_PIXEL_HA)),
-  }));
+  const gridById = new Map(cells.map((cell) => [`z-${cell.row}-${cell.col}`, cell]));
+  /* Row-major, `rows × cols`, so a cell's array index IS its place in the
+     heatmap. A cell that was dropped (too thin to average) stays in the list as
+     "no data" instead of shifting every later cell by one. */
+  const cellReadings: CellObservation[] = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const id = `z-${row}-${col}`;
+      const cell = gridById.get(id);
+      cellReadings.push({
+        id,
+        row,
+        col,
+        ndvi: cell ? (byId.get(cell.id) ?? null) : null,
+        areaHa: cell ? Math.round(cell.areaHa * 10000) / 10000 : 0,
+        pixels: cell ? Math.max(0, Math.round(cell.areaHa / SENTINEL_PIXEL_HA)) : 0,
+      });
+    }
+  }
 
   const values = cellReadings.map((c) => c.ndvi).filter((v): v is number => v !== null);
   if (values.length === 0) {
@@ -273,6 +302,8 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
     plotId: plot.id,
     date,
     sceneDate: ndvi.sceneDate,
+    rows,
+    cols,
     cells: cellReadings,
     climate: climateObservation,
     ...(ndvi.cloudCoverPct !== undefined && ndvi.cloudCoverPct !== null ? { cloudCoverPct: Math.round(ndvi.cloudCoverPct * 10) / 10 } : {}),

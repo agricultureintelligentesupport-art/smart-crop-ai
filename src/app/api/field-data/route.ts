@@ -1,7 +1,7 @@
 /**
  * `/api/field-data` — one measured day for one saved plot.
  *
- *   POST `{ uid, plotId, ring, rows, cols, areaHa, force? }`
+ *   POST `{ uid, plotId, ring, areaHa, force? }` (rows/cols, if sent, are ignored)
  *     → the cached observation when one was already produced today
  *       (Africa/Algiers), otherwise a fresh NASA POWER + Sentinel-2 read.
  *
@@ -60,9 +60,6 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const CACHE_COLLECTION = "fieldDataCache";
-/** Rows/cols are bounded so a hostile payload cannot ask for a huge graph. */
-const MAX_ROWS = 6;
-const MAX_COLS = 6;
 
 /**
  * How long a cache read/write may hold up the response.
@@ -129,34 +126,54 @@ interface RequestBody {
   uid: string;
   plotId: string;
   ring: Ring;
-  rows: number;
-  cols: number;
   /** What the client believes the area is — only compared, never trusted. */
   claimedAreaHa: number | null;
   force: boolean;
 }
 
-function parseBody(raw: unknown): RequestBody | null {
-  if (!raw || typeof raw !== "object") return null;
+/**
+ * `rows`/`cols` in the body are ignored on purpose: the client derives them
+ * from the dashboard's calculator area (default 2 ha), not from the drawn plot.
+ * The server cuts the grid from the plot's real area (`lib/field-data/grid.ts`).
+ */
+function parseBody(raw: unknown): { ok: true; body: RequestBody } | { ok: false; detail: string } {
+  if (!raw || typeof raw !== "object") return { ok: false, detail: "request body is not a JSON object" };
   const body = raw as Record<string, unknown>;
   const uid = typeof body.uid === "string" ? body.uid.trim() : "";
   const plotId = typeof body.plotId === "string" ? body.plotId.trim() : "";
   // Re-validate the geometry server-side: the client's word is worth nothing.
   const ring = Array.isArray(body.ring) ? (body.ring as Ring).filter((p) => Array.isArray(p) && p.length >= 2) : [];
-  if (!uid || uid.length > 128 || !plotId || plotId.length > 64) return null;
-  if (ring.length < 3) return null;
-  const rows = Math.min(MAX_ROWS, Math.max(1, Number(body.rows) || 4));
-  const cols = Math.min(MAX_COLS, Math.max(1, Number(body.cols) || 4));
+  if (!uid || uid.length > 128) return { ok: false, detail: "uid is missing or longer than 128 characters" };
+  if (!plotId || plotId.length > 64) return { ok: false, detail: "plotId is missing or longer than 64 characters" };
+  if (ring.length < 3) return { ok: false, detail: `ring has ${ring.length} usable point(s), at least 3 are required` };
   const claimed = Number(body.areaHa);
   return {
-    uid,
-    plotId,
-    ring,
-    rows,
-    cols,
-    claimedAreaHa: Number.isFinite(claimed) && claimed > 0 ? claimed : null,
-    force: body.force === true,
+    ok: true,
+    body: {
+      uid,
+      plotId,
+      ring,
+      claimedAreaHa: Number.isFinite(claimed) && claimed > 0 ? claimed : null,
+      force: body.force === true,
+    },
   };
+}
+
+/** A local rejection: `invalid-input` + the exact condition, never "malformed". */
+function invalidInput(detail: string, plotId?: string) {
+  console.log(
+    `[field-data]${plotId ? ` plot=${plotId.slice(0, 12)}` : ""} step=validate ok=false detail=${JSON.stringify(detail)}`,
+  );
+  return NextResponse.json(
+    {
+      ok: false,
+      reason: "invalid-input" as FieldDataReason,
+      observation: null,
+      technical: `validate · invalid-input: ${detail}`.slice(0, 150),
+      message: detail,
+    },
+    { status: 400 },
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -164,12 +181,11 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ ok: false, reason: "malformed" as FieldDataReason, observation: null }, { status: 400 });
+    return invalidInput("request body is not valid JSON");
   }
-  const parsed = parseBody(body);
-  if (!parsed) {
-    return NextResponse.json({ ok: false, reason: "malformed" as FieldDataReason, observation: null }, { status: 400 });
-  }
+  const result0 = parseBody(body);
+  if (!result0.ok) return invalidInput(result0.detail);
+  const parsed = result0.body;
 
   const validation = validatePlot(parsed.ring);
   if (!validation.ok) {
@@ -190,9 +206,9 @@ export async function POST(request: NextRequest) {
 
   /* The plot's REAL area comes from its geometry, not from the request: the
      dashboard's `areaHa` is the irrigation calculator's field size (default
-     2 ha) and need not match the drawn boundary. `rows`/`cols` stay as the
-     client sent them because they decide the `z-<row>-<col>` zone ids the
-     heatmap paints; the cell polygons and their hectares are the real ones. */
+     2 ha) and need not match the drawn boundary. The grid (`rows × cols`) is
+     derived from that real area inside `buildObservation` and travels back on
+     the observation, so the heatmap paints the same grid the satellite read. */
   const realAreaHa = ringAreaHa(parsed.ring);
   const centroid = centroidOf(parsed.ring) ?? parsed.ring[0];
   if (parsed.claimedAreaHa !== null && Math.abs(parsed.claimedAreaHa - realAreaHa) > 0.1 * realAreaHa) {
@@ -212,13 +228,11 @@ export async function POST(request: NextRequest) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
-    rows: parsed.rows,
-    cols: parsed.cols,
   });
   console.log(
     `[field-data] plot=${parsed.plotId.slice(0, 12)} result ok=${result.ok}${result.reason ? ` reason=${result.reason}` : ""} ` +
       `provider=${readOpeneoConfig().useOpeneo ? "openeo" : "sentinel-hub-process"} ` +
-      `climate=${result.climate ? "ok" : "none"} cells=${result.cells.length} areaHa=${realAreaHa.toFixed(2)}`,
+      `climate=${result.climate ? "ok" : "none"} cells=${result.cells.length} rows×cols=${result.observation?.rows ?? "-"}×${result.observation?.cols ?? "-"} areaHa=${realAreaHa.toFixed(2)}`,
   );
 
   if (result.ok && result.observation) {

@@ -100,6 +100,7 @@ export interface DashboardCopy {
     | "quota"
     | "noScenes"
     | "malformed"
+    | "invalid-input"
     | "tooSmall",
     string
   >;
@@ -518,6 +519,7 @@ const AR: DashboardCopy = {
     noScenes:
       "لا توجد لقطة Sentinel-2 خالية من الغيوم فوق هذه القطعة خلال آخر ثلاثة أسابيع. لا نعرض أرقاماً لم تُقَس.",
     malformed: "أعادت خدمة الأقمار الصناعية رداً غير مفهوم. لا نعرض أرقاماً لم تُقَس.",
+    "invalid-input": "تعذّر تحليل حدود هذه القطعة: فشل فحص محلي قبل إرسال أي طلب إلى الأقمار الصناعية. التفاصيل التقنية أدناه.",
     tooSmall: "هذه القطعة أصغر من أن تعطي قراءة موثوقة. ارسم حدوداً لا تقل عن 0.05 هكتار.",
   },
   fieldMap: {
@@ -913,6 +915,7 @@ const FR: DashboardCopy = {
     noScenes:
       "Aucun passage Sentinel-2 sans nuages au-dessus de cette parcelle depuis trois semaines. Aucun chiffre non mesuré n'est affiché.",
     malformed: "Le service satellite a renvoyé une réponse illisible. Aucun chiffre non mesuré n'est affiché.",
+    "invalid-input": "Le contour de cette parcelle n'a pas pu être analysé : un contrôle local a échoué avant tout envoi au satellite. Détail technique ci-dessous.",
     tooSmall: "Cette parcelle est trop petite pour une mesure fiable. Tracez au moins 0,05 ha.",
   },
   fieldMap: {

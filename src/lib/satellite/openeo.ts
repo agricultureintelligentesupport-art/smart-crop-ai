@@ -317,7 +317,8 @@ export type NdviFailure =
   | "http"
   | "quota"
   | "noScenes"
-  | "malformed";
+  | "malformed"
+  | "invalid-input";
 
 export interface NdviResult {
   ok: boolean;

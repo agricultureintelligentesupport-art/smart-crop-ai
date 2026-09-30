@@ -61,6 +61,19 @@ farmer's language, and shows no numbers for the affected layers.
    graph (`src/lib/satellite/openeo.ts`); it is off by default because an
    `sh-…` client is rejected by openEO.
 
+### Local validation and the grid
+
+Before any request, `validateAnalysisInput` (`src/lib/field-data/grid.ts`)
+derives `rows × cols` **on the server** from the plot's real geometry area
+(cells ≈ 0.03–0.1 ha, each side clamped to 2..8; `rows`/`cols` sent by the
+client are ignored) and cuts the cells. It logs
+`[field-data] plot=… step=validate ok=… detail=… areaHa=… rows=… cols=… ring=… cells=…`.
+A failure answers `reason: "invalid-input"` with the exact condition in
+`technical`; `"malformed"` is reserved for an unparsable answer from the
+provider. The observation carries `rows`/`cols` and is row-major with
+unmeasurable cells present as `ndvi: null`, so the heatmap paints the grid the
+satellite read.
+
 ### Diagnosing a failure
 
 Every upstream call is logged as one line (host only, never a path or secret):

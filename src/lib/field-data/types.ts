@@ -33,7 +33,10 @@ export type FieldDataReason =
   | "http"
   | "quota"
   | "noScenes"
+  /** The PROVIDER answered with something unparsable. Never used for local checks. */
   | "malformed"
+  /** A local pre-flight check failed before any request was made. */
+  | "invalid-input"
   | "tooSmall";
 
 /** Per-cell reading of a real Sentinel-2 scene, aligned with the heatmap grid. */
@@ -86,6 +89,13 @@ export interface FieldObservation {
   date: string;
   /** Sentinel-2 scene the NDVI came from; may predate `date`. */
   sceneDate: string | null;
+  /**
+   * The grid the server cut the plot into (`cells` is row-major, `rows × cols`,
+   * unmeasurable cells are present with `ndvi: null`). Optional: records cached
+   * before the server chose the grid lack it.
+   */
+  rows?: number;
+  cols?: number;
   cells: CellObservation[];
   /** `null` when NASA POWER was unreachable — the layers that need it go dark. */
   climate: ClimateObservation | null;

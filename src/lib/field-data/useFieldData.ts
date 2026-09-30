@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { deletePlot, listPlots, readLocalPlots, savePlot, subscribeToPlots } from "./plots";
 import type { FieldDataReason, FieldObservation, Plot } from "./types";
 import type { Ring } from "@/lib/geo/polygon";
-import { heatmapGrid } from "@/lib/dashboard/heatmap";
 
 export type FieldDataState = "idle" | "loading" | "ready" | "error";
 
@@ -80,7 +79,6 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
     const abort = new AbortController();
     const cancel = setTimeout(() => abort.abort(), OBSERVATION_TIMEOUT_MS);
     try {
-      const { rows, cols } = heatmapGrid(areaHa);
       const res = await fetch("/api/field-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -88,8 +86,6 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
           uid: plot.uid,
           plotId: plot.id,
           ring: plot.ring,
-          rows,
-          cols,
           areaHa,
           force,
         }),

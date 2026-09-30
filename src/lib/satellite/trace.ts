@@ -21,6 +21,7 @@
 
 /** The upstream calls of one field-data request, in the order they happen. */
 export type TraceStep =
+  | "validate"
   | "nasa-power"
   | "cdse-token"
   | "sh-catalog"
@@ -152,6 +153,29 @@ export class SatelliteTrace {
     return log;
   }
 
+  /**
+   * Records the local validation that precedes every upstream call:
+   * `[field-data] plot=… step=validate ok=… detail=… areaHa=… rows=… cols=… ring=… cells=…`.
+   */
+  validation(entry: { ok: boolean; detail: string | null; areaHa: number; rows: number; cols: number; ringLength: number; cells: number }): StepLog {
+    const detail = entry.detail ? redact(entry.detail, this.secrets) : null;
+    const log: StepLog = {
+      step: "validate",
+      host: "local",
+      status: null,
+      ok: entry.ok,
+      code: entry.ok ? null : "invalid-input",
+      message: detail,
+      ms: 0,
+    };
+    this.steps.push(log);
+    this.sink(
+      `[field-data]${this.requestTag ? ` ${this.requestTag}` : ""} step=validate ok=${entry.ok} detail=${JSON.stringify(detail ?? "none")} ` +
+        `areaHa=${Number.isFinite(entry.areaHa) ? entry.areaHa.toFixed(3) : entry.areaHa} rows=${entry.rows} cols=${entry.cols} ring=${entry.ringLength} cells=${entry.cells}`,
+    );
+    return log;
+  }
+
   /** The first satellite step that failed, if any (POWER is reported separately). */
   firstSatelliteFailure(): StepLog | null {
     return this.steps.find((s) => !s.ok && s.step !== "nasa-power") ?? null;
@@ -166,6 +190,11 @@ export class SatelliteTrace {
 
 /** `sh-process · sh.dataspace.copernicus.eu · HTTP 403 · ACCESS_DENIED: message…` */
 export function describeStep(step: StepLog): string {
+  // A local check has no host or HTTP status: `validate · invalid-input: <detail>`.
+  if (step.step === "validate") {
+    const text = `validate · ${step.code ?? "failed"}${step.message ? `: ${step.message}` : ""}`;
+    return text.length > MAX_TECHNICAL_CHARS ? `${text.slice(0, MAX_TECHNICAL_CHARS - 1)}…` : text;
+  }
   const parts = [step.step, step.host, step.status === null ? "no response" : `HTTP ${step.status}`];
   if (step.code) parts.push(step.code);
   let text = parts.join(" · ");
