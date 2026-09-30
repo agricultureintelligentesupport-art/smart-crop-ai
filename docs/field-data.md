@@ -15,7 +15,7 @@ The heatmap UI is untouched — same three Arabic tabs (`الإجهاد الحر
 | Upstream | Gives | Key required? |
 | --- | --- | --- |
 | [NASA POWER](https://power.larc.nasa.gov/) | Daily meteorology for the parcel centroid: Tmax, Tmin, RH, wind, solar radiation, rain — and the FAO-56 ET₀ computed from them | **No.** Public, no registration, no quota. |
-| [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu/) — Sentinel Hub Process API (`sh.dataspace.copernicus.eu`) | Sentinel-2 L2A NDVI, SCL cloud-masked, clipped to the polygon, mean per grid cell, plus acquisition date and cloud cover | Yes — a CDSE client id/secret, server-side only. |
+| [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu/) — Sentinel Hub Process API (`sh.dataspace.copernicus.eu`) | Sentinel-2 L2A NDVI, SCL cloud-masked, clipped to the polygon: one Process request kept as a **per-pixel raster at 10 m** (`observation.raster`: values + `dataMask` + bbox + width/height), with acquisition date and cloud cover. The heatmap's grid cells are derived from that same raster. | Yes — a CDSE client id/secret, server-side only. |
 
 ## Setup
 
@@ -54,12 +54,21 @@ farmer's language, and shows no numbers for the affected layers.
    typed reason — never a fabricated number. The satellite step
    (`src/lib/satellite/sentinelhub.ts`) is: CDSE token → Catalog API (passes in
    the last 30 days, date + `eo:cloud_cover`) → Process API (S2 L2A, bbox +
-   polygon, ~10 m, SCL mask + `dataMask` evalscript, FLOAT32 GeoTIFF) → mean
-   per cell. **NASA POWER is independent**: when the satellite step fails the
-   POWER day is still returned as `climate` on the failure response.
-   `CDSE_USE_OPENEO=1` switches the satellite step back to the legacy openEO
-   graph (`src/lib/satellite/openeo.ts`); it is off by default because an
-   `sh-…` client is rejected by openEO.
+   polygon, ~10 m, SCL mask + `dataMask` evalscript, FLOAT32 GeoTIFF). The
+   answer is kept as **pixels**: `observation.raster` carries every measured
+   NDVI value with its `dataMask` flag, the bbox and the raster size, so the
+   plot-details view paints the layer in the parcel's real shape (10 m per
+   pixel, values rounded to 3 decimals; a boundary so large it would exceed the
+   transport budget is sampled a little coarser and says so via
+   `raster.resolutionM`). The heatmap's `cells` are derived from that same
+   raster, so both views read the identical measurement.
+   **NASA POWER is independent**: when the satellite step fails the POWER day
+   is still returned as `climate` on the failure response (and the plot view
+   shows it).
+   `CDSE_USE_GRID=1` keeps only the legacy rows/cols cell means (no
+   per-pixel layer); `CDSE_USE_OPENEO=1` switches the satellite step back to
+   the legacy openEO graph (`src/lib/satellite/openeo.ts`). Both are off by
+   default — the raster is the primary path.
 
 ### Local validation and the grid
 
@@ -90,6 +99,31 @@ as `diagnostics` in the JSON, with a short `technical` string that the error
 card prints under the localised message.
 4. `src/lib/field-data/useFieldData.ts` holds the result, and
    `FieldHeatmapCard` renders it or explains its absence.
+
+### The plot-details layer (why the NDVI is no squares)
+
+The plot view's «تحليل القطعة» button runs the same observation through a
+second `useFieldData` instance targeted at the open plot — the module-level
+cache and one in-flight promise per plot make a duplicate request impossible.
+`src/lib/plot/ndvi-layers.ts` then turns `observation.raster` into the layer:
+
+- **Clipping** — only pixels whose centre is inside the drawn boundary AND
+  whose `dataMask` is 1 are ever painted, counted or probed
+  (`measuredPixelMask`); everything else is fully transparent, so the
+  satellite imagery underneath shows through and no masked pixel is ever
+  filled with an estimate.
+- **Smoothing** — `composeNdviLayer` upscales the raster with bilinear
+  interpolation over *premultiplied* colours, display-only: it can soften an
+  edge towards transparency, never pull a colour into a cloud hole. The layer
+  is drawn on a canvas, clipped by the real polygon (`clipPath`), and
+  positioned exactly over the plot's satellite image.
+- **Colour** — the ramp spans the field's own real min/max (with a 0.02 floor
+  so uniform noise is not stretched into drama); the legend quotes those real
+  values, the scene date, the scene cloud cover and the caption
+  «دقة القياس 10 م، والعرض منعَّم» (using the raster's true `resolutionM`).
+- **Probe** — tapping the figure reports the nearest *measured* pixel and its
+  coordinates, never an interpolated display colour; stats (mean/min/max) come
+  from measured pixels only.
 
 ## The ET₀ decision (read this before "fixing" it)
 

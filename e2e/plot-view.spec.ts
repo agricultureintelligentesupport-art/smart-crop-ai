@@ -69,7 +69,9 @@ test("Done saves once, full-screen fallback, inline rename persists, back, redra
   await expect(view(page).locator(".leaflet-container, .leaflet-control, input[role='combobox']")).toHaveCount(0);
   await expect(page.locator(".leaflet-container")).toBeHidden();
   await expect(page.getByTestId("plot-art")).toHaveAttribute("data-imagery", "fallback", {timeout: 15000});
-  await expect(view(page).getByRole("button", {name: /تحليل القطعة/})).toBeDisabled();
+  // The analysis button is live: it runs the real field-data flow (here mocked
+  // to answer "not configured", which the panel reports honestly).
+  await expect(view(page).getByRole("button", {name: /تحليل القطعة/})).toBeEnabled();
   for (const button of await view(page).locator("footer button").all()) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(48);
   await screenshot(page, "01-mobile-fallback");
   await view(page).getByRole("button", {name: "تعديل اسم القطعة"}).tap();

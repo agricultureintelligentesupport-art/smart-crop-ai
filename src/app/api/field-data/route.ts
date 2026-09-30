@@ -5,6 +5,11 @@
  *     → the cached observation when one was already produced today
  *       (Africa/Algiers), otherwise a fresh NASA POWER + Sentinel-2 read.
  *
+ * The Sentinel-2 answer is a per-pixel NDVI raster for the plot polygon at
+ * 10 m (`observation.raster`: values + dataMask + bbox + width/height); the
+ * grid cells the dashboard heatmap reads are derived from that same raster.
+ * `CDSE_USE_GRID=1` restores the legacy rows/cols cell request instead.
+ *
  * CACHING
  * -------
  * A satellite pass over a given parcel does not change between page loads, and
@@ -229,9 +234,14 @@ export async function POST(request: NextRequest) {
       updatedAt: new Date().toISOString(),
     },
   });
+  const mode = readOpeneoConfig().useOpeneo ? "openeo" : readOpeneoConfig().useGrid ? "grid" : "raster";
+  const raster = result.observation?.raster;
+  const rasterNote = raster
+    ? ` raster=${raster.width}x${raster.height}@${raster.resolutionM}m valid=${raster.dataMask.reduce((sum, m) => sum + m, 0)}/${raster.width * raster.height}`
+    : "";
   console.log(
     `[field-data] plot=${parsed.plotId.slice(0, 12)} result ok=${result.ok}${result.reason ? ` reason=${result.reason}` : ""} ` +
-      `provider=${readOpeneoConfig().useOpeneo ? "openeo" : "sentinel-hub-process"} ` +
+      `provider=${readOpeneoConfig().useOpeneo ? "openeo" : "sentinel-hub-process"} mode=${mode}${rasterNote} ` +
       `climate=${result.climate ? "ok" : "none"} cells=${result.cells.length} rows×cols=${result.observation?.rows ?? "-"}×${result.observation?.cols ?? "-"} areaHa=${realAreaHa.toFixed(2)}`,
   );
 

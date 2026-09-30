@@ -85,6 +85,13 @@ export interface OpeneoConfig {
    * but rejected by openEO.
    */
   useOpeneo: boolean;
+  /**
+   * `CDSE_USE_GRID=1` restores the legacy rows/cols cell request: the Process
+   * API raster is still fetched, but only the per-cell MEANS are kept (the
+   * plot-details view then has no per-pixel layer to paint). OFF by default —
+   * the raster is the primary path; this flag is the documented fallback.
+   */
+  useGrid: boolean;
 }
 
 export function readOpeneoConfig(env: NodeJS.ProcessEnv = process.env): OpeneoConfig {
@@ -99,6 +106,7 @@ export function readOpeneoConfig(env: NodeJS.ProcessEnv = process.env): OpeneoCo
     processUrl: clean(env.CDSE_PROCESS_URL) ?? DEFAULT_PROCESS_URL,
     catalogUrl: clean(env.CDSE_CATALOG_URL) ?? DEFAULT_CATALOG_URL,
     useOpeneo: /^(1|true|on|yes)$/i.test(clean(env.CDSE_USE_OPENEO) ?? ""),
+    useGrid: /^(1|true|on|yes)$/i.test(clean(env.CDSE_USE_GRID) ?? ""),
   };
 }
 

@@ -31,8 +31,18 @@
 import { computeIrrigation, type IrrigationSystem } from "../agronomy";
 import { bboxOf, centroidOf, type GridCell, type Ring } from "../geo/polygon";
 import { validateAnalysisInput } from "./grid";
-import { fetchNdvi, isConfigured, readOpeneoConfig, type NdviResult, type OpeneoFetch, type OpeneoConfig } from "../satellite/openeo";
-import { fetchNdviProcessApi } from "../satellite/sentinelhub";
+import {
+  fetchNdvi,
+  isConfigured,
+  readOpeneoConfig,
+  type NdviCellValue,
+  type NdviFailure,
+  type NdviResult,
+  type OpeneoFetch,
+  type OpeneoConfig,
+} from "../satellite/openeo";
+import { cellMeansFromRaster, fetchNdviProcessApi, fetchNdviRaster, type NdviRasterResult } from "../satellite/sentinelhub";
+import type { DecodedTiff } from "../satellite/tiff";
 import { SatelliteTrace, withStepLogging, type StepLog } from "../satellite/trace";
 import { fetchPower, fetchPowerClimatology, toClimate, POWER_TIMEOUT_MS } from "../weather/power";
 import type { FetchLike } from "../weather/live";
@@ -43,6 +53,7 @@ import {
   type ClimateObservation,
   type FieldDataReason,
   type FieldObservation,
+  type NdviRaster,
   type Plot,
 } from "./types";
 
@@ -169,6 +180,53 @@ function toClimateObservation(
 }
 
 /**
+ * Row-major, `rows × cols` readings from per-cell means, aligned with the
+ * heatmap. A cell that was dropped (too thin to average) stays in the list as
+ * "no data" instead of shifting every later cell by one.
+ */
+function cellReadingsFromMeans(
+  means: NdviCellValue[],
+  gridCells: GridCell[],
+  rows: number,
+  cols: number,
+): CellObservation[] {
+  const byId = new Map(means.map((cell) => [cell.id, cell.ndvi]));
+  const gridById = new Map(gridCells.map((cell) => [`z-${cell.row}-${cell.col}`, cell]));
+  const cellReadings: CellObservation[] = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const id = `z-${row}-${col}`;
+      const cell = gridById.get(id);
+      cellReadings.push({
+        id,
+        row,
+        col,
+        ndvi: cell ? (byId.get(cell.id) ?? null) : null,
+        areaHa: cell ? Math.round(cell.areaHa * 10000) / 10000 : 0,
+        pixels: cell ? Math.max(0, Math.round(cell.areaHa / SENTINEL_PIXEL_HA)) : 0,
+      });
+    }
+  }
+  return cellReadings;
+}
+
+/**
+ * The transported raster as the structural shape `cellMeansFromRaster` reads
+ * (`{ width, height, bands }`). A masked pixel's `null` becomes 0 here, which
+ * can never reach a mean: the mask band is 0 for exactly those pixels and
+ * `cellMeansFromRaster` reads the value only through it. Deriving the cells
+ * from the SAME rounded values the client paints guarantees the heatmap and
+ * the per-pixel layer can never disagree.
+ */
+function rasterAsTiff(raster: NdviRaster): DecodedTiff {
+  return {
+    width: raster.width,
+    height: raster.height,
+    bands: [Float32Array.from(raster.ndvi, (v) => v ?? 0), Float32Array.from(raster.dataMask)],
+  };
+}
+
+/**
  * The single entry point: one plot in, one day's real observation out.
  * Resolves the two upstreams concurrently — they are independent, and running
  * them in parallel keeps a cold cache at the slower of the two, not the sum.
@@ -230,37 +288,105 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
     return finish({ ok: false, reason: "invalid-input", observation: null, meanNdvi: null, climate: climateOnly });
   }
 
+  /* THE SATELLITE STEP — three interchangeable routes to the same Sentinel-2
+     measurement, in priority order:
+       • raster (default)  — `fetchNdviRaster`: ONE Process request kept as
+         per-pixel NDVI + dataMask. The grid cells below are derived FROM it,
+         so the dashboard heatmap reads exactly what the plot view paints.
+       • grid (`CDSE_USE_GRID=1`) — the legacy rows/cols request of per-cell
+         means, preserved verbatim as the documented fallback.
+       • openEO (`CDSE_USE_OPENEO=1`) — the legacy graph, unchanged. */
   const useOpeneo = config.useOpeneo;
   const cellTargets = cells.map((cell) => ({ id: cell.id, ring: cell.ring }));
-  const ndviPromise: Promise<NdviResult | null> = isConfigured(config)
-    ? (useOpeneo
-        ? fetchNdvi(
-            config,
-            {
-              collection: config.collection,
-              from: shiftIso(date, -OPENEO_LOOKBACK_DAYS),
-              to: date,
-              bbox,
-              targets: cellTargets,
-            },
-            input.openeoFetch,
-            trace,
-          )
-        : fetchNdviProcessApi(
-            config,
-            { from: shiftIso(date, -SCENE_LOOKBACK_DAYS), to: date, bbox, ring: plot.ring, targets: cellTargets },
-            input.openeoFetch,
-            trace,
-          )
-      ).catch((): NdviResult => ({ ok: false, reason: "network", cells: [], sceneDate: null, maskedCells: 0 }))
+  type SatelliteRead =
+    | { mode: "openeo" | "grid"; result: NdviResult }
+    | { mode: "raster"; result: NdviRasterResult };
+  const failRead = (mode: SatelliteRead["mode"], reason: NdviFailure): SatelliteRead =>
+    mode === "raster"
+      ? { mode, result: { ok: false, reason, raster: null, sceneDate: null, cloudCoverPct: null, validPixels: 0 } }
+      : { mode, result: { ok: false, reason, cells: [], sceneDate: null, maskedCells: 0 } };
+  const satellitePromise: Promise<SatelliteRead | null> = isConfigured(config)
+    ? (
+        useOpeneo
+          ? fetchNdvi(
+              config,
+              {
+                collection: config.collection,
+                from: shiftIso(date, -OPENEO_LOOKBACK_DAYS),
+                to: date,
+                bbox,
+                targets: cellTargets,
+              },
+              input.openeoFetch,
+              trace,
+            ).then((result): SatelliteRead => ({ mode: "openeo", result }))
+          : config.useGrid
+            ? fetchNdviProcessApi(
+                config,
+                { from: shiftIso(date, -SCENE_LOOKBACK_DAYS), to: date, bbox, ring: plot.ring, targets: cellTargets },
+                input.openeoFetch,
+                trace,
+              ).then((result): SatelliteRead => ({ mode: "grid", result }))
+            : fetchNdviRaster(
+                config,
+                { from: shiftIso(date, -SCENE_LOOKBACK_DAYS), to: date, bbox, ring: plot.ring },
+                input.openeoFetch,
+                trace,
+              ).then((result): SatelliteRead => ({ mode: "raster", result }))
+      ).catch((): SatelliteRead => failRead(useOpeneo ? "openeo" : config.useGrid ? "grid" : "raster", "network"))
     : Promise.resolve(null);
 
-  const [climate, ndvi] = await Promise.all([climatePromise, ndviPromise]);
+  const [climate, satellite] = await Promise.all([climatePromise, satellitePromise]);
   const climateObservation = toClimateObservation(climate, centroid);
 
-  if (!ndvi) {
+  if (!satellite) {
     return finish({ ok: false, reason: "notConfigured", observation: null, meanNdvi: null, climate: climateObservation });
   }
+
+  /* ---- raster path: the pixels ARE the product ------------------------- */
+  if (satellite.mode === "raster") {
+    const read = satellite.result;
+    if (!read.ok || !read.raster) {
+      return finish({
+        ok: false,
+        reason: (read.reason ?? "network") as FieldDataReason,
+        observation: null,
+        meanNdvi: null,
+        climate: climateObservation,
+      });
+    }
+    const cellReadings = cellReadingsFromMeans(
+      cellMeansFromRaster(rasterAsTiff(read.raster), bbox, cellTargets),
+      cells,
+      rows,
+      cols,
+    );
+    // The field mean the layer model references stays the mean of measured
+    // CELLS, exactly as the grid path computes it — a raster with valid pixels
+    // but no measurable cell (thin slivers) keeps the observation ok and
+    // simply reports no cell mean, because pixels were measured.
+    const values = cellReadings.map((c) => c.ndvi).filter((v): v is number => v !== null);
+    const meanNdvi = values.length > 0 ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
+    const observation: FieldObservation = {
+      plotId: plot.id,
+      date,
+      sceneDate: read.sceneDate,
+      rows,
+      cols,
+      raster: read.raster,
+      cells: cellReadings,
+      climate: climateObservation,
+      ...(read.cloudCoverPct !== undefined && read.cloudCoverPct !== null
+        ? { cloudCoverPct: Math.round(read.cloudCoverPct * 10) / 10 }
+        : {}),
+      partial: values.length < cellReadings.length || climateObservation === null,
+      fetchedAt: now.toISOString(),
+    };
+    return finish({ ok: true, observation, meanNdvi, climate: climateObservation });
+  }
+
+  /* ---- legacy grid / openEO paths — unchanged --------------------------- */
+  const ndvi = satellite.result;
   if (!ndvi.ok) {
     return finish({
       ok: false,
@@ -271,26 +397,10 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
     });
   }
 
-  const byId = new Map(ndvi.cells.map((cell) => [cell.id, cell.ndvi]));
-  const gridById = new Map(cells.map((cell) => [`z-${cell.row}-${cell.col}`, cell]));
   /* Row-major, `rows × cols`, so a cell's array index IS its place in the
      heatmap. A cell that was dropped (too thin to average) stays in the list as
      "no data" instead of shifting every later cell by one. */
-  const cellReadings: CellObservation[] = [];
-  for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < cols; col += 1) {
-      const id = `z-${row}-${col}`;
-      const cell = gridById.get(id);
-      cellReadings.push({
-        id,
-        row,
-        col,
-        ndvi: cell ? (byId.get(cell.id) ?? null) : null,
-        areaHa: cell ? Math.round(cell.areaHa * 10000) / 10000 : 0,
-        pixels: cell ? Math.max(0, Math.round(cell.areaHa / SENTINEL_PIXEL_HA)) : 0,
-      });
-    }
-  }
+  const cellReadings = cellReadingsFromMeans(ndvi.cells, cells, rows, cols);
 
   const values = cellReadings.map((c) => c.ndvi).filter((v): v is number => v !== null);
   if (values.length === 0) {

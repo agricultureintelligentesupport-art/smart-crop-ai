@@ -6,7 +6,8 @@
  *
  * Flow:
  *   1. `listPlots(uid)` on mount (Firestore + localStorage, see `plots.ts`).
- *   2. The active plot is the most recent one unless the user picks another.
+ *   2. The active plot is the most recent one unless the user picks another
+ *      (a second consumer, e.g. the plot view, seeds its own pick).
  *   3. When the active plot changes — and only then — `POST /api/field-data`
  *      runs. The route answers from its once-a-day cache, so opening the
  *      dashboard repeatedly costs no satellite or weather calls at all.
@@ -15,12 +16,15 @@
  *      a value that was not measured.
  *
  * The response is cached in module state as well, so switching plots back and
- * forth inside a session is instant and free.
+ * forth inside a session is instant and free. That module state — plus one
+ * in-flight promise per plot — is also what lets a SECOND instance of this
+ * hook (the plot-details view) analyse the same parcel without ever issuing a
+ * duplicate request.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { deletePlot, listPlots, readLocalPlots, savePlot, subscribeToPlots } from "./plots";
-import type { FieldDataReason, FieldObservation, Plot } from "./types";
+import type { ClimateObservation, FieldDataReason, FieldObservation, Plot } from "./types";
 import type { Ring } from "@/lib/geo/polygon";
 
 export type FieldDataState = "idle" | "loading" | "ready" | "error";
@@ -36,6 +40,11 @@ export interface UseFieldDataResult {
   state: FieldDataState;
   /** True when the observation is a cached reading for an earlier day. */
   stale: boolean;
+  /**
+   * The NASA POWER day, present even when the satellite step failed — the two
+   * upstreams are independent, so a failed analysis still shows real weather.
+   */
+  climate: ClimateObservation | null;
   loadingPlots: boolean;
   savingPlot: boolean;
   setActivePlot: (plotId: string | null) => void;
@@ -43,6 +52,11 @@ export interface UseFieldDataResult {
   removePlot: (plotId: string) => Promise<void>;
   /** Re-asks the route, bypassing the daily cache. */
   refresh: () => void;
+  /**
+   * Starts asking for the observation at all. Only meaningful with
+   * `manual: true`, where the request waits for this call (or `refresh`).
+   */
+  ensure: () => void;
 }
 
 interface CachedResponse {
@@ -50,6 +64,7 @@ interface CachedResponse {
   reason: FieldDataReason | null;
   technical: string | null;
   stale: boolean;
+  climate: ClimateObservation | null;
   fetchedAt: number;
 }
 
@@ -97,12 +112,16 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
         reason?: FieldDataReason;
         stale?: boolean;
         technical?: string;
+        climate?: ClimateObservation | null;
       };
       const result: CachedResponse = {
         observation: payload.observation ?? null,
         reason: payload.observation ? null : (payload.reason ?? "network"),
         technical: payload.observation ? null : (payload.technical ?? null),
         stale: Boolean(payload.stale),
+        // POWER is independent of the satellite: on a failure response it
+        // arrives at the top level; on success it rides on the observation.
+        climate: payload.climate ?? payload.observation?.climate ?? null,
         fetchedAt: Date.now(),
       };
       if (result.observation) responseCache.set(plot.id, result);
@@ -114,6 +133,7 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
         reason: abort.signal.aborted ? "timeout" : "network",
         technical: null,
         stale: false,
+        climate: null,
         fetchedAt: Date.now(),
       };
     } finally {
@@ -126,7 +146,30 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
   return job;
 }
 
-export function useFieldData(uid: string | null, areaHa: number): UseFieldDataResult {
+/**
+ * Options for a second consumer of the same data, e.g. the plot-details view.
+ */
+export interface UseFieldDataOptions {
+  /**
+   * Which plot this instance analyses. Defaults to the account's active plot
+   * (the most recent boundary); the plot view passes its OWN plot so opening
+   * any saved parcel's details analyses that parcel.
+   */
+  plotId?: string;
+  /**
+   * Wait for `ensure()`/`refresh()` before any request is made. The dashboard
+   * wants its data immediately; the plot view asks only when the farmer
+   * presses «تحليل القطعة». Module-level caching + in-flight dedup keep the
+   * two instances from ever double-requesting the same plot.
+   */
+  manual?: boolean;
+}
+
+export function useFieldData(
+  uid: string | null,
+  areaHa: number,
+  options?: UseFieldDataOptions,
+): UseFieldDataResult {
   /* 1. The plot list is the device store, read through `useSyncExternalStore`.
 
      This is the same contract as `lib/weather/live.ts`: the store is the one
@@ -142,10 +185,15 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
 
   /* 2. The active plot is *derived*: the farmer's explicit pick when it still
         exists, otherwise the most recent boundary. Holding a chosen id rather
-        than a resolved one means deleting a plot needs no cleanup effect. */
-  const [chosenId, setChosenId] = useState<string | null>(null);
+        than a resolved one means deleting a plot needs no cleanup effect.
+        A second consumer (the plot view) seeds its own pick, so it analyses
+        the parcel whose details are open — never the dashboard's active one. */
+  const [chosenId, setChosenId] = useState<string | null>(options?.plotId ?? null);
   const [savingPlot, setSavingPlot] = useState(false);
   const [nonce, setNonce] = useState(0);
+  /* With `manual`, nothing is requested until the consumer asks (ensure/
+     refresh); the initial `true` for the dashboard keeps its auto-fetch. */
+  const [requested, setRequested] = useState(!options?.manual);
 
   const activeId = useMemo(
     () => (chosenId && plots.some((p) => p.id === chosenId) ? chosenId : (plots[0]?.id ?? null)),
@@ -189,7 +237,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
   const [result, setResult] = useState<{ plotId: string; value: CachedResponse } | null>(null);
 
   useEffect(() => {
-    if (!activePlot) return;
+    if (!activePlot || !requested) return;
     let cancelled = false;
     const force = nonce > 0;
     requestObservation(activePlot, areaHa, force).then((value) => {
@@ -198,14 +246,15 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
     return () => {
       cancelled = true;
     };
-  }, [activePlot, areaHa, nonce]);
+  }, [activePlot, areaHa, nonce, requested]);
 
   const current = result && activePlot && result.plotId === activePlot.id ? result.value : null;
   const observation = current?.observation ?? null;
   const reason = observation ? null : (current?.reason ?? null);
   const technical = observation ? null : (current?.technical ?? null);
   const stale = current?.stale ?? false;
-  const state: FieldDataState = !activePlot
+  const climate = observation ? (observation.climate ?? null) : (current?.climate ?? null);
+  const state: FieldDataState = !activePlot || !requested
     ? "idle"
     : !current
       ? "loading"
@@ -251,7 +300,13 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
 
   const refresh = useCallback(() => {
     if (activeIdRef.current) responseCache.delete(activeIdRef.current);
+    setRequested(true);
     setNonce((n) => n + 1);
+  }, []);
+
+  /** Idempotent: asking twice for the same plot is one request (dedup above). */
+  const ensure = useCallback(() => {
+    setRequested(true);
   }, []);
 
   return {
@@ -263,6 +318,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
     technical,
     state,
     stale,
+    climate,
     // The spinner means "still checking the account", never "you have no
     // fields" — otherwise a first-time farmer could never open the draw tool.
     loadingPlots: uid !== null && !accountSynced,
@@ -271,5 +327,6 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
     addPlot,
     removePlot,
     refresh,
+    ensure,
   };
 }
