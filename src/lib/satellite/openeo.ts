@@ -15,6 +15,13 @@
  * value per contained Feature."* That is what turns one satellite pass into
  * the 16 values behind the heatmap cells.
  *
+ * STATUS: LEGACY, BEHIND A FLAG
+ * ------------------------------
+ * This path runs only when `CDSE_USE_OPENEO=1`. The default NDVI source is the
+ * Sentinel Hub Process API (`./sentinelhub.ts`), which accepts the `sh-…` OAuth
+ * clients created in the Sentinel Hub dashboard; openEO answered those with a
+ * 401/403 ("Copernicus rejected credentials"). Both share the token code below.
+ *
  * AUTHENTICATION (verified against the CDSE docs)
  * ----------------------------------------------
  * `client_credentials` against the CDSE realm, then `Authorization: Bearer`.
@@ -32,25 +39,31 @@
  */
 
 import { closeRing, type Ring } from "../geo/polygon";
+import type { SatelliteTrace } from "./trace";
 
 const DEFAULT_OPENEO_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2";
 const DEFAULT_TOKEN_URL =
   "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token";
 const DEFAULT_COLLECTION = "SENTINEL2_L2A";
+export const DEFAULT_PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process";
+export const DEFAULT_CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search";
 
-/** Network contract, kept structural so the whole module is unit-testable. */
+/**
+ * Network contract, kept structural so the whole module is unit-testable.
+ * `arrayBuffer` is optional because only the Sentinel Hub Process API (binary
+ * GeoTIFF answer) needs it; the openEO path reads JSON.
+ */
 export type OpeneoFetch = (
   input: string,
   init?: { method?: string; signal?: AbortSignal; headers?: Record<string, string>; body?: string },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; text(): Promise<string>; headers: { get(name: string): string | null } }>;
-
-/** Node's `Buffer` is not available in every runtime; fall back to btoa. */
-function basicBase64(value: string): string {
-  if (typeof globalThis.btoa === "function") return globalThis.btoa(value);
-  const nodeBuffer = (globalThis as { Buffer?: { from(s: string, e: string): { toString(e: string): string } } }).Buffer;
-  if (nodeBuffer) return nodeBuffer.from(value, "utf-8").toString("base64");
-  throw new Error("no base64 encoder available");
-}
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+  headers: { get(name: string): string | null };
+}>;
 
 export interface OpeneoConfig {
   clientId: string | null;
@@ -59,6 +72,19 @@ export interface OpeneoConfig {
   tokenUrl: string;
   collection: string;
   timeoutMs: number;
+  /**
+   * Sentinel Hub Process API endpoint (default provider). The Catalog API lives
+   * on the same host and is derived from it.
+   */
+  processUrl: string;
+  catalogUrl: string;
+  /**
+   * `CDSE_USE_OPENEO=1` routes NDVI through the legacy openEO graph instead of
+   * the Sentinel Hub Process API. OFF by default: an `sh-…` OAuth client
+   * (created in the Sentinel Hub dashboard) is accepted by the token endpoint
+   * but rejected by openEO.
+   */
+  useOpeneo: boolean;
 }
 
 export function readOpeneoConfig(env: NodeJS.ProcessEnv = process.env): OpeneoConfig {
@@ -70,6 +96,9 @@ export function readOpeneoConfig(env: NodeJS.ProcessEnv = process.env): OpeneoCo
     tokenUrl: clean(env.CDSE_TOKEN_URL) ?? DEFAULT_TOKEN_URL,
     collection: clean(env.CDSE_COLLECTION) ?? DEFAULT_COLLECTION,
     timeoutMs: Number(env.CDSE_TIMEOUT_MS) > 0 ? Number(env.CDSE_TIMEOUT_MS) : 45_000,
+    processUrl: clean(env.CDSE_PROCESS_URL) ?? DEFAULT_PROCESS_URL,
+    catalogUrl: clean(env.CDSE_CATALOG_URL) ?? DEFAULT_CATALOG_URL,
+    useOpeneo: /^(1|true|on|yes)$/i.test(clean(env.CDSE_USE_OPENEO) ?? ""),
   };
 }
 
@@ -93,7 +122,7 @@ const TOKEN_SAFETY_MS = 60_000;
  * and must not be conflated: telling a farmer to "check your credentials" when
  * their connection is down sends them to fix the wrong thing.
  */
-type TokenResult =
+export type TokenResult =
   | { ok: true; token: string }
   | { ok: false; reason: "auth" | "network" | "timeout" };
 
@@ -101,18 +130,19 @@ async function requestToken(
   config: OpeneoConfig,
   fetchImpl: OpeneoFetch,
   signal: AbortSignal,
+  trace?: SatelliteTrace,
 ): Promise<TokenResult> {
+  const startedAt = Date.now();
   try {
+    // Credentials go in the form body only — the style every CDSE example uses.
+    // (The previous version also sent an `Authorization: Basic` header; RFC 6749
+    // §2.3 forbids using more than one client-authentication method at once.)
     const res = await fetchImpl(config.tokenUrl, {
       method: "POST",
       signal,
       headers: {
         "content-type": "application/x-www-form-urlencoded",
         accept: "application/json",
-        // `client_secret_basic` is the CDSE-documented style, but the realm
-        // also accepts credentials in the body; send both is not allowed, so
-        // use the body form that every CDSE example (curl/python/R) uses.
-        authorization: `Basic ${basicBase64(`${config.clientId}:${config.clientSecret}`)}`,
       },
       body: new URLSearchParams({
         grant_type: "client_credentials",
@@ -120,16 +150,40 @@ async function requestToken(
         client_secret: config.clientSecret as string,
       }).toString(),
     });
-    // 401/403 is the realm rejecting the client; anything else is a server or
-    // network-side problem, not a credential problem.
-    if (!res.ok) return { ok: false, reason: res.status === 401 || res.status === 403 ? "auth" : "network" };
+    // 400/401/403 from the realm is it rejecting the client (Keycloak answers
+    // `invalid_client` with 401 and `unauthorized_client` with 400); anything
+    // else is a server or network-side problem, not a credential problem.
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      trace?.record({ step: "cdse-token", url: config.tokenUrl, status: res.status, ok: false, body, startedAt });
+      return { ok: false, reason: [400, 401, 403].includes(res.status) ? "auth" : "network" };
+    }
     const payload = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
     const token = typeof payload.access_token === "string" ? payload.access_token : null;
-    if (!token) return { ok: false, reason: "auth" };
+    if (!token) {
+      trace?.record({
+        step: "cdse-token",
+        url: config.tokenUrl,
+        status: res.status,
+        ok: false,
+        note: "token endpoint answered without an access_token",
+        startedAt,
+      });
+      return { ok: false, reason: "auth" };
+    }
+    trace?.record({ step: "cdse-token", url: config.tokenUrl, status: res.status, ok: true, startedAt });
     const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : 600;
     cachedToken = { value: token, expiresAt: Date.now() + Math.max(60, expiresIn) * 1000 - TOKEN_SAFETY_MS };
     return { ok: true, token };
-  } catch {
+  } catch (error) {
+    trace?.record({
+      step: "cdse-token",
+      url: config.tokenUrl,
+      status: null,
+      ok: false,
+      note: signal.aborted ? "timed out" : error instanceof Error ? `${error.name}: ${error.message}` : "request failed",
+      startedAt,
+    });
     return { ok: false, reason: signal.aborted ? "timeout" : "network" };
   }
 }
@@ -139,11 +193,12 @@ export async function getAccessToken(
   config: OpeneoConfig,
   fetchImpl: OpeneoFetch,
   signal: AbortSignal,
+  trace?: SatelliteTrace,
 ): Promise<TokenResult> {
   if (!isConfigured(config)) return { ok: false, reason: "auth" };
   if (cachedToken && cachedToken.expiresAt > Date.now()) return { ok: true, token: cachedToken.value };
   if (inFlightToken) return inFlightToken;
-  const job = requestToken(config, fetchImpl, signal).finally(() => {
+  const job = requestToken(config, fetchImpl, signal, trace).finally(() => {
     inFlightToken = null;
   });
   inFlightToken = job;
@@ -262,7 +317,8 @@ export type NdviFailure =
   | "http"
   | "quota"
   | "noScenes"
-  | "malformed";
+  | "malformed"
+  | "invalid-input";
 
 export interface NdviResult {
   ok: boolean;
@@ -274,6 +330,8 @@ export interface NdviResult {
   maskedCells: number;
   /** HTTP status, for diagnostics only — never surfaced as agronomic data. */
   status?: number;
+  /** Scene-level cloud cover (%) of the pass the values came from, when known. */
+  cloudCoverPct?: number | null;
 }
 
 const asNumber = (v: unknown): number | null =>
@@ -372,6 +430,7 @@ export async function fetchNdvi(
   config: OpeneoConfig,
   options: NdviGraphOptions,
   fetchImpl?: OpeneoFetch,
+  trace?: SatelliteTrace,
 ): Promise<NdviResult> {
   const targets = options.targets;
   const empty: NdviResult = { ok: false, cells: [], sceneDate: null, maskedCells: 0 };
@@ -382,11 +441,12 @@ export async function fetchNdvi(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
-    const auth = await getAccessToken(config, doFetch, controller.signal);
+    const auth = await getAccessToken(config, doFetch, controller.signal, trace);
     if (!auth.ok) return { ...empty, reason: auth.reason };
     const token = auth.token;
 
     const resultUrl = `${config.openEoUrl.replace(/\/+$/, "")}/result`;
+    let startedAt = Date.now();
     let res = await doFetch(resultUrl, {
       method: "POST",
       signal: controller.signal,
@@ -400,10 +460,13 @@ export async function fetchNdvi(
 
     // Bounded batch fallback: follow `Location` for a small number of polls.
     let polls = 0;
+    let lastUrl = resultUrl;
     while (res.status === 202 && polls < 8) {
       const location = res.headers.get("location");
       if (!location) break;
       await new Promise((resolve) => setTimeout(resolve, 1500 * (polls + 1)));
+      startedAt = Date.now();
+      lastUrl = location;
       res = await doFetch(location, {
         signal: controller.signal,
         headers: { accept: "application/json", authorization: `Bearer ${token}` },
@@ -411,14 +474,27 @@ export async function fetchNdvi(
       polls += 1;
     }
 
-    if (!res.ok) return { ...empty, reason: reasonForStatus(res.status), status: res.status };
+    const step = polls > 0 ? "openeo-poll" : "openeo-result";
+    if (!res.ok) {
+      trace?.record({ step, url: lastUrl, status: res.status, ok: false, body: await res.text().catch(() => ""), startedAt });
+      return { ...empty, reason: reasonForStatus(res.status), status: res.status };
+    }
+    trace?.record({ step, url: lastUrl, status: res.status, ok: true, startedAt });
 
     const payload = (await res.json()) as unknown;
     const { cells, sceneDate } = parseNdviResponse(payload, targets);
     const maskedCells = cells.filter((c) => c.ndvi === null).length;
     if (maskedCells === cells.length) return { ok: false, reason: "noScenes", cells, sceneDate, maskedCells };
     return { ok: true, cells, sceneDate, maskedCells };
-  } catch {
+  } catch (error) {
+    trace?.record({
+      step: "openeo-result",
+      url: config.openEoUrl,
+      status: null,
+      ok: false,
+      note: controller.signal.aborted ? "timed out" : error instanceof Error ? `${error.name}: ${error.message}` : "request failed",
+      startedAt: Date.now(),
+    });
     return { ...empty, reason: controller.signal.aborted ? "timeout" : "network" };
   } finally {
     clearTimeout(timer);

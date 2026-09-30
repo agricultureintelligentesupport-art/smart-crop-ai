@@ -340,6 +340,7 @@ export default function DashboardView() {
                 weather={weather}
                 observation={fieldData.observation}
                 observationReason={fieldData.activePlot ? fieldData.reason : null}
+                observationTechnical={fieldData.activePlot ? fieldData.technical : null}
                 plotName={fieldData.activePlot?.name ?? null}
                 onOpenMap={() => setMapOpen(true)}
               />

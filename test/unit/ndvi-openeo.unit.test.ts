@@ -31,6 +31,9 @@ const CONFIG: OpeneoConfig = {
   tokenUrl: "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
   collection: "SENTINEL2_L2A",
   timeoutMs: 5_000,
+  processUrl: "https://sh.dataspace.copernicus.eu/api/v1/process",
+  catalogUrl: "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search",
+  useOpeneo: false,
 };
 
 const TARGETS: NdviTarget[] = [

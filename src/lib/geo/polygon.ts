@@ -244,6 +244,20 @@ function intersect(p1: Position, p2: Position, a: Position, b: Position): Positi
 export const MIN_CELL_HA = 0.02;
 
 /**
+ * Shoelace sign in an equirectangular frame: positive when the ring runs
+ * counter-clockwise (lon = x, lat = y), negative when clockwise.
+ */
+export function ringSignedArea(ring: Ring): number {
+  let sum = 0;
+  for (let i = 0; i < ring.length; i += 1) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    sum += x1 * y2 - x2 * y1;
+  }
+  return sum / 2;
+}
+
+/**
  * Splits the parcel's bounding box into a `rows × cols` grid and clips every
  * cell to the parcel itself, so the mean openEO returns per cell is computed
  * only over pixels that are actually inside the drawn boundary.
@@ -255,6 +269,12 @@ export const MIN_CELL_HA = 0.02;
 export function gridCells(ring: Ring, rows: number, cols: number): GridCell[] {
   const bbox = bboxOf(ring);
   if (!bbox || rows < 1 || cols < 1) return [];
+  /* `clipRingToPolygon` keeps what lies LEFT of each clip edge, which is the
+     inside only for a counter-clockwise clip polygon. A boundary drawn
+     clockwise (as a map draw tool commonly yields) would otherwise clip every
+     cell away and leave zero cells whatever the plot's size. Orientation is
+     irrelevant to the farmer, so normalise it here. */
+  const clip = ringSignedArea(ring) < 0 ? [...ring].reverse() : ring;
   const dx = (bbox.east - bbox.west) / cols;
   const dy = (bbox.north - bbox.south) / rows;
   const out: GridCell[] = [];
@@ -268,7 +288,7 @@ export function gridCells(ring: Ring, rows: number, cols: number): GridCell[] {
         south: bbox.north - (row + 1) * dy,
         north: bbox.north - row * dy,
       };
-      const clipped = clipRingToPolygon(boxRing(cell), ring);
+      const clipped = clipRingToPolygon(boxRing(cell), clip);
       if (clipped.length < 3) continue;
       const areaHa = ringAreaHa(clipped);
       if (!Number.isFinite(areaHa) || areaHa < MIN_CELL_HA) continue;

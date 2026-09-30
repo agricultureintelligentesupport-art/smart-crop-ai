@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { deletePlot, listPlots, readLocalPlots, savePlot, subscribeToPlots } from "./plots";
 import type { FieldDataReason, FieldObservation, Plot } from "./types";
 import type { Ring } from "@/lib/geo/polygon";
-import { heatmapGrid } from "@/lib/dashboard/heatmap";
 
 export type FieldDataState = "idle" | "loading" | "ready" | "error";
 
@@ -32,6 +31,8 @@ export interface UseFieldDataResult {
   activeId: string | null;
   observation: FieldObservation | null;
   reason: FieldDataReason | null;
+  /** Short technical reason of the failing upstream step, for the error card. */
+  technical: string | null;
   state: FieldDataState;
   /** True when the observation is a cached reading for an earlier day. */
   stale: boolean;
@@ -47,6 +48,7 @@ export interface UseFieldDataResult {
 interface CachedResponse {
   observation: FieldObservation | null;
   reason: FieldDataReason | null;
+  technical: string | null;
   stale: boolean;
   fetchedAt: number;
 }
@@ -77,7 +79,6 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
     const abort = new AbortController();
     const cancel = setTimeout(() => abort.abort(), OBSERVATION_TIMEOUT_MS);
     try {
-      const { rows, cols } = heatmapGrid(areaHa);
       const res = await fetch("/api/field-data", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -85,8 +86,6 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
           uid: plot.uid,
           plotId: plot.id,
           ring: plot.ring,
-          rows,
-          cols,
           areaHa,
           force,
         }),
@@ -97,10 +96,12 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
         observation?: FieldObservation | null;
         reason?: FieldDataReason;
         stale?: boolean;
+        technical?: string;
       };
       const result: CachedResponse = {
         observation: payload.observation ?? null,
         reason: payload.observation ? null : (payload.reason ?? "network"),
+        technical: payload.observation ? null : (payload.technical ?? null),
         stale: Boolean(payload.stale),
         fetchedAt: Date.now(),
       };
@@ -111,6 +112,7 @@ async function requestObservation(plot: Plot, areaHa: number, force: boolean): P
       return {
         observation: null,
         reason: abort.signal.aborted ? "timeout" : "network",
+        technical: null,
         stale: false,
         fetchedAt: Date.now(),
       };
@@ -201,6 +203,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
   const current = result && activePlot && result.plotId === activePlot.id ? result.value : null;
   const observation = current?.observation ?? null;
   const reason = observation ? null : (current?.reason ?? null);
+  const technical = observation ? null : (current?.technical ?? null);
   const stale = current?.stale ?? false;
   const state: FieldDataState = !activePlot
     ? "idle"
@@ -257,6 +260,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
     activeId,
     observation,
     reason,
+    technical,
     state,
     stale,
     // The spinner means "still checking the account", never "you have no
