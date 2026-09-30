@@ -205,13 +205,16 @@ function mergeById(...groups: Plot[][]): Plot[] {
  */
 const REMOTE_SYNC_TIMEOUT_MS = 4000;
 
-function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    work,
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("plots: account read timed out")), ms);
-    }),
-  ]);
+async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("plots: remote acknowledgement timed out")), ms);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 /**
@@ -289,7 +292,9 @@ export async function savePlot(
 
   if (isFirestoreReady(firestore)) {
     try {
-      await setDoc(doc(firestore, "users", uid, "plots", id), toFirestoreDoc(plot));
+      // Local-first save already succeeded. Bound the acknowledgement, not
+      // the queued SDK write: it can still sync when connectivity returns.
+      await withTimeout(setDoc(doc(firestore, "users", uid, "plots", id), toFirestoreDoc(plot)), REMOTE_SYNC_TIMEOUT_MS);
     } catch (error) {
       // The local copy stands; the next listPlots() retries nothing, so say so.
       logAuthError("plots savePlot", error);
@@ -308,7 +313,7 @@ export async function deletePlot(
   writeLocal(uid, readLocal(uid, defaultStorage()).filter((p) => p.id !== plotId), defaultStorage());
   if (!isFirestoreReady(firestore)) return true;
   try {
-    await deleteDoc(doc(firestore, "users", uid, "plots", plotId));
+    await withTimeout(deleteDoc(doc(firestore, "users", uid, "plots", plotId)), REMOTE_SYNC_TIMEOUT_MS);
     return true;
   } catch (error) {
     logAuthError("plots deletePlot", error);
@@ -323,14 +328,17 @@ export async function renamePlot(
   name: string,
   firestore: Firestore = db,
 ): Promise<Plot | null> {
-  const plots = await listPlots(uid, firestore);
-  const plot = plots.find((p) => p.id === plotId);
+  // Prefer the current local record; a remote read must not overwrite a
+  // boundary just saved offline with an older server copy before renaming.
+  const plot = readLocal(uid, defaultStorage()).find((p) => p.id === plotId)
+    ?? (await listPlots(uid, firestore)).find((p) => p.id === plotId);
   if (!plot) return null;
   const updated: Plot = { ...plot, name: name.trim().slice(0, 60) || plot.name, updatedAt: new Date().toISOString() };
   writeLocal(uid, mergeById(readLocal(uid, defaultStorage()).filter((p) => p.id !== plotId), [updated]), defaultStorage());
   if (isFirestoreReady(firestore)) {
     try {
-      await setDoc(doc(firestore, "users", uid, "plots", plotId), toFirestoreDoc(updated));
+      await withTimeout(setDoc(doc(firestore, "users", uid, "plots", plotId),
+        { name: updated.name, updatedAt: updated.updatedAt }, { merge: true }), REMOTE_SYNC_TIMEOUT_MS);
     } catch (error) {
       logAuthError("plots renamePlot", error);
     }

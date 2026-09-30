@@ -37,6 +37,8 @@
  */
 
 import dynamic from "next/dynamic";
+import { AnimatePresence } from "framer-motion";
+import PlotView from "@/components/plot/PlotView";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, LocateFixed, Map as MapIcon, Trash2, Undo2 } from "lucide-react";
 import type { Lang } from "@/lib/wilayas";
@@ -143,7 +145,7 @@ export default function FieldMapSheet({
   plots: Plot[];
   activeId: string | null;
   loading: boolean;
-  onSave: (name: string, ring: Ring) => Promise<{ ok: boolean; error?: string }>;
+  onSave: (name: string, ring: Ring) => Promise<{ ok: boolean; error?: string; plot?: Plot }>;
   onDelete: (plotId: string) => Promise<void>;
   onActivate: (plotId: string | null) => void;
   copy: FieldMapSheetCopy;
@@ -152,6 +154,14 @@ export default function FieldMapSheet({
   /** Wilaya-capital fallback for the opening view, `[lat, lng]`. */
   fallbackCenter?: [number, number];
 }) {
+  const [viewPlot, setViewPlot] = useState<Plot | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [draft, setDraft] = useState<Ring | null>(null);
   // Pre-filled with the active plot's name, so "edit boundary" opens on the
   // existing one. The sheet is mounted per session, so this cannot go stale.
@@ -165,6 +175,7 @@ export default function FieldMapSheet({
   /** The Leaflet canvas reports itself ready; drawing is impossible before that. */
   const [mapReady, setMapReady] = useState(false);
   const handleRef = useRef<MapHandle | null>(null);
+  const drawButtonRef = useRef<HTMLButtonElement>(null);
 
   const draftAreaHa = useMemo(() => (draft ? ringAreaHa(draft) : null), [draft]);
   const valid = useMemo(() => (draft ? validatePlot(draft).ok : false), [draft]);
@@ -173,11 +184,11 @@ export default function FieldMapSheet({
   // session starts with clean state and a canvas that has not mounted yet.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !viewPlot) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, viewPlot]);
 
   const startDraw = useCallback(async () => {
     // `startDraw` can only fail if the canvas has not mounted yet, and the
@@ -211,24 +222,35 @@ export default function FieldMapSheet({
     handleRef.current?.flyTo(place.lat, place.lng, SEARCH_RESULT_ZOOM);
   }, []);
 
-  const handleSave = useCallback(async () => {
-    if (!draft) return;
-    if (!valid) {
-      setError(copy.errorTooSmall);
-      return;
-    }
+  const saveDraft = useCallback(async (ring: Ring) => {
+    if (savingRef.current || busy) return;
+    if (!validatePlot(ring).ok) { setError(copy.errorTooSmall); return; }
+    savingRef.current = true;
+    setSaving(true);
     setError(null);
-    const result = await onSave(name, draft);
-    if (!result.ok) setError(result.error ?? copy.errorGeneric);
-    else {
-      setDraft(null);
-      setDrawingArea(null);
-      setDrawing(false);
-    }
-  }, [draft, valid, name, onSave, copy]);
+    try {
+      // Same onSave pipeline. Its returned persisted record gives us the real
+      // ID/date immediately, without racing the subscribed plot-list render.
+      const result = await onSave(name.trim() || (lang === "ar" ? "قطعتي" : "Ma parcelle"), ring);
+      if (!mountedRef.current) return;
+      if (!result.ok || !result.plot) { setError(result.error ?? copy.errorGeneric); return; }
+      setName(result.plot.name);
+      setViewPlot(result.plot);
+      clearDraft();
+    } catch { if (mountedRef.current) setError(copy.errorGeneric); }
+    finally { savingRef.current = false; if (mountedRef.current) setSaving(false); }
+  }, [busy, name, lang, onSave, clearDraft, copy]);
+
+  const handleSave = useCallback(() => {
+    if (draft) void saveDraft(draft);
+  }, [draft, saveDraft]);
 
   return (
+    <>
     <div
+      inert={!!viewPlot}
+      aria-hidden={!!viewPlot}
+      style={viewPlot ? { visibility: "hidden" } : undefined}
       role="dialog"
       aria-modal="true"
       aria-label={copy.title}
@@ -250,7 +272,7 @@ export default function FieldMapSheet({
           </button>
         </header>
 
-        <div className="relative min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1" inert={saving}>
           <FieldMapCanvas
             plots={plots}
             activeId={activeId}
@@ -260,10 +282,11 @@ export default function FieldMapSheet({
               if (ring) {
                 setDrawing(false);
                 setDrawingArea(null);
+                void saveDraft(ring);
               }
             }}
             onDrawingArea={setDrawingArea}
-            onPick={(plot) => onActivate(plot.id)}
+            onPick={(plot) => { onActivate(plot.id); setName(plot.name); setViewPlot(plot); }}
             onReady={(handle) => {
               handleRef.current = handle;
               setMapReady(true);
@@ -349,6 +372,7 @@ export default function FieldMapSheet({
                 <button
                   type="button"
                   onClick={clearDraft}
+                  disabled={saving || busy}
                   className="flex min-h-[2.75rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
                 >
                   {copy.clear}
@@ -373,6 +397,7 @@ export default function FieldMapSheet({
                 <button
                   type="button"
                   onClick={clearDraft}
+                  disabled={saving || busy}
                   className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
                 >
                   {copy.clear}
@@ -380,17 +405,18 @@ export default function FieldMapSheet({
                 <button
                   type="button"
                   onClick={handleSave}
-                  disabled={!valid || busy}
+                  disabled={!valid || busy || saving}
                   className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-600 px-4 text-[11px] font-extrabold text-white disabled:opacity-45 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
                 >
-                  {busy ? copy.saving : copy.save}
+                  {busy || saving ? copy.saving : copy.save}
                 </button>
               </div>
             </div>
           )}
         </div>
 
-        <footer className="flex flex-col gap-2 border-t border-emerald-900/10 px-4 py-3">
+        {saving && <p role="status" className="bg-emerald-50 px-4 py-2 text-center text-sm font-bold text-emerald-900">{copy.saving}</p>}
+        <footer inert={saving} className="flex flex-col gap-2 border-t border-emerald-900/10 px-4 py-3">
           {error && (
             <p
               role="alert"
@@ -419,7 +445,7 @@ export default function FieldMapSheet({
                 <li key={plot.id}>
                   <button
                     type="button"
-                    onClick={() => onActivate(plot.id)}
+                    onClick={() => { onActivate(plot.id); setName(plot.name); setViewPlot(plot); }}
                     aria-pressed={plot.id === activeId}
                     className={`flex min-h-[2.5rem] items-center gap-1.5 rounded-full px-3 text-[11px] font-extrabold transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45 ${
                       plot.id === activeId
@@ -438,8 +464,9 @@ export default function FieldMapSheet({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              ref={drawButtonRef}
               onClick={drawing ? () => handleRef.current?.finishDraw() : startDraw}
-              disabled={!mapReady}
+              disabled={!mapReady || saving || busy}
               className="flex min-h-[2.75rem] flex-1 items-center justify-center gap-1.5 rounded-[0.9rem] bg-emerald-600 px-4 text-[12px] font-extrabold text-white hover:bg-emerald-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
             >
               {drawing ? copy.finish : copy.draw}
@@ -447,6 +474,7 @@ export default function FieldMapSheet({
             {activeId && (
               <button
                 type="button"
+                disabled={saving || busy}
                 onClick={() => onDelete(activeId)}
                 aria-label={copy.delete}
                 className="flex h-11 w-11 items-center justify-center rounded-[0.9rem] bg-red-50 text-red-700 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-red-300/50"
@@ -466,5 +494,17 @@ export default function FieldMapSheet({
         </footer>
       </div>
     </div>
+    <AnimatePresence onExitComplete={() => drawButtonRef.current?.focus({ preventScroll: true })}>
+      {viewPlot && <PlotView
+        key={viewPlot.id}
+        plot={viewPlot}
+        lang={lang}
+        onBack={() => setViewPlot(null)}
+        onRedraw={() => { setViewPlot(null); void startDraw(); }}
+        onDelete={onDelete}
+        onRename={(updated) => { setViewPlot(updated); setName(updated.name); }}
+      />}
+    </AnimatePresence>
+    </>
   );
 }

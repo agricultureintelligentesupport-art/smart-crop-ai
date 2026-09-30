@@ -38,7 +38,7 @@ export interface UseFieldDataResult {
   loadingPlots: boolean;
   savingPlot: boolean;
   setActivePlot: (plotId: string | null) => void;
-  addPlot: (name: string, ring: Ring) => Promise<{ ok: boolean; error?: string }>;
+  addPlot: (name: string, ring: Ring) => Promise<{ ok: boolean; error?: string; plot?: Plot }>;
   removePlot: (plotId: string) => Promise<void>;
   /** Re-asks the route, bypassing the daily cache. */
   refresh: () => void;
@@ -211,7 +211,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
         : "error";
 
   const addPlot = useCallback(
-    async (name: string, ring: Ring): Promise<{ ok: boolean; error?: string }> => {
+    async (name: string, ring: Ring): Promise<{ ok: boolean; error?: string; plot?: Plot }> => {
       if (!uid) return { ok: false, error: "no session" };
       setSavingPlot(true);
       try {
@@ -223,7 +223,7 @@ export function useFieldData(uid: string | null, areaHa: number): UseFieldDataRe
         // The geometry changed: drop the memoised observation for it.
         responseCache.delete(saved.plot.id);
         setNonce((n) => n + 1);
-        return { ok: true };
+        return { ok: true, plot: saved.plot };
       } finally {
         setSavingPlot(false);
       }
