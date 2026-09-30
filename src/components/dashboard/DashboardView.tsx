@@ -23,10 +23,10 @@ import { useLang } from "@/lib/use-lang";
 import { useLiveWeather } from "@/lib/weather/useLiveWeather";
 import AccountSheet from "./AccountSheet";
 import CalculatorDetailModal from "./CalculatorDetailModal";
-import FieldHeatmapCard from "./FieldHeatmapCard";
 import HeroCard from "./HeroCard";
 import IrrigationWindowSheet from "./IrrigationWindowSheet";
 import type { ParcelInput } from "./IrrigationCard";
+import MyPlotCard from "./MyPlotCard";
 import PerHectareFlowSheet from "./PerHectareFlowSheet";
 import QuickAccessGrid from "./QuickAccessGrid";
 import SatelliteCard from "./SatelliteCard";
@@ -123,6 +123,13 @@ export default function DashboardView() {
   const plotUid = authUser?.uid ?? (isGuest ? GUEST_UID : null);
   const fieldData = useFieldData(plotUid, areaHa);
   const [mapOpen, setMapOpen] = useState(false);
+  /** Which plot the map should open on; `null` opens on the map itself. */
+  const [mapPlotId, setMapPlotId] = useState<string | null>(null);
+  const openMap = (plotId: string | null = null) => {
+    setMapPlotId(plotId);
+    setMapOpen(true);
+  };
+  const mapPlot = mapPlotId ? fieldData.plots.find((plot) => plot.id === mapPlotId) ?? null : null;
   const weather = liveWeather.snapshot;
   // Parcel inputs: the user's own choice while it belongs to the current
   // wilaya, otherwise that wilaya's defaults (the calculator's old reset rule).
@@ -323,29 +330,22 @@ export default function DashboardView() {
             </section>
           </div>
 
-          {/* Field health: satellite index + leaf diagnosis */}
+          {/* The parcel: ONE card, then the decorative field cards. */}
           <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.field} />
-            <div className="grid gap-3 lg:grid-cols-2">
-              {/* The map reads the same irrigation result as the hero card, so the
-                  moisture layer always averages back to the daily L/ha figure.
-                  With a saved plot it is fed real per-cell values instead. */}
-              <FieldHeatmapCard
-                t={t}
+            <div className="flex flex-col gap-3">
+              {/* Draw → confirm → analyze starts here, and only here. */}
+              <MyPlotCard
                 lang={lang}
-                wilayaCode={wilayaCode}
-                crop={crop}
-                areaHa={areaHa}
-                irrigation={irrigation}
-                weather={weather}
-                observation={fieldData.observation}
-                observationReason={fieldData.activePlot ? fieldData.reason : null}
-                observationTechnical={fieldData.activePlot ? fieldData.technical : null}
-                plotName={fieldData.activePlot?.name ?? null}
-                onOpenMap={() => setMapOpen(true)}
+                plot={fieldData.activePlot}
+                analyzedOn={fieldData.activePlot ? fieldData.observation?.date ?? null : null}
+                loading={fieldData.loadingPlots && !fieldData.activePlot}
+                onOpen={() => openMap(fieldData.activePlot?.id ?? null)}
               />
-              <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
-              <ScanCard t={t} wilayaCode={wilayaCode} />
+              <div className="grid gap-3 lg:grid-cols-2">
+                <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
+                <ScanCard t={t} wilayaCode={wilayaCode} />
+              </div>
             </div>
           </section>
 
@@ -355,8 +355,8 @@ export default function DashboardView() {
         </div>
       </main>
 
-      {/* Field map: draw the parcel boundary that the heatmap's real NDVI is
-          computed from. Rendered last so it sits above every other sheet. */}
+      {/* Field map: draw the parcel boundary, or open straight on the confirm
+          screen of a saved one. Rendered last so it sits above every other sheet. */}
       {mapOpen && (
         <FieldMapSheet
           onClose={() => setMapOpen(false)}
@@ -370,6 +370,7 @@ export default function DashboardView() {
           copy={t.fieldMap}
           lang={lang}
           fallbackCenter={[wilaya.lat, wilaya.lon]}
+          initialPlot={mapPlot}
         />
       )}
 

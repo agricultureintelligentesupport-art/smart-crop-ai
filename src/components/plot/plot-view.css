@@ -1,81 +1,106 @@
-/* Scoped to the dedicated plot screen; no map/dashboard selectors. */
+/* The plot screen (confirm + analysis) — scoped to `.plot-view`, no map or
+   dashboard selectors. Mobile-first: base rules are the 360 px phone, and the
+   only enhancement is a two-column reading layout from 800 px up. */
 .plot-view {
   position: fixed; inset: 0; z-index: 80; height: 100dvh; display: flex; flex-direction: column;
   background: #f5f8f3; color: #103e30; overflow: hidden;
 }
-.plot-view button { cursor: pointer; font: inherit; font-weight: 750; }
-.plot-view button:disabled { cursor: not-allowed; }
+/* `:where()` keeps this reset at zero extra specificity, so every type scale
+   below wins over it — `font: inherit` as a bare descendant selector would
+   outrank the single-class rules and force 16px onto every button. */
+.plot-view :where(button) { cursor: pointer; font: inherit; font-weight: 750; }
+.plot-view :where(button:disabled) { cursor: not-allowed; }
 .plot-view :is(button, input, a):focus-visible { outline: 3px solid #0b8d68; outline-offset: 3px; }
 .plot-view__header {
-  flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: max(12px, env(safe-area-inset-top)) 20px 12px;
+  flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+  padding: max(12px, env(safe-area-inset-top)) 20px 12px;
   border-bottom: 1px solid #dce6da; background: #fafff9;
 }
 .plot-view__header h2 { font-size: 16px; font-weight: 850; }
 .plot-view__icon-button { min-width: 48px; min-height: 48px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; border-radius: 16px; background: #eaf1e7; color: #23573e; }
 .plot-view__icon-button:hover { background: #deebd9; }
 .plot-view__saved { display: inline-flex; align-items: center; gap: 6px; margin-inline-start: auto; font-size: 11px; font-weight: 750; color: #346349; }
+.plot-view__steps {
+  flex-shrink: 0; padding: 10px 20px 12px; border-bottom: 1px solid #e3ece0; background: #fafff9;
+}
+
+/* ---- the shape: preview on the confirm screen, hero on the analysis one ---- */
 .plot-view__scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .plot-view__layout { max-width: 1280px; margin: auto; }
-.plot-view__figure { margin: 0; padding: 20px 20px 0; background: radial-gradient(ellipse at 50% 52%, #e0ead9 0, #edf3e7 43%, #f5f8f3 73%); }
+.plot-view__figure { margin: 0; padding: 18px 18px 0; background: radial-gradient(ellipse at 50% 52%, #e0ead9 0, #edf3e7 43%, #f5f8f3 73%); }
 .plot-view__figure-heading { display: flex; justify-content: space-between; align-items: center; color: #45654f; font-size: 12px; font-weight: 750; }
 .plot-view__north { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; font-size: 10px; }
 .plot-view__north svg { transform: rotate(-90deg); }
-.plot-view__art { height: clamp(250px, 45dvh, 530px); display: grid; place-items: center; padding: 24px 0 20px; }
-.plot-view__art svg { width: 76%; height: 100%; overflow: visible; filter: drop-shadow(0 16px 14px #183e3029); }
-.plot-view__figure figcaption { min-height: 46px; display: flex; flex-direction: column; gap: 4px; align-items: center; justify-content: center; text-align: center; font-size: 11px; font-weight: 600; color: #52705b; }
+/* `grid-template-rows: 100%` makes the row definite, so the frame's 100%
+   height resolves against the box instead of the SVG's own intrinsic size. */
+.plot-view__art { height: clamp(190px, 30dvh, 380px); display: grid; grid-template-rows: 100%; justify-items: center; padding: 18px 0 14px; }
+.plot-view__art-frame { width: 78%; height: 100%; }
+.plot-view__art svg { width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 16px 14px #183e3029); }
+.plot-view__figure figcaption { min-height: 40px; display: flex; flex-direction: column; gap: 3px; align-items: center; justify-content: center; text-align: center; font-size: 11px; font-weight: 600; color: #52705b; }
 .plot-view__figure figcaption > span { display: flex; gap: 6px; align-items: center; }
-.plot-view__figure small { font-size: 8px; color: #4b6855; }
-.plot-view__information { padding: 16px 20px 22px; }
-.plot-view__identity { padding-bottom: 17px; border-bottom: 1px solid #d7e3d3; }
+.plot-view__figure figcaption small { font-size: 8px; color: #4b6855; }
+
+/* Hero: the same SVG, taking whatever the reading sheet leaves it. */
+.plot-view__hero { flex: 1 1 auto; min-height: 118px; overflow: hidden; }
+.plot-view__figure--hero { height: 100%; display: flex; flex-direction: column; padding: 0; background: radial-gradient(ellipse at 50% 55%, #dfead8 0, #ecf3e6 45%, #f5f8f3 74%); }
+.plot-view__figure--hero .plot-view__figure-heading { padding: 9px 16px 0; font-size: 11px; }
+.plot-view__figure--hero .plot-view__art { flex: 1; min-height: 0; height: auto; padding: 6px 0 2px; }
+.plot-view__figure--hero .plot-view__art-frame { width: 86%; }
+.plot-view__figure--hero figcaption { min-height: 22px; font-size: 10px; }
+.plot-view__figure--hero figcaption small { font-size: 7.5px; }
+
+/* ---- confirm: identity, key numbers, technical disclosure ---- */
+.plot-view__information { padding: 16px 18px 24px; }
+.plot-view__identity { padding-bottom: 15px; border-bottom: 1px solid #d7e3d3; }
 .plot-view__eyebrow { display: block; font-size: 12px; font-weight: 650; color: #55705c; }
 .plot-view__name-row { display: flex; gap: 16px; align-items: center; justify-content: space-between; }
-.plot-view__name-row h3 { font-size: clamp(24px, 5.5vw, 32px); font-weight: 900; line-height: 1.5; overflow-wrap: anywhere; }
+.plot-view__name-row h3 { font-size: clamp(22px, 5.2vw, 30px); font-weight: 900; line-height: 1.5; overflow-wrap: anywhere; }
 .plot-view__name-row .plot-view__icon-button { background: transparent; }
 .plot-view__name-form { display: flex; gap: 5px; margin-top: 7px; }
 .plot-view__name-form input { min-width: 0; width: 100%; min-height: 48px; border: 1px solid #93b7a2; border-radius: 12px; background: #fff; padding: 8px 10px; font-size: 18px; font-weight: 750; }
-.plot-view__section-title { margin: 20px 0 12px; font-size: 14px; font-weight: 800; }
+.plot-view__section-title { margin: 18px 0 10px; font-size: 14px; font-weight: 800; }
 .plot-view__metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.plot-view__metrics > div { border: 1px solid #dfe8d9; border-radius: 18px; padding: 16px; background: #fcfefb; min-width: 0; }
+.plot-view__metrics > div { border: 1px solid #dfe8d9; border-radius: 18px; padding: 14px; background: #fcfefb; min-width: 0; }
 .plot-view__metrics dt { display: flex; align-items: center; gap: 7px; color: #536e5a; font-size: 12px; font-weight: 650; }
 .plot-view__metrics dt svg { flex-shrink: 0; }
-.plot-view__metrics dd { margin-top: 12px; display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
-.plot-view__metrics dd strong { font-size: 25px; line-height: 1.3; font-weight: 800; letter-spacing: -0.8px; }
+.plot-view__metrics dd { margin-top: 10px; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.plot-view__metrics dd strong { font-size: 23px; line-height: 1.3; font-weight: 800; letter-spacing: -0.8px; }
 .plot-view__metrics dd > span { font-size: 12px; font-weight: 650; }
 .plot-view__metrics > .plot-view__area { background: #123f31; border-color: #123f31; color: #fff; }
 .plot-view__area dt { color: #d0e5ca; }
-.plot-view__area dd strong { font-size: 35px; font-weight: 850; }
-.plot-view__area .plot-view__square-metres { font-size: 12px; color: #d0e5ca; margin-top: 5px; }
+.plot-view__area dd strong { font-size: 30px; font-weight: 850; }
+.plot-view__area .plot-view__square-metres { font-size: 12px; color: #d0e5ca; margin-top: 4px; }
 .plot-view__perimeter { display: flex; flex-direction: column; justify-content: space-between; }
-.plot-view__perimeter dd { margin-bottom: 16px; }
-.plot-view__metrics > .plot-view__coordinates { grid-column: 1 / -1; }
-.plot-view__coordinates dt > span { margin-inline-start: auto; font-size: 9px; letter-spacing: 1px; }
-.plot-view__coordinates dd { gap: 20px; }
-.plot-view__coordinates dd > span { display: flex; flex-direction: column; gap: 5px; flex: 1; color: #56715e; font-size: 11px; }
-.plot-view__coordinates bdi { color: #173e2c; font-size: 16px; font-weight: 750; }
-.plot-view__metrics .plot-view__date { font-size: 14px; font-weight: 800; line-height: 1.8; }
-.plot-view__note { margin-top: 14px; color: #586b5b; font-size: 11px; line-height: 1.8; }
-.plot-view__footer { flex-shrink: 0; padding: 12px 20px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #dbe5d7; background: #fafff9; }
-.plot-view__actions { max-width: 850px; margin: auto; display: flex; flex-direction: column; gap: 8px; }
-.plot-view__analyze { display: flex; gap: 12px; align-items: center; justify-content: center; min-height: 56px; border-radius: 16px; background: #e1e9dd; color: #52684f; }
+.plot-view__perimeter dd { margin-bottom: 12px; }
+
+/* Technical details: closed by default, one tap away, never above the fold. */
+.plot-view__disclosure { margin-top: 14px; border: 1px solid #dfe8d9; border-radius: 18px; background: #fcfefb; overflow: hidden; }
+.plot-view__disclosure-button {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 12px 14px;
+  font-size: 13px; font-weight: 800; color: #2b5a42; text-align: start;
+}
+.plot-view__disclosure-button svg { flex-shrink: 0; color: #0f7a5c; transition: transform 0.2s ease; }
+.plot-view__disclosure-button:hover { background: #f2f8ef; }
+.plot-view__disclosure-body { padding: 0 14px 14px; border-top: 1px dashed #d7e3d3; }
+.plot-view__tech { display: grid; gap: 10px; margin: 12px 0 0; }
+.plot-view__tech > div { min-width: 0; }
+.plot-view__tech dt { display: flex; align-items: center; gap: 7px; color: #536e5a; font-size: 11.5px; font-weight: 650; }
+.plot-view__tech dt svg { flex-shrink: 0; color: #0f7a5c; }
+.plot-view__tech dt > span { margin-inline-start: auto; font-size: 9px; letter-spacing: 1px; }
+.plot-view__tech dd { margin: 6px 0 0; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.plot-view__tech dd strong { font-size: 17px; font-weight: 800; color: #173e2c; }
+.plot-view__tech dd > span { font-size: 11.5px; font-weight: 650; color: #56715e; }
+.plot-view__tech .plot-view__coordinates dd { gap: 18px; }
+.plot-view__tech .plot-view__coordinates dd > span { display: flex; flex-direction: column; gap: 4px; color: #56715e; font-size: 10.5px; }
+.plot-view__tech .plot-view__coordinates bdi { color: #173e2c; font-size: 15px; font-weight: 750; direction: ltr; }
+.plot-view__tech .plot-view__date { font-size: 13px; font-weight: 800; line-height: 1.8; }
+
+/* ---- sticky bottom bar: one primary action + a single overflow ---- */
+.plot-view__footer { flex-shrink: 0; padding: 12px 18px max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #dbe5d7; background: #fafff9; }
+.plot-view__actions { max-width: 850px; margin: auto; display: flex; align-items: stretch; gap: 10px; }
+.plot-view__analyze { flex: 1; display: flex; gap: 12px; align-items: center; justify-content: center; min-height: 56px; border-radius: 16px; }
 .plot-view__analyze > span { display: flex; flex-direction: column; font-size: 14px; line-height: 1.7; }
 .plot-view__analyze small { font-size: 10px; font-weight: 600; }
-.plot-view__secondary-actions { display: grid; grid-template-columns: 1.2fr 1fr; gap: 10px; }
-.plot-view__redraw, .plot-view__delete { min-height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 12px; font-size: 12px !important; }
-.plot-view__redraw { background: #fafff9; color: #21543b; border: 1px solid #cfddc8; }
-.plot-view__redraw:hover { background: #ebf3e7; }
-.plot-view__delete { color: #a33026; background: #fcf0ea; }
-.plot-view__delete:hover { background: #f8e4db; }
-.plot-view__confirm-backdrop { position: absolute; inset: 0; background: #143b3066; display: grid; place-items: center; padding: 24px; }
-.plot-view__confirm { background: #fafff9; border-radius: 24px; max-width: 400px; padding: 24px; box-shadow: 0 24px 64px #103e3033; }
-.plot-view__confirm > svg { color: #a33026; margin-bottom: 16px; }
-.plot-view__confirm h3 { font-size: 20px; font-weight: 850; }
-.plot-view__confirm p { font-size: 14px; line-height: 1.8; margin: 12px 0 20px; color: #536553; }
-.plot-view__confirm button { width: 100%; margin-top: 8px; }
-.plot-view__error { color: #a33026 !important; font-size: 13px; margin: 10px 0; }
-.plot-view__spinner { animation: plot-view-spin 1s linear infinite; }
-@keyframes plot-view-spin { to { transform: rotate(360deg); } }
-
-/* ---- Analysis: button, raster layer, shimmer ---- */
 .plot-view__analyze--on {
   background: linear-gradient(140deg, #10906b, #0a5c44);
   color: #fff;
@@ -83,6 +108,42 @@
 }
 .plot-view__analyze--on:hover { background: linear-gradient(140deg, #129d75, #0c684d); }
 .plot-view__analyze--on small { color: #cdeadd; }
+.plot-view__overflow { position: relative; flex-shrink: 0; }
+.plot-view__more {
+  display: flex; align-items: center; justify-content: center; width: 56px; min-height: 56px;
+  border-radius: 16px; background: #eaf1e7; color: #23573e;
+}
+.plot-view__more:hover { background: #deebd9; }
+.plot-view__more[aria-expanded="true"] { background: #0f7a5c; color: #fff; }
+.plot-view__menu {
+  position: absolute; bottom: calc(100% + 8px); inset-inline-end: 0; z-index: 5; min-width: 190px;
+  display: flex; flex-direction: column; padding: 6px; gap: 2px; border-radius: 16px;
+  background: #fafff9; border: 1px solid #d7e3d3; box-shadow: 0 22px 44px -22px #103e3066;
+}
+.plot-view__menu button {
+  display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 10px 12px;
+  border-radius: 12px; font-size: 13px; font-weight: 750; color: #21543b; text-align: start;
+}
+.plot-view__menu button:hover { background: #ebf3e7; }
+.plot-view__menu .plot-view__menu-delete { color: #a33026; }
+.plot-view__menu .plot-view__menu-delete:hover { background: #fcf0ea; }
+
+.plot-view__confirm-backdrop { position: absolute; inset: 0; background: #143b3066; display: grid; place-items: center; padding: 24px; }
+.plot-view__confirm { background: #fafff9; border-radius: 24px; max-width: 400px; padding: 24px; box-shadow: 0 24px 64px #103e3033; }
+.plot-view__confirm > svg { color: #a33026; margin-bottom: 16px; }
+.plot-view__confirm h3 { font-size: 20px; font-weight: 850; }
+.plot-view__confirm p { font-size: 14px; line-height: 1.8; margin: 12px 0 20px; color: #536553; }
+.plot-view__confirm button { width: 100%; margin-top: 8px; }
+.plot-view__redraw, .plot-view__delete { min-height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 12px; font-size: 12px !important; }
+.plot-view__redraw { background: #fafff9; color: #21543b; border: 1px solid #cfddc8; }
+.plot-view__redraw:hover { background: #ebf3e7; }
+.plot-view__delete { color: #a33026; background: #fcf0ea; }
+.plot-view__delete:hover { background: #f8e4db; }
+.plot-view__error { color: #a33026 !important; font-size: 13px; margin: 10px 0; }
+.plot-view__spinner { animation: plot-view-spin 1s linear infinite; }
+@keyframes plot-view-spin { to { transform: rotate(360deg); } }
+
+/* ---- NDVI layer, shimmer, probe ---- */
 .plot-view__art-svg--probe { cursor: crosshair; }
 .plot-view__ndvi { pointer-events: none; }
 /* The soft shimmer lives INSIDE the drawn boundary (clipPath), never over a
@@ -98,58 +159,11 @@
   50% { opacity: 0.16; }
 }
 
-/* ---- Analysis panel ---- */
-.plot-analysis { margin: 16px 0 4px; padding: 15px; border: 1px solid #d6e3d0; border-radius: 20px; background: #fcfefb; display: flex; flex-direction: column; gap: 12px; }
-.plot-analysis__heading { display: flex; align-items: center; gap: 8px; color: #1d4a37; }
-.plot-analysis__heading h3 { font-size: 14px; font-weight: 850; }
-.plot-analysis__heading > svg { color: #0f7a5c; }
-.plot-analysis__stale { margin-inline-start: auto; font-size: 9.5px; font-weight: 800; color: #8a6a1f; background: #fbf5e3; border: 1px solid #ecdcab; border-radius: 999px; padding: 3px 9px; }
-.plot-analysis__stale-note { font-size: 11px; font-weight: 650; line-height: 1.8; color: #8a6a1f; background: #fbf5e3; border: 1px solid #ecdcab; padding: 8px 11px; border-radius: 12px; }
-.plot-analysis__chips { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; }
-.plot-analysis__chips::-webkit-scrollbar { display: none; }
-.plot-analysis__chip { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px; min-height: 46px; padding: 7px 13px; border-radius: 999px; border: 1px solid #cfe0c9; background: #f2f8ef; color: #1e5138; text-align: start; flex-shrink: 0; }
-.plot-analysis__chip small { font-size: 9px; font-weight: 700; color: #5c7a64; }
-.plot-analysis__chip:hover:not(:disabled) { background: #e8f2e4; }
-.plot-analysis__chip.is-active { background: #0f7a5c; border-color: #0f7a5c; color: #fff; }
-.plot-analysis__chip.is-active small { color: #cfe9dd; }
-.plot-analysis__chip:disabled { opacity: 0.55; cursor: not-allowed; }
-.plot-analysis__status { display: flex; align-items: center; gap: 9px; font-size: 12.5px; font-weight: 750; color: #1d4a37; }
-.plot-analysis__status small { display: block; font-size: 10px; font-weight: 600; color: #62806c; }
-.plot-analysis__error { padding: 13px; border-radius: 16px; background: #fdf6ef; border: 1px solid #ecd9c0; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; color: #6b4a2b; }
-.plot-analysis__error--soft { background: #f7faf5; border-color: #d8e4d1; color: #4c6653; }
-.plot-analysis__error p { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.8; }
-.plot-analysis__error p > svg { flex-shrink: 0; margin-top: 2px; color: #a3763c; }
-.plot-analysis__error strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
-.plot-analysis__technical { font-size: 9.5px; line-height: 1.6; color: #8a7358; background: #f8efe3; border-radius: 9px; padding: 6px 9px; max-width: 100%; overflow-wrap: anywhere; }
-.plot-analysis__retry { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 8px 18px; border-radius: 999px; background: #0f7a5c; color: #fff; font-size: 12px !important; }
-.plot-analysis__retry:hover { background: #0d6b52; }
-.plot-analysis__legend { display: flex; flex-direction: column; gap: 6px; }
-.plot-analysis__legend-title { font-size: 10.5px; font-weight: 800; color: #3c5f4a; }
-.plot-analysis__legend-bar { height: 13px; border-radius: 999px; border: 1px solid rgba(18, 63, 49, 0.2); }
-.plot-analysis__legend-labels { display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; color: #28503b; font-variant-numeric: tabular-nums; }
-.plot-analysis__meta { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; font-weight: 650; color: #4d6b55; }
-.plot-analysis__meta li { display: inline-flex; gap: 5px; align-items: center; }
-.plot-analysis__meta li > svg { color: #0f7a5c; }
-.plot-analysis__stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
-.plot-analysis__stats > div { border-radius: 14px; background: #f2f8ef; border: 1px solid #dbe8d5; padding: 10px 12px; min-width: 0; }
-.plot-analysis__stats dt { font-size: 10px; font-weight: 700; color: #55705c; }
-.plot-analysis__stats dd { margin: 4px 0 0; font-size: 19px; font-weight: 850; color: #163c2b; font-variant-numeric: tabular-nums; letter-spacing: -0.4px; }
-.plot-analysis__note { font-size: 10px; font-weight: 650; color: #5b7260; line-height: 1.7; margin: 0; }
-.plot-analysis__hint { font-size: 10px; color: #7d9184; line-height: 1.7; margin: 0; }
-.plot-analysis__weather { border-top: 1px dashed #d5e2cf; padding-top: 11px; display: flex; flex-direction: column; gap: 8px; }
-.plot-analysis__weather-title { font-size: 10.5px; font-weight: 800; color: #3c5f4a; }
-.plot-analysis__weather ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
-.plot-analysis__weather li { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 650; color: #54715c; background: #f6faf4; border: 1px solid #e2ecdd; border-radius: 10px; padding: 7px 9px; }
-.plot-analysis__weather li > svg { color: #2f7357; }
-.plot-analysis__weather li strong { margin-inline-start: auto; font-size: 11.5px; color: #1c4433; font-variant-numeric: tabular-nums; }
-.plot-analysis__weather small { font-size: 9px; color: #74887a; }
-
-/* ---- Tap probe sheet ---- */
 .plot-view__probe { display: flex; flex-direction: column; gap: 13px; padding: 2px 2px 8px; }
 .plot-view__probe-value { display: flex; align-items: center; gap: 14px; }
 .plot-view__probe-swatch { width: 48px; height: 48px; border-radius: 15px; border: 3px solid #fff; box-shadow: 0 8px 18px -8px rgba(12, 60, 42, 0.55); flex-shrink: 0; }
 .plot-view__probe-label { display: block; font-size: 11px; font-weight: 700; color: #55705c; }
-.plot-view__probe-value strong { font-size: 30px; font-weight: 900; color: #14392a; letter-spacing: -0.5px; }
+.plot-view__probe-value strong { font-size: 30px; font-weight: 900; color: #14392a; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
 .plot-view__probe-value small { font-size: 10px; font-weight: 700; color: #6d8375; margin-inline-start: 7px; }
 .plot-view__probe-coords { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
 .plot-view__probe-coords > div { background: #f2f8ef; border: 1px solid #dbe8d5; border-radius: 12px; padding: 9px 12px; }
@@ -157,29 +171,152 @@
 .plot-view__probe-coords dd { margin: 3px 0 0; font-size: 14px; font-weight: 750; color: #173e2c; font-variant-numeric: tabular-nums; }
 .plot-view__probe-note { font-size: 11.5px; font-weight: 650; line-height: 1.8; color: #435f4e; background: #f0f7ec; border-radius: 12px; padding: 10px 12px; margin: 0; }
 .plot-view__probe-pixel { font-size: 10px; color: #74887a; margin: 0; }
+
+/* ==================================================================== */
+/*  Analysis screen: hero map on top, draggable reading sheet below      */
+/* ==================================================================== */
+.plot-view__analysis { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.analysis-sheet {
+  position: relative; flex-shrink: 0; min-height: 0;
+  /* The peek/expanded heights, capped so the hero map always keeps a slot. */
+  height: min(var(--sheet-height, 42dvh), calc(100dvh - 240px));
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #fafff9; border-top: 1px solid #d7e3d3; border-radius: 22px 22px 0 0;
+  box-shadow: 0 -18px 44px -30px #103e3066;
+  transition: height 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.analysis-sheet__grip {
+  flex-shrink: 0; display: flex; align-items: center; gap: 10px; touch-action: none; cursor: grab;
+  padding: 8px 16px 4px;
+}
+.analysis-sheet__grip:active { cursor: grabbing; }
+.analysis-sheet__grabber { width: 40px; height: 4px; border-radius: 999px; background: #d7e3d3; flex-shrink: 0; }
+.analysis-sheet__grip-button {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 40px; margin-inline-start: auto;
+  padding: 0 12px; border-radius: 999px; background: #f2f8ef; color: #1d4a37; font-size: 12.5px; font-weight: 850;
+}
+.analysis-sheet__grip-button:hover { background: #e8f2e4; }
+.analysis-sheet__grip-button svg:last-child { transition: transform 0.24s ease; }
+.analysis-sheet__stale { flex-shrink: 0; font-size: 9.5px; font-weight: 800; color: #8a6a1f; background: #fbf5e3; border: 1px solid #ecdcab; border-radius: 999px; padding: 3px 9px; }
+
+/* Tabs: four equal targets, always visible, never scrolled out of reach.
+   `minmax(0, 1fr)` (not `1fr`) so a long Arabic label truncates instead of
+   pushing the last tab off a 360 px screen. */
+.analysis-sheet__tabs { flex-shrink: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 4px 12px 8px; }
+.analysis-sheet__tab {
+  display: flex; min-width: 0; min-height: 46px; align-items: center; justify-content: center; gap: 5px; padding: 4px 2px;
+  border-radius: 12px; font-size: 11.5px; font-weight: 800; line-height: 1.2; text-align: center;
+  color: #4d6b55; background: transparent;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.analysis-sheet__tab svg { flex-shrink: 0; color: #0f7a5c; }
+.analysis-sheet__tab:hover { background: #f2f8ef; }
+.analysis-sheet__tab.is-active { background: #0f7a5c; color: #fff; }
+.analysis-sheet__tab.is-active svg { color: #d8f2e6; }
+/* Below 400 px the four Arabic labels need the whole column: the icon goes,
+   the word never truncates. */
+@media (max-width: 399px) {
+  .analysis-sheet__tab svg { display: none; }
+}
+
+.analysis-sheet__body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 16px 20px; }
+.analysis-stack { display: flex; flex-direction: column; gap: 10px; }
+
+/* One failure card, reachable from every tab. */
+.analysis-error { flex-shrink: 0; margin: 0 16px 8px; padding: 12px; border-radius: 16px; background: #fdf6ef; border: 1px solid #ecd9c0; display: flex; flex-direction: column; gap: 9px; align-items: flex-start; color: #6b4a2b; }
+.analysis-error p { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.75; margin: 0; }
+.analysis-error p > svg { flex-shrink: 0; margin-top: 2px; color: #a3763c; }
+.analysis-error strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
+.analysis-error__technical { font-size: 9.5px; line-height: 1.6; color: #8a7358; background: #f8efe3; border-radius: 9px; padding: 6px 9px; max-width: 100%; overflow-wrap: anywhere; }
+.analysis-error__retry { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 20px; border-radius: 999px; background: #0f7a5c; color: #fff; font-size: 12.5px; }
+
+.analysis-status { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 12.5px; font-weight: 750; color: #1d4a37; }
+.analysis-status small { display: block; font-size: 10.5px; font-weight: 600; color: #62806c; }
+.analysis-status__dot { width: 8px; height: 8px; border-radius: 999px; background: #0f7a5c; flex-shrink: 0; animation: analysis-pulse 1.6s ease-in-out infinite; }
+@keyframes analysis-pulse { 0%, 100% { opacity: 0.25; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
+
+.analysis-subtitle { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 11px; font-weight: 800; color: #3c5f4a; }
+.analysis-subtitle svg { color: #0f7a5c; flex-shrink: 0; }
+
+.analysis-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.analysis-stats > div { border-radius: 14px; background: #f2f8ef; border: 1px solid #dbe8d5; padding: 10px 12px; min-width: 0; }
+.analysis-stats dt { font-size: 10.5px; font-weight: 700; color: #55705c; }
+.analysis-stats dd { margin: 4px 0 0; font-size: 19px; font-weight: 850; color: #163c2b; font-variant-numeric: tabular-nums; letter-spacing: -0.4px; }
+.analysis-stats--lead { background: #123f31 !important; border-color: #123f31 !important; }
+.analysis-stats--lead dt { color: #cfe4c8; }
+.analysis-stats--lead dd { color: #fff; font-size: 26px; }
+.analysis-stats--lead small { display: block; font-size: 9.5px; font-weight: 700; color: #9fc7b4; }
+.analysis-stats__skeleton { height: 22px; border-radius: 8px; background: linear-gradient(100deg, #e7f0e1 30%, #f3f8f0 50%, #e7f0e1 70%); background-size: 300% 100%; animation: analysis-shimmer 1.4s ease-in-out infinite; }
+@keyframes analysis-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+.analysis-chips { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; }
+.analysis-chips::-webkit-scrollbar { display: none; }
+.analysis-chip { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px; min-height: 46px; padding: 7px 13px; border-radius: 999px; border: 1px solid #cfe0c9; background: #f2f8ef; color: #1e5138; text-align: start; font-size: 12.5px; font-weight: 750; flex-shrink: 0; }
+.analysis-chip small { font-size: 9px; font-weight: 700; color: #5c7a64; }
+.analysis-chip:hover:not(:disabled) { background: #e8f2e4; }
+.analysis-chip.is-active { background: #0f7a5c; border-color: #0f7a5c; color: #fff; }
+.analysis-chip.is-active small { color: #cfe9dd; }
+.analysis-chip:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.analysis-legend { display: flex; flex-direction: column; gap: 6px; }
+.analysis-legend__title { font-size: 10.5px; font-weight: 800; color: #3c5f4a; }
+.analysis-legend__bar { height: 13px; border-radius: 999px; border: 1px solid rgba(18, 63, 49, 0.2); }
+.analysis-legend__labels { display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; color: #28503b; font-variant-numeric: tabular-nums; }
+
+.analysis-weather { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.analysis-weather li { display: flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 650; color: #54715c; background: #f6faf4; border: 1px solid #e2ecdd; border-radius: 12px; padding: 10px; }
+.analysis-weather li > svg { color: #2f7357; flex-shrink: 0; }
+.analysis-weather li strong { margin-inline-start: auto; font-size: 13px; color: #1c4433; font-variant-numeric: tabular-nums; }
+
+.analysis-facts { margin: 0; display: flex; flex-direction: column; }
+.analysis-facts > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 2px; border-bottom: 1px solid #e7efe2; }
+.analysis-facts > div:last-child { border-bottom: none; }
+.analysis-facts dt { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; color: #55705c; }
+.analysis-facts dt svg { color: #0f7a5c; flex-shrink: 0; }
+.analysis-facts dd { margin: 0; font-size: 12px; font-weight: 750; color: #173e2c; text-align: end; }
+
+.analysis-note { margin: 0; font-size: 10.5px; font-weight: 650; color: #5b7260; line-height: 1.75; }
+.analysis-hint { margin: 0; font-size: 10.5px; font-weight: 600; color: #7d9184; line-height: 1.75; }
+.analysis-stale-note { margin: 0; font-size: 11px; font-weight: 650; line-height: 1.8; color: #8a6a1f; background: #fbf5e3; border: 1px solid #ecdcab; padding: 8px 11px; border-radius: 12px; }
+.analysis-legacy { padding: 12px; border-radius: 16px; background: #f7faf5; border: 1px solid #d8e4d1; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; color: #4c6653; }
+.analysis-legacy p { margin: 0; font-size: 12px; line-height: 1.75; }
+.analysis-legacy strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
+.analysis-legacy__retry { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 20px; border-radius: 999px; background: #0f7a5c; color: #fff; font-size: 12.5px; }
+
 @media (max-width: 359px) {
   .plot-view__header { padding-inline: 12px; gap: 8px; }
   .plot-view__header h2 { font-size: 14px; }
   .plot-view__saved { font-size: 9px; gap: 3px; }
+  .plot-view__steps { padding-inline: 12px; }
   .plot-view__information, .plot-view__figure { padding-inline: 14px; }
+  .plot-view__footer { padding-inline: 14px; }
   .plot-view__metrics > div { padding: 12px; }
   .plot-view__metrics dt { font-size: 11px; }
-  .plot-view__coordinates bdi { font-size: 14px; }
-  .plot-view__footer { padding-inline: 14px; }
+  .plot-view__art-frame { width: 92%; }
+  .analysis-sheet__tab { font-size: 10.5px; min-height: 44px; }
+  .analysis-sheet__body, .analysis-error { margin-inline: 0; padding-inline: 12px; }
 }
 @media (min-width: 800px) {
   .plot-view__header { padding-inline: 32px; }
+  .plot-view__steps { padding-inline: 32px; }
   .plot-view__layout { display: grid; grid-template-columns: 1.2fr 1fr; align-items: start; padding: 28px 24px; gap: 32px; }
   .plot-view__figure { position: sticky; top: 0; border: 1px solid #dfe8d9; border-radius: 28px; padding-bottom: 20px; }
-  .plot-view__art { height: clamp(360px, 60dvh, 680px); }
-  .plot-view__art svg { width: 90%; }
+  .plot-view__art { height: clamp(320px, 56dvh, 640px); }
+  .plot-view__art-frame { width: 92%; }
   .plot-view__information { padding: 0; }
-  .plot-view__actions { flex-direction: row; gap: 16px; }
-  .plot-view__analyze, .plot-view__secondary-actions { flex: 1; }
+  .plot-view__actions { gap: 16px; }
+  /* Analysis: the map keeps the left column, the sheet the right one. */
+  .plot-view__analysis { display: grid; grid-template-columns: 1.1fr 1fr; align-items: stretch; }
+  .plot-view__hero { height: auto; border-inline-end: 1px solid #e3ece0; }
+  .analysis-sheet { height: auto !important; border-radius: 0; border-top: none; box-shadow: none; }
+  .analysis-sheet__grip { display: none; }
+  .plot-view__footer { padding-inline: 32px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .plot-view *, .plot-view { animation: none !important; transition: none !important; }
+  .analysis-sheet { transition: none; }
 }
 @media (prefers-contrast: more) {
-  .plot-view__metrics > div, .plot-view__redraw { border-color: currentColor; }
+  .plot-view__metrics > div, .plot-view__redraw, .plot-view__disclosure { border-color: currentColor; }
 }

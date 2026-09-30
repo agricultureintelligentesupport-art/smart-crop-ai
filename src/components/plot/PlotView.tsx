@@ -1,9 +1,42 @@
 "use client";
 
+/**
+ * The plot screen, in its two states — and it is the SAME screen, not two.
+ *
+ *   step 2 · confirm — the shape over its satellite, the editable name, the
+ *           key numbers, a collapsible technical sheet, one primary action.
+ *   step 3 · analyze — the same shape as a hero map on top, and the reading
+ *           itself in a draggable sheet of four tabs.
+ *
+ * Everything the farmer can do is unchanged: the boundary is the stored one,
+ * the rename writes through the same `renamePlot` call, the delete asks before
+ * it deletes, the analysis still runs one `useFieldData` request at most, and a
+ * tap on the map still answers the nearest really-measured pixel. What changed
+ * is the order things appear in, and the number of primary buttons on screen.
+ */
+
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowLeft, ArrowRight, CalendarDays, Check, CheckCheck, CornerDownLeft, Expand, Loader2, MapPin, Pencil, Ruler, ScanLine, Trash2, Undo2, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  CalendarDays,
+  Check,
+  CheckCheck,
+  ChevronDown,
+  CornerDownLeft,
+  Expand,
+  Loader2,
+  MapPin,
+  MoreHorizontal,
+  Pencil,
+  Ruler,
+  ScanLine,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react";
 import type { Plot } from "@/lib/field-data/types";
 import { useFieldData } from "@/lib/field-data/useFieldData";
 import { renamePlot } from "@/lib/field-data/plots";
@@ -20,21 +53,28 @@ import {
 } from "@/lib/plot/ndvi-layers";
 import { composePlotTexture, type PlotTexture } from "@/lib/plot/imagery";
 import Sheet from "@/components/app/Sheet";
+import { formatDegrees, formatNumber } from "./format";
+import PlotShape from "./PlotShape";
 import PlotAnalysisPanel from "./PlotAnalysisPanel";
+import StepHeader from "./StepHeader";
 import type { Lang } from "@/lib/wilayas";
 import "./plot-view.css";
 
+/** Esri World Imagery attribution — required wherever its pixels are shown. */
+const IMAGERY_ATTRIBUTION = "Esri · Maxar · Earthstar Geographics · GIS User Community";
+
 const COPY = {
   ar: {
-    title: "تفاصيل القطعة", back: "العودة إلى خريطة الرسم", saved: "قطعة محفوظة", name: "اسم القطعة",
+    title: "تفاصيل القطعة", analysisTitle: "تحليل القطعة", back: "العودة إلى خريطة الرسم", backToConfirm: "العودة إلى تأكيد القطعة", saved: "قطعة محفوظة", name: "اسم القطعة",
     edit: "تعديل اسم القطعة", save: "حفظ الاسم", cancel: "إلغاء", renameError: "تعذّر حفظ الاسم. حاول مرة أخرى.",
     outline: "حدود قطعتك", shape: "الشكل الحقيقي لقطعتك، باتجاه الشمال", satellite: "صورة فضائية داخل حدود القطعة",
     loading: "جارٍ تحميل الصورة الفضائية…", fallback: "عرض الحدود · الصورة الفضائية غير متاحة", north: "شمال",
     details: "الأرض بالأرقام", area: "المساحة الإجمالية", ha: "هكتار", sqm: "م²", perimeter: "محيط القطعة", metres: "متر",
     center: "إحداثيات المركز", lat: "خط العرض", lon: "خط الطول", vertices: "نقاط الحدود", points: "نقاط", date: "تاريخ الرسم",
     approximate: "قياسات تقريبية محسوبة من الحدود المرسومة، وليست مسحًا عقاريًا.",
+    techDetails: "تفاصيل تقنية",
     analyze: "تحليل القطعة", analyzing: "جارٍ التحليل…", analyzeHint: "NDVI من Sentinel-2 بدقة 10 م",
-    redraw: "إعادة الرسم", delete: "حذف القطعة",
+    redraw: "إعادة الرسم", delete: "حذف القطعة", more: "خيارات أخرى",
     confirm: "هل تريد حذف هذه القطعة؟", deleteHint: "ستُحذف الحدود والاسم المحفوظان. لا يمكن التراجع عن الحذف.",
     deleteError: "تعذّر حذف القطعة. حاول مرة أخرى.",
     probeTitle: "قراءة النقطة", probeSubtitle: "أقرب بكسل مُقاس من Sentinel-2",
@@ -42,15 +82,16 @@ const COPY = {
     probeHere: "قراءة البكسل المضغوط مباشرة.", probePixel: "بكسل Sentinel-2 بدقة {res} م",
   },
   fr: {
-    title: "Détails de la parcelle", back: "Retour à la carte de tracé", saved: "Parcelle enregistrée", name: "Nom de la parcelle",
+    title: "Détails de la parcelle", analysisTitle: "Analyse de la parcelle", back: "Retour à la carte de tracé", backToConfirm: "Retour à la confirmation", saved: "Parcelle enregistrée", name: "Nom de la parcelle",
     edit: "Modifier le nom", save: "Enregistrer le nom", cancel: "Annuler", renameError: "Impossible de renommer. Réessayez.",
     outline: "Votre parcelle", shape: "La forme réelle de votre parcelle, orientée au nord", satellite: "Image satellite dans les limites",
     loading: "Chargement de l’image satellite…", fallback: "Limites seules · image satellite indisponible", north: "Nord",
     details: "Votre terrain en chiffres", area: "Superficie totale", ha: "hectares", sqm: "m²", perimeter: "Périmètre", metres: "mètres",
     center: "Coordonnées du centre", lat: "Latitude", lon: "Longitude", vertices: "Sommets", points: "points", date: "Date du tracé",
     approximate: "Mesures approximatives calculées à partir du tracé, et non un relevé cadastral.",
+    techDetails: "Détails techniques",
     analyze: "Analyser la parcelle", analyzing: "Analyse en cours…", analyzeHint: "NDVI Sentinel-2 à 10 m",
-    redraw: "Redessiner", delete: "Supprimer la parcelle",
+    redraw: "Redessiner", delete: "Supprimer la parcelle", more: "Autres actions",
     confirm: "Supprimer cette parcelle ?", deleteHint: "Le nom et les limites enregistrés seront supprimés. Cette action est irréversible.",
     deleteError: "Impossible de supprimer. Réessayez.",
     probeTitle: "Lecture du point", probeSubtitle: "Pixel Sentinel-2 mesuré le plus proche",
@@ -73,7 +114,9 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
   const backRef = useRef<HTMLButtonElement>(null);
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
-  const titleId = useId(), clipId = useId(), gradientId = useId(), shimmerId = useId();
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(plot.name);
   const [renaming, setRenaming] = useState(false);
@@ -81,6 +124,8 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const deleteLock = useRef(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [techOpen, setTechOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const geometry = useMemo(() => plotGeometry(plot.ring), [plot.ring]);
   const [textureState, setTextureState] = useState<{ geometry: typeof geometry; texture: PlotTexture | null } | null>(null);
@@ -146,6 +191,13 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     }
   }
 
+  /** One step back in the flow: the reading returns to the confirm screen,
+      the confirm screen returns to the map. */
+  function goBack() {
+    if (showAnalysis) setShowAnalysis(false);
+    else onBack();
+  }
+
   function handleFigureTap(event: React.MouseEvent<SVGSVGElement>) {
     if (!raster || !rasterMask || !showAnalysis) return;
     const svg = event.currentTarget;
@@ -164,9 +216,6 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
 
   const center = centroidOf(plot.ring) ?? plot.centroid;
   const area = ringAreaHa(plot.ring);
-  const number = (value: number, decimals = 0) => new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR", {
-    minimumFractionDigits: decimals, maximumFractionDigits: decimals,
-  }).format(value);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -193,6 +242,49 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     };
   }, []);
 
+  /* The overflow menu closes on Escape and on any outside tap — it must never
+     stay open over the sticky bar after the farmer moves on. */
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (
+        menuRef.current && event.target instanceof Node &&
+        !menuRef.current.contains(event.target) && event.target !== moreRef.current
+      ) {
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [moreOpen]);
+
+  const openMore = (open: boolean) => {
+    setMoreOpen(open);
+    if (open) {
+      requestAnimationFrame(() => {
+        menuRef.current?.querySelector<HTMLElement>("button")?.focus();
+      });
+    } else {
+      moreRef.current?.focus({ preventScroll: true });
+    }
+  };
+
+  /** Arrow keys walk the two secondary actions; Escape leaves the menu. */
+  function onMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (items.length === 0) return;
+      const next = event.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+      items[next]?.focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      openMore(false);
+    }
+  }
+
   async function saveName() {
     if (renameLock.current) return;
     const value = name.trim();
@@ -215,11 +307,25 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     finally { deleteLock.current = false; setDeleting(false); }
   }
 
+  const shapeCopy = {
+    outline: t.outline,
+    shape: t.shape,
+    north: t.north,
+    loading: t.loading,
+    analyzing: t.analyzing,
+    satellite: t.satellite,
+    fallback: t.fallback,
+    attribution: IMAGERY_ATTRIBUTION,
+  };
+
   return createPortal(
     <motion.section
       ref={rootRef}
       role="dialog" aria-modal="true" aria-labelledby={titleId}
-      dir={rtl ? "rtl" : "ltr"} className="plot-view" data-testid="plot-view"
+      dir={rtl ? "rtl" : "ltr"}
+      className={`plot-view${showAnalysis ? " plot-view--analysis" : ""} ${rtl ? "font-arabic" : "font-latin"}`}
+      data-testid="plot-view"
+      data-step={showAnalysis ? 3 : 2}
       initial={reduceMotion ? false : { opacity: 0, scale: 0.975 }}
       animate={{ opacity: 1, scale: 1 }} exit={reduceMotion ? { opacity: 1 } : { opacity: 0, scale: 0.985 }}
       transition={{ duration: reduceMotion ? 0 : 0.26, ease: [0.2, 0.8, 0.2, 1] }}
@@ -227,9 +333,10 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
         if (event.key === "Escape") {
           event.stopPropagation();
           if (renaming || deleting) return;
+          if (moreOpen) { openMore(false); return; }
           if (confirmDelete) setConfirmDelete(false);
           else if (editing) { setName(plot.name); setEditing(false); }
-          else onBack();
+          else goBack();
         }
         if (event.key === "Tab") {
           const scope = confirmDelete ? rootRef.current?.querySelector("[data-delete-confirm]") : rootRef.current;
@@ -241,118 +348,189 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
       }}
     >
       <header className="plot-view__header" inert={confirmDelete}>
-        <button ref={backRef} className="plot-view__icon-button" aria-label={t.back} onClick={onBack} disabled={renaming || deleting}>
+        <button ref={backRef} className="plot-view__icon-button" aria-label={showAnalysis ? t.backToConfirm : t.back} onClick={goBack} disabled={renaming || deleting}>
           {rtl ? <ArrowRight size={22} /> : <ArrowLeft size={22} />}
         </button>
-        <h2 id={titleId}>{t.title}</h2>
+        <h2 id={titleId}>{showAnalysis ? t.analysisTitle : t.title}</h2>
         <span className="plot-view__saved"><CheckCheck size={15} aria-hidden />{t.saved}</span>
       </header>
 
-      <div className="plot-view__scroll" inert={confirmDelete}>
-        <div className="plot-view__layout">
-          <figure className="plot-view__figure" aria-label={t.outline}>
-            <div className="plot-view__figure-heading"><span>{t.outline}</span><span className="plot-view__north"><ArrowRight size={15} aria-hidden />{t.north}</span></div>
-            <div className="plot-view__art" data-testid="plot-art" data-imagery={loading ? "loading" : texture ? "satellite" : "fallback"} data-min-zoom={texture?.minZoom} data-max-zoom={texture?.maxZoom}>
-              <svg
-                viewBox={`-20 -20 ${geometry.svgWidth + 40} ${geometry.svgHeight + 40}`}
-                role="img" aria-label={t.shape} preserveAspectRatio="xMidYMid meet"
-                onClick={handleFigureTap}
-                data-ndvi={showAnalysis && ndviImage ? "on" : undefined}
-                className={showAnalysis && ndviImage ? "plot-view__art-svg--probe" : undefined}
-              >
-                <defs>
-                  <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#65b991" /><stop offset="48%" stopColor="#168367" /><stop offset="100%" stopColor="#064e3b" />
-                  </linearGradient>
-                  <clipPath id={clipId}><polygon points={geometry.points} /></clipPath>
-                  <linearGradient id={shimmerId} x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stopColor="#ffffff" stopOpacity="0" />
-                    <stop offset="50%" stopColor="#ffffff" stopOpacity="0.5" />
-                    <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                <polygon points={geometry.points} fill={`url(#${gradientId})`} />
-                {texture && <image href={texture.url} x="0" y="0" width={geometry.svgWidth} height={geometry.svgHeight} preserveAspectRatio="none" clipPath={`url(#${clipId})`} />}
-                {showAnalysis && ndviImage && (
-                  <image href={ndviImage} x="0" y="0" width={geometry.svgWidth} height={geometry.svgHeight} preserveAspectRatio="none" clipPath={`url(#${clipId})`} className="plot-view__ndvi" data-testid="plot-ndvi-layer" />
-                )}
-                {analyzing && (
-                  /* Soft shimmer over the REAL plot shape only — the sweep is
-                     clipped to the drawn boundary, so the wait happens on the
-                     farmer's parcel, not on a rectangle around it. */
-                  <g clipPath={`url(#${clipId})`} className="plot-view__shimmer" aria-hidden>
-                    <polygon points={geometry.points} className="plot-view__shimmer-tint" />
-                    <rect x="0" y="0" width={Math.max(30, geometry.svgWidth * 0.35)} height={geometry.svgHeight} fill={`url(#${shimmerId})`} className="plot-view__shimmer-sweep" />
-                  </g>
-                )}
-                <polygon points={geometry.points} fill="none" stroke="#fff" strokeWidth="5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
-                <polygon points={geometry.points} fill="none" stroke="#08765b" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
-              </svg>
-            </div>
-            <figcaption>
-              <span role="status">
-                {analyzing
-                  ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.analyzing}</>
-                  : loading
-                    ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.loading}</>
-                    : texture ? t.satellite : t.fallback}
-              </span>
-              {texture && <small dir="ltr">Esri · Maxar · Earthstar Geographics · GIS User Community</small>}
-            </figcaption>
-          </figure>
-
-          <div className="plot-view__information">
-            <section className="plot-view__identity">
-              <span className="plot-view__eyebrow">{t.name}</span>
-              {editing ? <form className="plot-view__name-form" onSubmit={(e) => { e.preventDefault(); void saveName(); }}>
-                <input ref={nameRef} aria-label={t.name} value={name} maxLength={60} disabled={renaming} onChange={(e) => setName(e.target.value)} />
-                <button className="plot-view__icon-button" type="submit" aria-label={t.save} disabled={renaming}>{renaming ? <Loader2 size={20} className="plot-view__spinner" /> : <Check size={20} />}</button>
-                <button className="plot-view__icon-button" type="button" aria-label={t.cancel} disabled={renaming} onClick={() => { setName(plot.name); setEditing(false); }}><X size={19} /></button>
-              </form> : <div className="plot-view__name-row"><h3>{plot.name}</h3><button className="plot-view__icon-button" aria-label={t.edit} onClick={() => { setName(plot.name); setEditing(true); requestAnimationFrame(() => nameRef.current?.focus()); }}><Pencil size={18} /></button></div>}
-            </section>
-            {error && !confirmDelete && <p role="alert" className="plot-view__error">{error}</p>}
-            {showAnalysis && (
-              <PlotAnalysisPanel
-                lang={lang}
-                state={fieldData.state}
-                reason={fieldData.reason}
-                technical={fieldData.technical}
-                stale={fieldData.stale}
-                observation={fieldData.observation}
-                climate={fieldData.climate}
-                ring={plot.ring}
-                onRetry={fieldData.refresh}
-              />
-            )}
-            <h3 className="plot-view__section-title">{t.details}</h3>
-            <dl className="plot-view__metrics">
-              <div className="plot-view__area">
-                <dt><Expand size={17} aria-hidden />{t.area}</dt>
-                <dd><strong dir="ltr">{number(area, 2)}</strong><span>{t.ha}</span></dd>
-                <dd className="plot-view__square-metres"><bdi>{number(area * 10000)}</bdi> {t.sqm}</dd>
-              </div>
-              <div className="plot-view__perimeter"><dt><Ruler size={17} aria-hidden />{t.perimeter}</dt><dd><strong dir="ltr">{number(perimeterMetres(plot.ring), 1)}</strong><span>{t.metres}</span></dd></div>
-              <div className="plot-view__coordinates"><dt><MapPin size={17} aria-hidden />{t.center}<span dir="ltr">WGS84</span></dt><dd><span>{t.lat}<bdi>{center[1].toFixed(6)}°</bdi></span><span>{t.lon}<bdi>{center[0].toFixed(6)}°</bdi></span></dd></div>
-              <div><dt><CornerDownLeft size={17} aria-hidden />{t.vertices}</dt><dd><strong>{geometry.vertices}</strong><span>{t.points}</span></dd></div>
-              <div><dt><CalendarDays size={17} aria-hidden />{t.date}</dt><dd className="plot-view__date"><time dateTime={plot.createdAt}>{new Intl.DateTimeFormat(rtl ? "ar-DZ" : "fr-FR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(plot.createdAt))}</time></dd></div>
-            </dl>
-            <p className="plot-view__note">{t.approximate}</p>
-          </div>
-        </div>
+      <div className="plot-view__steps" inert={confirmDelete}>
+        <StepHeader current={showAnalysis ? 3 : 2} lang={lang} />
       </div>
 
-      <footer className="plot-view__footer" inert={confirmDelete}>
-        <div className="plot-view__actions">
-          <button type="button" className="plot-view__analyze plot-view__analyze--on" onClick={startAnalysis} disabled={renaming || deleting} aria-busy={analyzing}>
-            {analyzing ? <Loader2 size={21} className="plot-view__spinner" aria-hidden /> : <ScanLine size={21} aria-hidden />}
-            <span>{t.analyze}<small>{analyzing ? t.analyzing : t.analyzeHint}</small></span>
-          </button>
-          <div className="plot-view__secondary-actions">
-            <button className="plot-view__redraw" disabled={renaming || deleting} onClick={onRedraw}><Undo2 size={18} aria-hidden />{t.redraw}</button>
-            <button className="plot-view__delete" disabled={renaming || deleting} onClick={() => { setError(null); setConfirmDelete(true); requestAnimationFrame(() => deleteCancelRef.current?.focus()); }}><Trash2 size={18} aria-hidden /><span>{t.delete}</span></button>
+      {/* ---------------- Step 3 · the analysis screen -------------------- */}
+      {showAnalysis && (
+        <div className="plot-view__analysis" inert={confirmDelete}>
+          <div className="plot-view__hero">
+            <PlotShape
+              copy={shapeCopy}
+              geometry={geometry}
+              texture={texture}
+              loading={loading}
+              analyzing={analyzing}
+              ndviImage={ndviImage}
+              probe
+              onTap={handleFigureTap}
+              mode="hero"
+            />
           </div>
+          <PlotAnalysisPanel
+            lang={lang}
+            state={fieldData.state}
+            reason={fieldData.reason}
+            technical={fieldData.technical}
+            stale={fieldData.stale}
+            observation={fieldData.observation}
+            climate={fieldData.climate}
+            ring={plot.ring}
+            onRetry={fieldData.refresh}
+          />
         </div>
-      </footer>
+      )}
+
+      {/* ---------------- Step 2 · the confirm screen --------------------- */}
+      {!showAnalysis && (
+        <>
+          <div className="plot-view__scroll" inert={confirmDelete}>
+            <div className="plot-view__layout">
+              <PlotShape
+                copy={shapeCopy}
+                geometry={geometry}
+                texture={texture}
+                loading={loading}
+                analyzing={false}
+                ndviImage={null}
+                onTap={handleFigureTap}
+                mode="preview"
+              />
+
+              <div className="plot-view__information">
+                <section className="plot-view__identity">
+                  <span className="plot-view__eyebrow">{t.name}</span>
+                  {editing ? <form className="plot-view__name-form" onSubmit={(e) => { e.preventDefault(); void saveName(); }}>
+                    <input ref={nameRef} aria-label={t.name} value={name} maxLength={60} disabled={renaming} onChange={(e) => setName(e.target.value)} />
+                    <button className="plot-view__icon-button" type="submit" aria-label={t.save} disabled={renaming}>{renaming ? <Loader2 size={20} className="plot-view__spinner" /> : <Check size={20} />}</button>
+                    <button className="plot-view__icon-button" type="button" aria-label={t.cancel} disabled={renaming} onClick={() => { setName(plot.name); setEditing(false); }}><X size={19} /></button>
+                  </form> : <div className="plot-view__name-row"><h3>{plot.name}</h3><button className="plot-view__icon-button" aria-label={t.edit} onClick={() => { setName(plot.name); setEditing(true); requestAnimationFrame(() => nameRef.current?.focus()); }}><Pencil size={18} /></button></div>}
+                </section>
+                {error && !confirmDelete && <p role="alert" className="plot-view__error">{error}</p>}
+
+                {/* The two numbers a farmer actually checks: how big it is and
+                    how far its edge runs. Everything else is a coordinate. */}
+                <h3 className="plot-view__section-title">{t.details}</h3>
+                <dl className="plot-view__metrics">
+                  <div className="plot-view__area">
+                    <dt><Expand size={17} aria-hidden />{t.area}</dt>
+                    <dd><strong dir="ltr">{formatNumber(lang, area, 2)}</strong><span>{t.ha}</span></dd>
+                    <dd className="plot-view__square-metres"><bdi>{formatNumber(lang, area * 10000)} {t.sqm}</bdi></dd>
+                  </div>
+                  <div className="plot-view__perimeter">
+                    <dt><Ruler size={17} aria-hidden />{t.perimeter}</dt>
+                    <dd><strong dir="ltr">{formatNumber(lang, perimeterMetres(plot.ring), 1)}</strong><span>{t.metres}</span></dd>
+                  </div>
+                </dl>
+
+                {/* The rest is provenance: exact centre, vertex count, draw
+                    date, and the honest caveat about the measurement. */}
+                <div className="plot-view__disclosure">
+                  <button
+                    type="button"
+                    className="plot-view__disclosure-button"
+                    aria-expanded={techOpen}
+                    aria-controls="plot-tech-details"
+                    onClick={() => setTechOpen((open) => !open)}
+                  >
+                    {techOpen ? <ChevronDown size={17} aria-hidden /> : <ChevronDown size={17} aria-hidden className="rotate-[-90deg]" />}
+                    {t.techDetails}
+                  </button>
+                  {techOpen && (
+                    <div id="plot-tech-details" className="plot-view__disclosure-body">
+                      <dl className="plot-view__tech">
+                        <div className="plot-view__coordinates">
+                          <dt><MapPin size={16} aria-hidden />{t.center}<span dir="ltr">WGS84</span></dt>
+                          <dd>
+                            <span>{t.lat}<bdi dir="ltr">{formatDegrees(center[1])}</bdi></span>
+                            <span>{t.lon}<bdi dir="ltr">{formatDegrees(center[0])}</bdi></span>
+                          </dd>
+                        </div>
+                        <div>
+                          <dt><CornerDownLeft size={16} aria-hidden />{t.vertices}</dt>
+                          <dd><strong>{geometry.vertices}</strong><span>{t.points}</span></dd>
+                        </div>
+                        <div>
+                          <dt><CalendarDays size={16} aria-hidden />{t.date}</dt>
+                          <dd className="plot-view__date">
+                            <time dateTime={plot.createdAt}>
+                              {new Intl.DateTimeFormat(rtl ? "ar-DZ" : "fr-FR", { year: "numeric", month: "short", day: "numeric" }).format(new Date(plot.createdAt))}
+                            </time>
+                          </dd>
+                        </div>
+                      </dl>
+                      <p className="plot-view__note">{t.approximate}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <footer className="plot-view__footer" inert={confirmDelete}>
+            <div className="plot-view__actions">
+              {/* The one primary action of this screen. */}
+              <button type="button" className="plot-view__analyze plot-view__analyze--on" onClick={startAnalysis} disabled={renaming || deleting} aria-busy={analyzing}>
+                {analyzing ? <Loader2 size={21} className="plot-view__spinner" aria-hidden /> : <ScanLine size={21} aria-hidden />}
+                <span>{t.analyze}<small>{t.analyzeHint}</small></span>
+              </button>
+              {/* Everything else is secondary, and lives behind one icon. */}
+              <div className="plot-view__overflow">
+                <button
+                  ref={moreRef}
+                  type="button"
+                  className="plot-view__more"
+                  aria-label={t.more}
+                  aria-haspopup="menu"
+                  aria-expanded={moreOpen}
+                  aria-controls="plot-overflow"
+                  onClick={() => openMore(!moreOpen)}
+                  disabled={renaming || deleting}
+                >
+                  <MoreHorizontal size={20} aria-hidden />
+                </button>
+                {moreOpen && (
+                  <div
+                    id="plot-overflow"
+                    ref={menuRef}
+                    role="menu"
+                    aria-label={t.more}
+                    className="plot-view__menu"
+                    onKeyDown={onMenuKeyDown}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => { openMore(false); onRedraw(); }}
+                    >
+                      <Undo2 size={17} aria-hidden />
+                      {t.redraw}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="plot-view__menu-delete"
+                      onClick={() => { openMore(false); setError(null); setConfirmDelete(true); requestAnimationFrame(() => deleteCancelRef.current?.focus()); }}
+                    >
+                      <Trash2 size={17} aria-hidden />
+                      {t.delete}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </footer>
+        </>
+      )}
+
       {/* Tap-a-point probe: the value of the nearest REAL pixel and its
           coordinates — never an interpolated colour from the smoothed layer. */}
       <Sheet open={probe !== null} onClose={() => setProbe(null)} title={t.probeTitle} subtitle={t.probeSubtitle} lang={lang}>
@@ -362,16 +540,16 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
               <span className="plot-view__probe-swatch" style={{ background: ndviCssColor(probe.ndvi, rasterDomain) }} aria-hidden />
               <div>
                 <span className="plot-view__probe-label">{t.probeValue}</span>
-                <strong dir="ltr">{number(probe.ndvi, 3)}</strong>
+                <strong dir="ltr">{formatNumber(lang, probe.ndvi, 3)}</strong>
                 <small dir="ltr">NDVI</small>
               </div>
             </div>
             <dl className="plot-view__probe-coords">
-              <div><dt>{t.lat}</dt><dd dir="ltr"><bdi>{probe.lat.toFixed(6)}°</bdi></dd></div>
-              <div><dt>{t.lon}</dt><dd dir="ltr"><bdi>{probe.lon.toFixed(6)}°</bdi></dd></div>
+              <div><dt>{t.lat}</dt><dd dir="ltr"><bdi>{formatDegrees(probe.lat)}</bdi></dd></div>
+              <div><dt>{t.lon}</dt><dd dir="ltr"><bdi>{formatDegrees(probe.lon)}</bdi></dd></div>
             </dl>
             <p className="plot-view__probe-note" role="note">
-              {probe.tappedMeasured ? t.probeHere : t.probeNote.replace("{m}", number(Math.round(probe.distanceM)))}
+              {probe.tappedMeasured ? t.probeHere : t.probeNote.replace("{m}", formatNumber(lang, Math.round(probe.distanceM)))}
             </p>
             <p className="plot-view__probe-pixel">{t.probePixel.replace("{res}", String(raster.resolutionM))}</p>
           </div>
