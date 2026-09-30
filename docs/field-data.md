@@ -15,14 +15,14 @@ The heatmap UI is untouched — same three Arabic tabs (`الإجهاد الحر
 | Upstream | Gives | Key required? |
 | --- | --- | --- |
 | [NASA POWER](https://power.larc.nasa.gov/) | Daily meteorology for the parcel centroid: Tmax, Tmin, RH, wind, solar radiation, rain — and the FAO-56 ET₀ computed from them | **No.** Public, no registration, no quota. |
-| [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu/) openEO | Sentinel-2 L2A NDVI, cloud-masked, mean per grid cell | Yes — a CDSE client id/secret, server-side only. |
+| [Copernicus Data Space Ecosystem](https://dataspace.copernicus.eu/) — Sentinel Hub Process API (`sh.dataspace.copernicus.eu`) | Sentinel-2 L2A NDVI, SCL cloud-masked, clipped to the polygon, mean per grid cell, plus acquisition date and cloud cover | Yes — a CDSE client id/secret, server-side only. |
 
 ## Setup
 
 1. Create a free account at
    <https://identity.dataspace.copernicus.eu/auth/realms/CDSE/account>.
-2. Add a **CDSE Explorer** client (confidential → service credentials) and
-   record the client id and secret.
+2. Create an OAuth client (a Sentinel Hub dashboard client, id `sh-…`, works)
+   and record the client id and secret.
 3. Put them in `.env.local` (git-ignored):
 
    ```
@@ -30,8 +30,8 @@ The heatmap UI is untouched — same three Arabic tabs (`الإجهاد الحر
    CDSE_CLIENT_SECRET=…
    ```
 
-   `.env.example` documents every variable, including the optional token and
-   openEO endpoint overrides.
+   `.env.example` documents every variable, including the optional token,
+   Process API and openEO overrides.
 
 That is the whole setup. POWER needs nothing — its base URL is a constant
 rather than an env var, so a mirror would be a reviewable code change instead
@@ -46,11 +46,35 @@ farmer's language, and shows no numbers for the affected layers.
 1. The farmer draws a polygon on Esri World Imagery (`src/components/map/`),
    measured on a spherical earth (`src/lib/geo/polygon.ts`) and stored in
    Firestore with a localStorage copy so the map works offline.
-2. The 4×4 grid is cut from the parcel's bounding box
-   (`gridCells`), one openEO `aggregate_spatial` call per cell.
-3. `src/app/api/field-data/route.ts` fetches POWER and openEO **concurrently**
+2. The grid is cut from the parcel's bounding box and clipped to the polygon
+   (`gridCells`). The plot's area is always recomputed server-side from its
+   geometry; the client's `areaHa` is only compared and logged.
+3. `src/app/api/field-data/route.ts` fetches POWER and Sentinel-2 **concurrently**
    (`src/lib/field-data/observation.ts`) and returns either an observation or a
-   typed reason — never a fabricated number.
+   typed reason — never a fabricated number. The satellite step
+   (`src/lib/satellite/sentinelhub.ts`) is: CDSE token → Catalog API (passes in
+   the last 30 days, date + `eo:cloud_cover`) → Process API (S2 L2A, bbox +
+   polygon, ~10 m, SCL mask + `dataMask` evalscript, FLOAT32 GeoTIFF) → mean
+   per cell. **NASA POWER is independent**: when the satellite step fails the
+   POWER day is still returned as `climate` on the failure response.
+   `CDSE_USE_OPENEO=1` switches the satellite step back to the legacy openEO
+   graph (`src/lib/satellite/openeo.ts`); it is off by default because an
+   `sh-…` client is rejected by openEO.
+
+### Diagnosing a failure
+
+Every upstream call is logged as one line (host only, never a path or secret):
+
+```
+[field-data] step=cdse-token host=identity.dataspace.copernicus.eu status=200 ok=true ms=310
+[field-data] step=sh-catalog host=sh.dataspace.copernicus.eu status=200 ok=true message="4 pass(es) in 2026-08-31..2026-09-30" ms=420
+[field-data] step=sh-process host=sh.dataspace.copernicus.eu status=403 ok=false code=ACCESS_DENIED message="…" ms=180
+```
+
+Steps: `nasa-power`, `cdse-token`, `sh-catalog`, `sh-process`
+(`openeo-result` / `openeo-poll` on the legacy path). The same records come back
+as `diagnostics` in the JSON, with a short `technical` string that the error
+card prints under the localised message.
 4. `src/lib/field-data/useFieldData.ts` holds the result, and
    `FieldHeatmapCard` renders it or explains its absence.
 
@@ -128,14 +152,16 @@ tool usable.
 ## Verified, and not verified
 
 **Verified:** geometry (16 tests, ≤0.52 % area error vs WGS84), POWER ET₀
-against live data (20 tests), openEO graph and response parsing (15), layer
+against live data (20 tests), openEO graph and response parsing (15), Sentinel Hub
+Process API request/GeoTIFF/diagnostics (18), layer
 mapping (16), boundary validation, and the draw → finish → measured area →
 save → "no data" flow in a real browser. 396 unit tests, 0 lint errors, clean
 production build.
 
 **Not verified:** a live end-to-end run against Copernicus. This sandbox has no
-outbound TLS to CDSE, so no claim is made that a real Sentinel-2 job has
-completed. The 8 pre-existing `auth-flow` / `onboarding` e2e failures reproduce
+CDSE credentials, so no claim is made that a real Sentinel-2 request has
+completed; the GeoTIFF reader is tested on synthetic files in the layouts
+Sentinel Hub produces (strips/tiles, Deflate, float predictor). The 8 pre-existing `auth-flow` / `onboarding` e2e failures reproduce
 identically on the base commit and are unrelated.
 
 ## Follow-ups (map-UX branch)

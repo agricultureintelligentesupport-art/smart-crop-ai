@@ -92,6 +92,7 @@ export default function FieldHeatmapCard({
   weather,
   observation = null,
   observationReason = null,
+  observationTechnical = null,
   plotName = null,
   onOpenMap,
 }: {
@@ -110,6 +111,8 @@ export default function FieldHeatmapCard({
   observation?: FieldObservation | null;
   /** Why a plot has no observation yet — drives the "no data" treatment. */
   observationReason?: FieldDataReason | null;
+  /** Short technical reason (step · host · HTTP status · code), shown under the message. */
+  observationTechnical?: string | null;
   /** Name of the saved plot, shown in the provenance line. */
   plotName?: string | null;
   /** Opens the field map sheet. Omitted → the map button is not rendered. */
@@ -595,9 +598,20 @@ export default function FieldHeatmapCard({
         ) : observationReason ? (
           <div className="flex items-start gap-2 rounded-[1rem] bg-amber-50 px-3 py-2.5 ring-1 ring-amber-200/60">
             <Satellite size={13} strokeWidth={2.6} aria-hidden className="mt-0.5 shrink-0 text-amber-600" />
-            <p className="text-[10.5px] font-semibold leading-5 text-amber-900/85">
-              {t.fieldDataReason[observationReason]}
-            </p>
+            <div className="min-w-0">
+              <p className="text-[10.5px] font-semibold leading-5 text-amber-900/85">
+                {t.fieldDataReason[observationReason]}
+              </p>
+              {observationTechnical ? (
+                <p
+                  dir="ltr"
+                  data-testid="field-data-technical"
+                  className="mt-1 break-words font-mono text-[9.5px] font-medium leading-4 text-amber-900/65"
+                >
+                  {observationTechnical}
+                </p>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

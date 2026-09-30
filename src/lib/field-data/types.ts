@@ -89,6 +89,12 @@ export interface FieldObservation {
   cells: CellObservation[];
   /** `null` when NASA POWER was unreachable — the layers that need it go dark. */
   climate: ClimateObservation | null;
+  /**
+   * Cloud cover (%) of the Sentinel-2 tile the NDVI came from, as reported by
+   * the Copernicus Catalog. Optional and additive: absent on older cached
+   * records and on the openEO path, which does not report it.
+   */
+  cloudCoverPct?: number | null;
   /** True when some cells could not be measured (cloud, or a sliver cell). */
   partial: boolean;
   /** Wall-clock time this record was produced. */
@@ -104,6 +110,20 @@ export interface FieldDataResponse {
   message?: string;
   /** True when the record is a cached one for an earlier day. */
   stale?: boolean;
+  /**
+   * Short technical reason for a failed satellite step, e.g.
+   * `sh-process · sh.dataspace.copernicus.eu · HTTP 403 · ACCESS_DENIED`.
+   * No secrets. Shown under the localised message in the error card.
+   */
+  technical?: string;
+  /** Every upstream call of this request: host, status, code, message. */
+  diagnostics?: import("@/lib/satellite/trace").StepLog[];
+  /**
+   * The NASA POWER day, returned even when the satellite step failed — the
+   * two upstreams are independent, so a cloud/credential problem never throws
+   * the weather away.
+   */
+  climate?: ClimateObservation | null;
 }
 
 /** Sentinel-2 L2A pixel area: 10 m × 10 m = 0.01 ha. */

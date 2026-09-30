@@ -32,20 +32,31 @@
  * and no observation, so the UI can show "no data yet" instead of a number
  * nobody measured. A previously cached observation is still returned — flagged
  * `stale` with its real date — rather than blanking the screen.
+ *
+ * DIAGNOSTICS
+ * -----------
+ * Every upstream call (NASA POWER, CDSE token, Sentinel Hub catalog/process —
+ * or openEO behind `CDSE_USE_OPENEO=1`) is logged as one line with its host,
+ * HTTP status and the error code/message of the body, and the same records are
+ * returned as `diagnostics` (+ a short `technical` string). No secrets.
+ *
+ * NASA POWER is independent of the satellite: when NDVI fails, the POWER day
+ * is still returned as `climate` on the failure response.
  */
 
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { doc, getDoc, setDoc, type Firestore } from "firebase/firestore";
 import { db, isFirestoreReady } from "@/lib/firebase";
-import { validatePlot, type Ring } from "@/lib/geo/polygon";
+import { centroidOf, ringAreaHa, validatePlot, type Ring } from "@/lib/geo/polygon";
+import { readOpeneoConfig } from "@/lib/satellite/openeo";
 import { buildObservation, todayIso } from "@/lib/field-data/observation";
 import type { FieldDataReason, FieldObservation } from "@/lib/field-data/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-/* A synchronous openEO aggregation over a handful of polygons is small, but a
-   cold cache on a busy back-end can take a while; POWER runs in parallel. */
+/* A Sentinel Hub catalog lookup plus one or two Process API rasters is small,
+   but a cold back-end can take a while; POWER runs in parallel. */
 export const maxDuration = 60;
 
 const CACHE_COLLECTION = "fieldDataCache";
@@ -120,6 +131,8 @@ interface RequestBody {
   ring: Ring;
   rows: number;
   cols: number;
+  /** What the client believes the area is — only compared, never trusted. */
+  claimedAreaHa: number | null;
   force: boolean;
 }
 
@@ -134,7 +147,16 @@ function parseBody(raw: unknown): RequestBody | null {
   if (ring.length < 3) return null;
   const rows = Math.min(MAX_ROWS, Math.max(1, Number(body.rows) || 4));
   const cols = Math.min(MAX_COLS, Math.max(1, Number(body.cols) || 4));
-  return { uid, plotId, ring, rows, cols, force: body.force === true };
+  const claimed = Number(body.areaHa);
+  return {
+    uid,
+    plotId,
+    ring,
+    rows,
+    cols,
+    claimedAreaHa: Number.isFinite(claimed) && claimed > 0 ? claimed : null,
+    force: body.force === true,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -166,24 +188,47 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  /* The plot's REAL area comes from its geometry, not from the request: the
+     dashboard's `areaHa` is the irrigation calculator's field size (default
+     2 ha) and need not match the drawn boundary. `rows`/`cols` stay as the
+     client sent them because they decide the `z-<row>-<col>` zone ids the
+     heatmap paints; the cell polygons and their hectares are the real ones. */
+  const realAreaHa = ringAreaHa(parsed.ring);
+  const centroid = centroidOf(parsed.ring) ?? parsed.ring[0];
+  if (parsed.claimedAreaHa !== null && Math.abs(parsed.claimedAreaHa - realAreaHa) > 0.1 * realAreaHa) {
+    console.log(
+      `[field-data] note=areaHa-differs claimed=${parsed.claimedAreaHa.toFixed(2)} geometry=${realAreaHa.toFixed(2)} (geometry used)`,
+    );
+  }
+
   const result = await buildObservation({
     plot: {
       id: parsed.plotId,
       uid: parsed.uid,
       name: "",
       ring: parsed.ring,
-      areaHa: 0,
-      centroid: [parsed.ring[0][0], parsed.ring[0][1]],
+      areaHa: Math.round(realAreaHa * 10_000) / 10_000,
+      centroid: [centroid[0], centroid[1]],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
     rows: parsed.rows,
     cols: parsed.cols,
   });
+  console.log(
+    `[field-data] plot=${parsed.plotId.slice(0, 12)} result ok=${result.ok}${result.reason ? ` reason=${result.reason}` : ""} ` +
+      `provider=${readOpeneoConfig().useOpeneo ? "openeo" : "sentinel-hub-process"} ` +
+      `climate=${result.climate ? "ok" : "none"} cells=${result.cells.length} areaHa=${realAreaHa.toFixed(2)}`,
+  );
 
   if (result.ok && result.observation) {
     await writeCache(parsed.uid, parsed.ring, { ...result.observation, plotId: parsed.plotId }, db);
-    return NextResponse.json({ ok: true, observation: result.observation, stale: false });
+    return NextResponse.json({
+      ok: true,
+      observation: result.observation,
+      stale: false,
+      diagnostics: result.diagnostics,
+    });
   }
 
   // The upstream failed. Prefer a previous real reading over a blank screen —
@@ -196,6 +241,9 @@ export async function POST(request: NextRequest) {
       stale: true,
       reason: result.reason,
       message: `showing the ${stale.date} reading; today's data is unavailable`,
+      ...(result.technical ? { technical: result.technical } : {}),
+      diagnostics: result.diagnostics,
+      climate: result.climate,
     });
   }
 
@@ -203,5 +251,9 @@ export async function POST(request: NextRequest) {
     ok: false,
     reason: result.reason ?? ("network" as FieldDataReason),
     observation: null,
+    ...(result.technical ? { technical: result.technical } : {}),
+    diagnostics: result.diagnostics,
+    // NASA POWER is independent: a satellite failure never discards it.
+    climate: result.climate,
   });
 }

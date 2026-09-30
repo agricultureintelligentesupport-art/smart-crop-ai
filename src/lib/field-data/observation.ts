@@ -30,7 +30,9 @@
 
 import { computeIrrigation, type IrrigationSystem } from "../agronomy";
 import { bboxOf, centroidOf, gridCells, type GridCell, type Ring } from "../geo/polygon";
-import { fetchNdvi, isConfigured, readOpeneoConfig, type OpeneoFetch, type OpeneoConfig } from "../satellite/openeo";
+import { fetchNdvi, isConfigured, readOpeneoConfig, type NdviResult, type OpeneoFetch, type OpeneoConfig } from "../satellite/openeo";
+import { fetchNdviProcessApi } from "../satellite/sentinelhub";
+import { SatelliteTrace, withStepLogging, type StepLog } from "../satellite/trace";
 import { fetchPower, fetchPowerClimatology, toClimate, POWER_TIMEOUT_MS } from "../weather/power";
 import type { FetchLike } from "../weather/live";
 import type { CropKey } from "../wilayas";
@@ -55,7 +57,9 @@ const NDVI_SPARSE = 0.2;
 const NDVI_DENSE = 0.65;
 
 /** How far back to look for a usable Sentinel-2 pass. */
-const SCENE_LOOKBACK_DAYS = 20;
+const SCENE_LOOKBACK_DAYS = 30;
+/** The legacy openEO path keeps the window it always had. */
+const OPENEO_LOOKBACK_DAYS = 20;
 
 /** "YYYY-MM-DD" in the app's timezone (Algeria is UTC+1 all year). */
 export function todayIso(now: Date = new Date()): string {
@@ -109,6 +113,8 @@ export interface BuildObservationInput {
   openeoFetch?: OpeneoFetch;
   /** Injected for tests. */
   openeoConfig?: OpeneoConfig;
+  /** Collects + logs each upstream step; one is created when omitted. */
+  trace?: SatelliteTrace;
 }
 
 export interface BuildObservationResult {
@@ -118,6 +124,42 @@ export interface BuildObservationResult {
   /** Field-wide NDVI, used as the reference for per-cell deficits. */
   meanNdvi: number | null;
   cells: GridCell[];
+  /**
+   * The NASA POWER day, present whether or not the satellite step worked: the
+   * two upstreams are independent and a failure of one never discards the other.
+   */
+  climate: ClimateObservation | null;
+  /** Short technical reason of the failing satellite step (no secrets). */
+  technical: string | null;
+  /** Every upstream call of this run. */
+  diagnostics: StepLog[];
+}
+
+/** PowerClimate → the stored/returned shape. */
+function toClimateObservation(
+  climate: ReturnType<typeof toClimate>,
+  centroid: [number, number] | readonly number[],
+): ClimateObservation | null {
+  if (!climate) return null;
+  return {
+    source: "nasa-power",
+    date: climate.date,
+    et0: climate.et0,
+    et0Method: climate.et0Method ?? "hargreaves",
+    et0Hargreaves: climate.et0Hargreaves,
+    tempC: climate.tempC,
+    tempMaxC: climate.tempMaxC,
+    tempMinC: climate.tempMinC,
+    humidityPct: climate.humidityPct,
+    windMs: climate.windMs,
+    rainMm: climate.rainMm,
+    soilWetness: climate.soilWetness,
+    radiationMj: climate.radiationMj,
+    elevationM: climate.elevationM,
+    gridDeg: climate.gridDeg,
+    latitude: centroid[1],
+    longitude: centroid[0],
+  };
 }
 
 /**
@@ -132,44 +174,83 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
   const cells = gridCells(plot.ring, rows, cols);
   const centroid = centroidOf(plot.ring) ?? plot.centroid;
   const bbox = bboxOf(plot.ring);
-  const empty: BuildObservationResult = { ok: false, observation: null, meanNdvi: null, cells };
-  if (!bbox) return { ...empty, reason: "tooSmall" };
-
   const config = input.openeoConfig ?? readOpeneoConfig(input.env);
+  const trace =
+    input.trace ?? new SatelliteTrace({ secrets: [config.clientId, config.clientSecret], tag: `plot=${plot.id.slice(0, 12)}` });
+  const finish = (r: {
+    ok: boolean;
+    reason?: FieldDataReason;
+    observation: FieldObservation | null;
+    meanNdvi: number | null;
+    climate: ClimateObservation | null;
+  }): BuildObservationResult => ({
+    ...r,
+    cells,
+    technical: trace.technical(),
+    diagnostics: trace.steps,
+  });
+  if (!bbox) return finish({ ok: false, reason: "tooSmall", observation: null, meanNdvi: null, climate: null });
 
   /* POWER daily supplies the day's meteorology; POWER climatology supplies a
      realistic Tmax−Tmin for the location and month, which MERRA-2's smoothed
      daily extremes do not. Both are keyless and cheap; the climatology is
-     memoised for the process lifetime. */
+     memoised for the process lifetime.
+
+     POWER is INDEPENDENT of the satellite step: its promise can never reject
+     (it resolves to `null` on any failure), it runs concurrently, and its
+     result is kept when the satellite step fails. */
+  const powerFetchImpl = input.powerFetch ?? (typeof fetch === "function" ? (fetch as unknown as FetchLike) : undefined);
   const powerOpts = {
     now,
-    ...(input.powerFetch ? { fetchImpl: input.powerFetch } : {}),
+    ...(powerFetchImpl ? { fetchImpl: withStepLogging(powerFetchImpl as never, trace, "nasa-power") as unknown as FetchLike } : {}),
     timeoutMs: POWER_TIMEOUT_MS,
   };
   const climatePromise = Promise.all([
     fetchPower(centroid[1], centroid[0], powerOpts),
     fetchPowerClimatology(centroid[1], centroid[0], powerOpts),
-  ]).then(([daily, climatology]) => toClimate(daily, climatology));
+  ])
+    .then(([daily, climatology]) => toClimate(daily, climatology))
+    .catch(() => null);
 
-  const ndviPromise = isConfigured(config)
-    ? fetchNdvi(
-        config,
-        {
-          collection: config.collection,
-          from: shiftIso(date, -SCENE_LOOKBACK_DAYS),
-          to: date,
-          bbox,
-          targets: cells.map((cell) => ({ id: cell.id, ring: cell.ring })),
-        },
-        input.openeoFetch,
-      )
+  const useOpeneo = config.useOpeneo;
+  const cellTargets = cells.map((cell) => ({ id: cell.id, ring: cell.ring }));
+  const ndviPromise: Promise<NdviResult | null> = isConfigured(config)
+    ? (useOpeneo
+        ? fetchNdvi(
+            config,
+            {
+              collection: config.collection,
+              from: shiftIso(date, -OPENEO_LOOKBACK_DAYS),
+              to: date,
+              bbox,
+              targets: cellTargets,
+            },
+            input.openeoFetch,
+            trace,
+          )
+        : fetchNdviProcessApi(
+            config,
+            { from: shiftIso(date, -SCENE_LOOKBACK_DAYS), to: date, bbox, ring: plot.ring, targets: cellTargets },
+            input.openeoFetch,
+            trace,
+          )
+      ).catch((): NdviResult => ({ ok: false, reason: "network", cells: [], sceneDate: null, maskedCells: 0 }))
     : Promise.resolve(null);
 
   const [climate, ndvi] = await Promise.all([climatePromise, ndviPromise]);
+  const climateObservation = toClimateObservation(climate, centroid);
 
-  if (!ndvi) return { ...empty, reason: "notConfigured" };
+  if (!ndvi) {
+    return finish({ ok: false, reason: "notConfigured", observation: null, meanNdvi: null, climate: climateObservation });
+  }
   if (!ndvi.ok) {
-    return { ...empty, reason: (ndvi.reason ?? "network") as FieldDataReason, cells };
+    return finish({
+      ok: false,
+      reason: (ndvi.reason ?? "network") as FieldDataReason,
+      observation: null,
+      meanNdvi: null,
+      climate: climateObservation,
+    });
   }
 
   const byId = new Map(ndvi.cells.map((cell) => [cell.id, cell.ndvi]));
@@ -184,31 +265,9 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
 
   const values = cellReadings.map((c) => c.ndvi).filter((v): v is number => v !== null);
   if (values.length === 0) {
-    return { ...empty, reason: "noScenes", cells };
+    return finish({ ok: false, reason: "noScenes", observation: null, meanNdvi: null, climate: climateObservation });
   }
   const meanNdvi = values.reduce((sum, v) => sum + v, 0) / values.length;
-
-  const climateObservation: ClimateObservation | null = climate
-    ? {
-        source: "nasa-power",
-        date: climate.date,
-        et0: climate.et0,
-        et0Method: climate.et0Method ?? "hargreaves",
-        et0Hargreaves: climate.et0Hargreaves,
-        tempC: climate.tempC,
-        tempMaxC: climate.tempMaxC,
-        tempMinC: climate.tempMinC,
-        humidityPct: climate.humidityPct,
-        windMs: climate.windMs,
-        rainMm: climate.rainMm,
-        soilWetness: climate.soilWetness,
-        radiationMj: climate.radiationMj,
-        elevationM: climate.elevationM,
-        gridDeg: climate.gridDeg,
-        latitude: centroid[1],
-        longitude: centroid[0],
-      }
-    : null;
 
   const observation: FieldObservation = {
     plotId: plot.id,
@@ -216,11 +275,12 @@ export async function buildObservation(input: BuildObservationInput): Promise<Bu
     sceneDate: ndvi.sceneDate,
     cells: cellReadings,
     climate: climateObservation,
+    ...(ndvi.cloudCoverPct !== undefined && ndvi.cloudCoverPct !== null ? { cloudCoverPct: Math.round(ndvi.cloudCoverPct * 10) / 10 } : {}),
     partial: values.length < cellReadings.length || climateObservation === null,
     fetchedAt: now.toISOString(),
   };
 
-  return { ok: true, observation, meanNdvi, cells };
+  return finish({ ok: true, observation, meanNdvi, climate: climateObservation });
 }
 
 /* ------------------------------------------------------------------ */
