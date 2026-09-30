@@ -57,6 +57,38 @@ export interface CellObservation {
   pixels: number;
 }
 
+/**
+ * Per-pixel NDVI of the plot, row-major, as the Process API sampled it over the
+ * plot's bbox. This is what makes the plot-details layer look like the REAL
+ * parcel shape instead of a grid of squares: every 10 m pixel the satellite
+ * actually measured is painted where it is, and nothing else is.
+ */
+export interface NdviRaster {
+  /** The bbox the pixel grid covers (the plot's own bbox), WGS84 degrees. */
+  bbox: { west: number; south: number; east: number; north: number };
+  width: number;
+  height: number;
+  /**
+   * Ground sampling distance in metres. 10 m (one Sentinel-2 pixel) unless the
+   * boundary is so large that a 10 m grid would exceed the transport budget —
+   * the plot view states the real value, never an assumed 10 m.
+   */
+  resolutionM: number;
+  /**
+   * Row-major NDVI, `length = width × height`, rounded to 3 decimals (finer
+   * than Sentinel-2's own reflectance quantisation). `null` wherever
+   * `dataMask` is 0 — a masked pixel is a missing measurement, never an
+   * interpolated or neighbouring value.
+   */
+  ndvi: (number | null)[];
+  /**
+   * Row-major 0/1, same length as `ndvi`. 1 = the satellite really measured
+   * this pixel (inside the polygon, not cloud/shadow/cirrus/snow, valid
+   * reflectances). The client renders 0 as fully transparent.
+   */
+  dataMask: number[];
+}
+
 /** The field-wide NASA POWER day, with its FAO-56 method recorded. */
 export interface ClimateObservation {
   /** Always "nasa-power" — the only upstream behind these numbers. */
@@ -97,6 +129,15 @@ export interface FieldObservation {
   rows?: number;
   cols?: number;
   cells: CellObservation[];
+  /**
+   * The per-pixel NDVI raster, present on records built by the raster path
+   * (the default since the plot-details view paints real pixels). Optional and
+   * additive: records cached before it existed — and the legacy grid path
+   * behind `CDSE_USE_GRID=1` — only carry `cells`. `cells` is ALWAYS present:
+   * on the raster path it is derived from the same raster, so the dashboard
+   * heatmap keeps reading the exact same measurement it always did.
+   */
+  raster?: NdviRaster;
   /** `null` when NASA POWER was unreachable — the layers that need it go dark. */
   climate: ClimateObservation | null;
   /**

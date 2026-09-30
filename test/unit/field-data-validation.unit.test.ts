@@ -26,6 +26,7 @@ const CONFIG: OpeneoConfig = {
   processUrl: "https://sh.dataspace.copernicus.eu/api/v1/process",
   catalogUrl: "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search",
   useOpeneo: false,
+  useGrid: false,
 };
 
 /** ≈ 58.3 m square next to Biskra ≈ 0.34 ha, counter-clockwise (lon = x, lat = y). */

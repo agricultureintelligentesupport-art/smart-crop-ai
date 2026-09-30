@@ -42,6 +42,7 @@ const CONFIG: OpeneoConfig = {
   processUrl: "https://sh.dataspace.copernicus.eu/api/v1/process",
   catalogUrl: "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search",
   useOpeneo: false,
+  useGrid: false,
 };
 
 // ≈ 134 m × 134 m (≈ 1.8 ha) next to Algiers.
