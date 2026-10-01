@@ -87,3 +87,80 @@ npx playwright test e2e/plot-view.spec.ts e2e/field-map.spec.ts e2e/map-search.s
 ```
 
 The Playwright config also supports `PW_CHROMIUM_PATH` for a preinstalled browser. This sandbox used the installed `@sparticuz/chromium` binary plus its bundled AL2023 libraries (`LD_LIBRARY_PATH=/tmp/al2023/lib:/tmp`); no browser binaries or dependencies were added to Git.
+
+## Stage 2 · Lazy satellite layers (NDMI, NDRE, true colour)
+
+### Delivered
+
+- **Same request pattern as NDVI.** New Sentinel-2 layers reuse the existing
+  Process-API flow (`fetchSceneRaster`): same polygon, same 10 m grid, same
+  scene (the NDVI scene's own `YYYY-MM-DD`, `leastCC`), same `CDSE_CLIENT_ID`
+  / `CDSE_CLIENT_SECRET`, same traced steps (`cdse-token`, `sh-catalog`,
+  `sh-process`). NDMI `(B8A−B11)/(B8A+B11)` and NDRE `(B8A−B05)/(B8A+B05)` set
+  `processing.upsampling: "BILINEAR"` because B11/B05 are 20 m bands; the
+  request states `20 م مُعاد أخذ العينات` in the UI. True colour (B04,B03,B02)
+  is an image layer with no index values and no resampling block. NDVI's own
+  evalscript, request body and numbers are byte-identical to before
+  (`buildIndexEvalscript("B08","B04","NDVI") === EVALSCRIPT`, unit-tested).
+- **Lazy by construction.** `/api/field-data` still returns NDVI only. NDMI,
+  NDRE and true colour are requested the FIRST time their chip is selected,
+  through the stateless `/api/field-data/layer` route (no Firestore, no daily
+  cache). `layer-fetch.ts` memoises one raster per plot + scene + layer in
+  memory, deduplicates in-flight asks, never caches failures, and supersedes a
+  stale scene. Shimmer while loading, per-layer error card + retry.
+- **The الخرائط tab** lists NDVI, NDMI, NDRE, الصورة الحقيقية selectable with
+  fixed ramps and legends showing each layer's REAL min/max; values are
+  unit-free (`بدون وحدة`). Overview stats and the tap-a-pixel probe follow the
+  selected layer; masked pixels (`dataMask` 0) stay transparent everywhere —
+  no estimated values. «الاحتياج المائي» and «الإجهاد الحراري» remain locked
+  «قريباً». Radar (Sentinel-1) is out of scope.
+- **Layout fixes.** Tab content scrolls inside its own container below the
+  segmented control; the التفاصيل tab is now one row-card per record (label
+  right, value left, aligned).
+
+### Verification
+
+- `npx tsc --noEmit`, `npm run lint` (0 errors), `npm run test:unit`
+  **484 passed** (16 new layer tests: formulas executed from the shipped
+  evalscripts, band lists + FLOAT32, dataMask/SCL parity with NDVI, request
+  pattern equality, cache keys, lazy memo/retry/supersede, config copy).
+- `npm run build` passes.
+- e2e `e2e/plot-layers.spec.ts` (4 tests) passes in real Chromium with the
+  field-data routes mocked on ONE synthetic scene: asserts zero layer requests
+  before the first chip tap, one request per layer on the NDVI scene date,
+  local caching, per-layer retry, locked chips; captures the screenshots
+  below.
+
+### Browser evidence · 2026-10-01
+
+Real Chromium (the `@sparticuz/chromium` binary with its bundled AL2023 libs
+and a Noto Sans Arabic TTF for glyphs), 390×844 mobile emulation with touch,
+plus 360px and 430px RTL captures. Synthetic scene: 24×22 grid @10 m with a
+diagonal cloud band masked on every layer — the band reads as "no data"
+(base shows through) in all four layers.
+
+| NDVI | NDMI |
+| --- | --- |
+| ![NDVI layer at 390px](layer-ndvi-390.png) | ![NDMI layer at 390px](layer-ndmi-390.png) |
+| **NDRE** | **True colour** |
+| ![NDRE layer at 390px](layer-ndre-390.png) | ![True colour layer at 390px](layer-truecolor-390.png) |
+
+- [NDMI at 360px](layer-ndmi-360.png) · [NDMI at 430px](layer-ndmi-430.png)
+- `preview-layer-*.png` are pixel-exact renders of the composed overlays
+  (production compose code, same fixtures) produced by
+  `tools/render-layer-previews.mts` — useful without a browser.
+
+### Files changed
+
+Existing: `src/lib/satellite/sentinelhub.ts`, `src/lib/plot/ndvi-layers.ts`,
+`src/lib/field-data/types.ts`, `src/components/plot/PlotView.tsx`,
+`src/components/plot/PlotAnalysisPanel.tsx`,
+`src/components/plot/plot-view.css`, `docs/plot-view/README.md`.
+
+New: `src/app/api/field-data/layer/route.ts` (stateless layer route — the one
+route addition; `/api/field-data` and its Firestore cache untouched),
+`src/lib/plot/layer-fetch.ts`, `test/unit/satellite-layers.unit.test.ts`,
+`e2e/plot-layers.spec.ts`, `tools/render-layer-previews.mts`, screenshots.
+
+Assistant/PhytoScan, Firestore code, env vars, package.json, globals.css,
+settings/account screens and all pre-existing tests are untouched.

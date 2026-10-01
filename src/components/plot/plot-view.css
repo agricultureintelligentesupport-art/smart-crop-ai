@@ -531,6 +531,32 @@
   background: rgba(191, 91, 61, 0.18);
   box-shadow: inset 0 0 0 1px rgba(191, 91, 61, 0.45);
 }
+/* NDMI/NDRE carry the layer's one-line meaning instead of a verdict —
+   no thresholds are defined for them, so none are invented. */
+.plot-analysis__status-chip[data-tone="info"] {
+  color: var(--pt-night-soft);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  font-weight: 700;
+  line-height: 1.6;
+}
+/* True-colour overview: an image layer states what it is, never a number. */
+.plot-analysis__hero--image { align-items: center; gap: var(--pt-s-3); }
+.plot-analysis__hero-image-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  flex-shrink: 0;
+  color: var(--pt-night-health);
+  background: rgba(70, 165, 107, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(70, 165, 107, 0.4);
+}
+.plot-analysis__hero-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plot-analysis__hero-text strong { font-size: 14px; font-weight: 850; color: var(--pt-night-ink); }
+.plot-analysis__hero-text small { font-size: 10.5px; font-weight: 650; line-height: 1.7; color: var(--pt-night-soft); }
+.plot-analysis__hero-text small[dir="ltr"] { color: var(--pt-night-faint); font-variant-numeric: tabular-nums; }
 .plot-analysis__dist {
   display: flex;
   align-items: flex-end;
@@ -634,9 +660,20 @@
   background: var(--pt-ndvi);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
+/* Each layer's ONE fixed gradient — the same ramps `ndvi-layers.ts` paints. */
+.plot-analysis__layer-thumb--ndvi { background: var(--pt-ndvi); }
+.plot-analysis__layer-thumb--ndmi { background: linear-gradient(to right, rgb(173, 143, 100) 0%, rgb(146, 170, 128) 30%, rgb(96, 161, 150) 55%, rgb(52, 126, 152) 80%, rgb(23, 82, 124) 100%); }
+.plot-analysis__layer-thumb--ndre { background: linear-gradient(to right, rgb(199, 189, 108) 0%, rgb(168, 181, 94) 30%, rgb(118, 165, 79) 55%, rgb(61, 130, 70) 80%, rgb(19, 84, 49) 100%); }
+.plot-analysis__layer-thumb--truecolor {
+  background:
+    radial-gradient(60% 80% at 30% 30%, rgba(122, 168, 92, 0.95), rgba(59, 98, 52, 0.95) 70%),
+    radial-gradient(50% 60% at 75% 65%, rgba(186, 168, 118, 0.95), rgba(120, 104, 70, 0.9) 75%),
+    linear-gradient(135deg, #7ba75c, #4c7a3f);
+}
 .plot-analysis__layer-thumb--moisture { background: linear-gradient(to right, #27506e, var(--pt-water) 55%, #9cc8e8); }
 .plot-analysis__layer-thumb--thermal { background: linear-gradient(to right, #6e3d20, var(--pt-heat) 55%, #f2c493); }
 .plot-analysis__layer:disabled .plot-analysis__layer-thumb { filter: saturate(0.25) brightness(0.7); }
+.plot-analysis__layer-spin { flex-shrink: 0; color: var(--pt-night-health); }
 .plot-analysis__layer-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .plot-analysis__layer-text > span { font-size: 12.5px; font-weight: 800; }
 .plot-analysis__layer-text small { font-size: 9.5px; font-weight: 700; color: var(--pt-night-faint); }
@@ -683,6 +720,33 @@
 }
 .plot-analysis__hint { font-size: 10px; color: var(--pt-night-faint); line-height: 1.7; margin: 0; display: flex; align-items: center; gap: 5px; }
 .plot-analysis__note { font-size: 10px; font-weight: 650; color: var(--pt-night-soft); line-height: 1.7; margin: 0; }
+/* One-line layer caption under the legend (e.g. the 20 m resampling note). */
+.plot-analysis__caption {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: var(--pt-night-soft);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  border-radius: var(--pt-r-sm);
+  padding: 7px 10px;
+}
+/* Shimmer skeleton where the legend sits while a lazy layer loads. */
+.plot-analysis__legend--loading { gap: 8px; }
+.plot-analysis__legend-bar--skeleton {
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0.07) 30%, rgba(255, 255, 255, 0.22) 50%, rgba(255, 255, 255, 0.07) 70%);
+  background-size: 220% 100%;
+  animation: plot-analysis-skeleton-sweep 1.5s ease-in-out infinite;
+}
+.plot-analysis__legend-bar--skeleton::before,
+.plot-analysis__legend-bar--skeleton::after { display: none; }
+.plot-analysis__legend--loading .plot-analysis__legend-title { color: var(--pt-night-faint); }
+.plot-analysis__legend--loading .plot-analysis__hint { margin-top: 2px; }
+@keyframes plot-analysis-skeleton-sweep {
+  0% { background-position: 130% 0; }
+  100% { background-position: -90% 0; }
+}
 
 /* ---- Weather: icon tiles, big values, small units ---- */
 .plot-analysis__weather { display: flex; flex-direction: column; gap: 10px; }
@@ -731,49 +795,48 @@
 .plot-analysis__weather li strong > em { font-style: normal; font-size: 10px; font-weight: 700; color: var(--pt-night-faint); }
 .plot-analysis__weather small { font-size: 9px; color: var(--pt-night-faint); }
 
-/* ---- Details: vertical timeline ---- */
-.plot-analysis__timeline {
-  list-style: none;
+/* ---- Details: one row per fact — label on the right, value on the left ----
+   The list is a single card; every row keeps its label and value together on
+   one line, aligned to the two edges, with no large gaps between them. */
+.plot-analysis__details {
   margin: 0;
-  padding: 2px 0 2px 0;
-  padding-inline-start: 26px;
-  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  border-radius: var(--pt-r-md);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  overflow: hidden;
 }
-.plot-analysis__timeline::before {
-  content: "";
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  inset-inline-start: 9px;
-  width: 2px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, rgba(127, 208, 160, 0.55), rgba(255, 255, 255, 0.08));
-}
-.plot-analysis__timeline > div { position: relative; display: flex; flex-direction: column; gap: 2px; }
-.plot-analysis__timeline > div::before {
-  content: "";
-  position: absolute;
-  inset-inline-start: -21px;
-  top: 4px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--pt-night-raised);
-  box-shadow: 0 0 0 2px rgba(127, 208, 160, 0.55);
-}
-.plot-analysis__timeline dt {
+.plot-analysis__details > div {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--pt-night-faint);
+  justify-content: space-between;
+  gap: var(--pt-s-3);
+  padding: 11px var(--pt-s-3);
+  min-width: 0;
 }
-.plot-analysis__timeline dt svg { color: var(--pt-night-health); }
-.plot-analysis__timeline dd { margin: 0; font-size: 13px; font-weight: 800; color: var(--pt-night-ink); }
+/* Hairline between rows, never around the first/last. */
+.plot-analysis__details > div + div { border-top: 1px solid rgba(255, 255, 255, 0.07); }
+.plot-analysis__details dt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 750;
+  color: var(--pt-night-soft);
+}
+.plot-analysis__details dt svg { flex-shrink: 0; color: var(--pt-night-health); }
+.plot-analysis__details dd {
+  margin: 0;
+  min-width: 0;
+  text-align: end;
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--pt-night-ink);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
 
 /* ---- Tap probe sheet (light surface from the shared Sheet) ---- */
 .plot-view__probe { display: flex; flex-direction: column; gap: 13px; padding: 2px 2px var(--pt-s-2); }

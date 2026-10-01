@@ -4,33 +4,43 @@
  * The analysis screen's draggable bottom sheet: four tabs over the hero plot
  * map — نظرة عامة (key numbers + status), الخرائط (layer chips + legend),
  * الطقس (the NASA POWER day) and التفاصيل (sources, scene date, cloud,
- * resolution).
+ * resolution — one row per fact).
  *
- * Existing output only, re-arranged: the stats computed from measured pixels,
- * the legend (real min/max), the layer switcher, the failure card and the
- * POWER values all keep their wording and their gates. The weather tab stays
- * live even when the satellite step fails, because the weather upstream is
- * independent of the satellite one and a failed pass is no reason to hide
- * real meteorology.
+ * LAYERS
+ * ------
+ * NDVI rides on the main observation; NDMI, NDRE and the true-colour image
+ * are LAZY: their pixels are requested the first time the chip is selected
+ * (over the NDVI scene's own date) and cached in memory per plot + scene.
+ * The overview stats, the legend and the tap probe all follow the selected
+ * layer; masked pixels (dataMask 0) stay transparent and nothing is ever
+ * estimated. «الاحتياج المائي» and «الإجهاد الحراري» stay locked «قريباً».
  *
- * Every number this panel prints comes from `FieldObservation.raster` pixels
- * with a real measurement (`dataMask` ∧ inside the drawn boundary). A masked
- * pixel is never filled, averaged or guessed.
+ * The weather tab stays live even when the satellite step fails, because the
+ * weather upstream is independent of the satellite one and a failed pass is
+ * no reason to hide real meteorology.
+ *
+ * Every number this panel prints comes from measured pixels (`dataMask` ∧
+ * inside the drawn boundary). A masked pixel is never filled, averaged or
+ * guessed.
  */
 
 import { useEffect, useId, useMemo, useState } from "react";
 import { motion, useDragControls, useReducedMotion } from "framer-motion";
-import { Cloud, CloudOff, Droplets, Loader2, Lock, RotateCcw, Ruler, Satellite, ScanLine, ThermometerSun, Wind } from "lucide-react";
-import type { ClimateObservation, FieldDataReason, FieldObservation } from "@/lib/field-data/types";
+import { Cloud, CloudOff, Droplets, Image as ImageIcon, Loader2, Lock, RotateCcw, Ruler, Satellite, ScanLine, ThermometerSun, Wind } from "lucide-react";
+import type { ClimateObservation, FieldDataReason, FieldLayerId, FieldObservation, NdviRaster } from "@/lib/field-data/types";
 import type { FieldDataState } from "@/lib/field-data/useFieldData";
 import { ndviBand } from "@/lib/agronomy";
 import { DASHBOARD } from "@/lib/dashboard/copy";
+import type { LazyLayerState } from "@/lib/plot/layer-fetch";
 import {
+  layerCssColor,
+  layerLegendGradientCss,
   measuredPixelMask,
   ndviColorDomain,
   ndviCssColor,
   PLOT_LAYERS,
   rasterStats,
+  type PlotLayerId,
 } from "@/lib/plot/ndvi-layers";
 import type { Ring } from "@/lib/geo/polygon";
 import type { Lang } from "@/lib/wilayas";
@@ -42,6 +52,9 @@ const COPY = {
     soon: "قريبًا",
     loading: "جارٍ التحليل…",
     loadingHint: "يُقرأ أحدث لقطة Sentinel-2 لقطعتك",
+    layerLoading: "جارٍ تحميل الطبقة…",
+    layerLoadingHint: "تُقرأ الطبقة من نفس لقطة الـ NDVI، بنفس الحدود والدقة",
+    layerErrorTitle: "تعذّر تحميل الطبقة",
     errorTitle: "تعذّر تحليل القطعة",
     retry: "إعادة المحاولة",
     technical: "التفصيل التقني",
@@ -49,11 +62,17 @@ const COPY = {
     scene: "لقطة Sentinel-2",
     cloud: "غيوم المشهد",
     caption: "دقة القياس {res} م، والعرض منعَّم",
+    resolution: "دقة القياس",
+    resolutionValue: "Sentinel-2 · {res} م · عرض مُنعَّم",
+    activeLayer: "الطبقة المعروضة",
+    pixelsRow: "البكسلات المُقاسة",
+    imageNote: "طبقة صورة حقيقية من نفس اللقطة — لا تحمل قيماً رقمية.",
     mean: "متوسط القطعة",
     min: "الأدنى",
     max: "الأعلى",
     measured: "{n} بكسل مُقاس فعليًا · {source}",
     tapHint: "اضغط على أي نقطة داخل القطعة لعرض قراءة أقرب بكسل مُقاس.",
+    trueColorHint: "الصورة الحقيقية طبقاً لألوان اللقطة — البكسلات المحجوبة تبقى شفافة.",
     staleBadge: "قراءة سابقة",
     staleNote: "تُعرض قراءة {date} المخزنة؛ بيانات اليوم غير متاحة.",
     legacyTitle: "قراءة بالتنسيق القديم",
@@ -87,6 +106,9 @@ const COPY = {
     soon: "bientôt",
     loading: "Analyse en cours…",
     loadingHint: "lecture du dernier passage Sentinel-2",
+    layerLoading: "Chargement de la couche…",
+    layerLoadingHint: "La couche est lue sur le même passage que le NDVI, mêmes limites, même résolution",
+    layerErrorTitle: "Couche indisponible",
     errorTitle: "Analyse impossible",
     retry: "Réessayer",
     technical: "Détail technique",
@@ -94,11 +116,17 @@ const COPY = {
     scene: "Passage Sentinel-2",
     cloud: "Nuages du passage",
     caption: "Mesure à {res} m, affichage lissé",
+    resolution: "Résolution",
+    resolutionValue: "Sentinel-2 · {res} m · affichage lissé",
+    activeLayer: "Couche affichée",
+    pixelsRow: "Pixels mesurés",
+    imageNote: "Image vraie du même passage — aucune valeur numérique.",
     mean: "Moyenne parcelle",
     min: "Minimum",
     max: "Maximum",
     measured: "{n} pixels réellement mesurés · {source}",
     tapHint: "Touchez un point de la parcelle pour lire le pixel mesuré le plus proche.",
+    trueColorHint: "L'image vraie restitue les couleurs de la scène — les pixels masqués restent transparents.",
     staleBadge: "lecture antérieure",
     staleNote: "Lecture du {date} affichée ; les données d'aujourd'hui sont indisponibles.",
     legacyTitle: "Lecture à l'ancien format",
@@ -141,6 +169,9 @@ const UI = {
 const SNAP_HEIGHT = { peek: "27%", half: "45%", tall: "72%" } as const;
 const SNAP_ORDER = { peek: 0, half: 1, tall: 2 } as const;
 
+/** Index name printed next to a layer's values — unit-free, so the name is the unit. */
+const INDEX_NAME: Record<"ndvi" | "ndmi" | "ndre", string> = { ndvi: "NDVI", ndmi: "NDMI", ndre: "NDRE" };
+
 /** The NASA POWER day — icon tiles with semantic tones, big value, small unit. */
 function WeatherStrip({ climate, lang }: { climate: ClimateObservation; lang: Lang }) {
   const t = COPY[lang];
@@ -177,7 +208,7 @@ function WeatherStrip({ climate, lang }: { climate: ClimateObservation; lang: La
   );
 }
 
-/** Eased count-up for the hero NDVI value; static under reduced motion. */
+/** Eased count-up for the hero value; static under reduced motion. */
 function CountUp({ value, reduce, format }: { value: number; reduce: boolean; format: (value: number) => string }) {
   const [display, setDisplay] = useState(0);
   useEffect(() => {
@@ -205,6 +236,10 @@ export default function PlotAnalysisPanel({
   climate,
   ring,
   onRetry,
+  layerId,
+  onLayerSelect,
+  lazyLayers,
+  onLayerRetry,
 }: {
   lang: Lang;
   state: FieldDataState;
@@ -216,11 +251,16 @@ export default function PlotAnalysisPanel({
   climate: ClimateObservation | null;
   ring: Ring;
   onRetry: () => void;
+  /** The layer chip currently selected by the farmer. */
+  layerId: PlotLayerId;
+  onLayerSelect: (id: PlotLayerId) => void;
+  /** Fetch state of every lazy layer (NDMI / NDRE / true colour). */
+  lazyLayers: Partial<Record<FieldLayerId, LazyLayerState>>;
+  onLayerRetry: (id: FieldLayerId) => void;
 }) {
   const t = COPY[lang];
   const rtl = lang === "ar";
   const bands = DASHBOARD[lang].satellite.bands;
-  const [layerId, setLayerId] = useState<string>("ndvi");
   const layer = PLOT_LAYERS.find((l) => l.id === layerId) ?? PLOT_LAYERS[0];
   /** Active sheet tab: overview · maps · weather · details. */
   const [tab, setTab] = useState(0);
@@ -238,6 +278,30 @@ export default function PlotAnalysisPanel({
   const mask = useMemo(() => (raster ? measuredPixelMask(ring, raster) : null), [ring, raster]);
   const domain = useMemo(() => (raster ? ndviColorDomain(raster) : null), [raster]);
   const stats = useMemo(() => (raster && mask ? rasterStats(raster, mask) : null), [raster, mask]);
+
+  /* ---- the SELECTED layer's own pixels (overview, legend, probe follow) ---- */
+  const lazyState = layer.fetchId ? lazyLayers[layer.fetchId] : undefined;
+  const isIndexLayer = layer.id === "ndvi" || layer.id === "ndmi" || layer.id === "ndre";
+  /** The raster behind the selected layer: NDVI's own or a settled lazy one. */
+  const activeRaster: NdviRaster | null =
+    layer.id === "ndvi" ? raster : isIndexLayer && lazyState?.status === "ready" ? lazyState.raster : null;
+  const activeMask = useMemo(() => (activeRaster ? measuredPixelMask(ring, activeRaster) : null), [ring, activeRaster]);
+  const activeDomain = useMemo(() => (activeRaster ? ndviColorDomain(activeRaster) : null), [activeRaster]);
+  const activeStats = useMemo(
+    () => (activeRaster && activeMask ? rasterStats(activeRaster, activeMask) : null),
+    [activeRaster, activeMask],
+  );
+  /** True-colour layer: an image — measured pixels counted, never valued. */
+  const trueColorState = lazyLayers.truecolor;
+  const trueColorCount = useMemo(() => {
+    const tc = trueColorState?.status === "ready" ? trueColorState.raster : null;
+    if (!tc) return null;
+    const tcMask = measuredPixelMask(ring, tc);
+    let count = 0;
+    for (let i = 0; i < tcMask.length; i += 1) count += tcMask[i];
+    return count;
+  }, [ring, trueColorState]);
+
   /* Legacy records (cached before the raster path) still carry honest per-cell
      means; they keep their stats so the panel never goes blank on deploy day. */
   const cellValues = useMemo(
@@ -245,26 +309,29 @@ export default function PlotAnalysisPanel({
     [observation, raster],
   );
 
-  /* Distribution of the REAL measured pixels over the field's own domain —
-     24 bins, painted with the same ramp the raster layer uses. */
+  /* Distribution of the REAL measured pixels of the SELECTED index layer over
+     its own domain — 24 bins, painted with that layer's own ramp. */
   const distribution = useMemo(() => {
-    if (!raster || !mask || !domain || stats?.count === 0) return [];
+    if (!activeRaster || !activeMask || !activeDomain || activeStats?.count === 0) return [];
     const BINS = 24;
-    const [min, max] = domain;
+    const [min, max] = activeDomain;
     const counts = new Array<number>(BINS).fill(0);
-    for (let i = 0; i < raster.ndvi.length; i += 1) {
-      const value = raster.ndvi[i];
-      if (!mask[i] || value === null) continue;
+    for (let i = 0; i < activeRaster.ndvi.length; i += 1) {
+      const value = activeRaster.ndvi[i];
+      if (!activeMask[i] || value === null) continue;
       const ratio = max > min ? (value - min) / (max - min) : 0.5;
       counts[Math.min(BINS - 1, Math.max(0, Math.floor(ratio * BINS)))] += 1;
     }
     const peak = Math.max(...counts, 1);
-    return counts.map((count, index) => ({
-      share: count / peak,
-      color: ndviCssColor(min + ((index + 0.5) / BINS) * (max - min), domain),
-      count,
-    }));
-  }, [raster, mask, domain, stats]);
+    return counts.map((count, index) => {
+      const value = min + ((index + 0.5) / BINS) * (max - min);
+      return {
+        share: count / peak,
+        color: layer.id === "ndvi" ? ndviCssColor(value, activeDomain) : layerCssColor(layer.id, value, activeDomain),
+        count,
+      };
+    });
+  }, [activeRaster, activeMask, activeDomain, activeStats, layer.id]);
 
   const fmt = (value: number | null | undefined, decimals = 2) =>
     value === null || value === undefined
@@ -273,6 +340,34 @@ export default function PlotAnalysisPanel({
           minimumFractionDigits: decimals,
           maximumFractionDigits: decimals,
         }).format(value);
+
+  /* A lazy layer is selectable only when the NDVI scene can anchor it — the
+     layer must be read from that very scene, so no scene date, no layer. */
+  const canUseLazy = Boolean(raster && observation?.sceneDate);
+  const selectable = (entry: (typeof PLOT_LAYERS)[number]) =>
+    entry.mode === "primary" ? Boolean(raster) : entry.mode === "lazy" ? canUseLazy : false;
+
+  /** Per-layer failure card — the same reason copy, the layer's own retry. */
+  const layerErrorCard = (fetchId: FieldLayerId, failed: FieldDataReason | null, failedTechnical: string | null) => (
+    <div className="plot-analysis__error" role="alert">
+      <p>
+        <CloudOff size={17} aria-hidden />
+        <span>
+          <strong>{t.layerErrorTitle}</strong>
+          {failed ? t.reason[failed] : ""}
+        </span>
+      </p>
+      {failedTechnical && (
+        <code dir="ltr" className="plot-analysis__technical">
+          {failedTechnical}
+        </code>
+      )}
+      <button type="button" className="plot-analysis__retry" onClick={() => onLayerRetry(fetchId)}>
+        <RotateCcw size={15} aria-hidden />
+        {t.retry}
+      </button>
+    </div>
+  );
 
   /* A tab with little to say keeps the sheet at its peek snap, so the hero
      plot — not an empty half-screen — owns the stage. */
@@ -306,6 +401,14 @@ export default function PlotAnalysisPanel({
   const snapShown = SNAP_ORDER[snap] <= SNAP_ORDER[maxSnap] ? snap : maxSnap;
   const grow = () => setSnap(snapShown === "peek" ? (SNAP_ORDER[maxSnap] >= 1 ? "half" : "peek") : SNAP_ORDER[maxSnap] >= 2 ? "tall" : snapShown);
   const shrink = () => setSnap(snapShown === "tall" ? "half" : "peek");
+
+  /* Measured-pixel count of whatever layer is on screen (details row). */
+  const shownCount =
+    layer.id === "truecolor"
+      ? trueColorCount ?? 0
+      : isIndexLayer && activeStats
+        ? activeStats.count
+        : stats?.count ?? 0;
 
   return (
     <motion.section
@@ -419,52 +522,142 @@ export default function PlotAnalysisPanel({
 
                 {raster && domain && stats ? (
                   <>
-                    {stats.count > 0 ? (
-                      <>
-                        <div className="plot-analysis__hero plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
-                          <div className="plot-analysis__hero-num-wrap">
-                            <span className="plot-analysis__hero-label">{t.mean}</span>
-                            <strong dir="ltr" className="plot-analysis__hero-num">
-                              <CountUp value={stats.mean ?? 0} reduce={Boolean(reduce)} format={(value) => fmt(value)} />
-                            </strong>
-                            <span className="plot-analysis__hero-unit">NDVI</span>
+                    {/* ---------- NDVI — the existing overview, unchanged ---------- */}
+                    {layer.id === "ndvi" &&
+                      (stats.count > 0 ? (
+                        <>
+                          <div className="plot-analysis__hero plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+                            <div className="plot-analysis__hero-num-wrap">
+                              <span className="plot-analysis__hero-label">{t.mean}</span>
+                              <strong dir="ltr" className="plot-analysis__hero-num">
+                                <CountUp value={stats.mean ?? 0} reduce={Boolean(reduce)} format={(value) => fmt(value)} />
+                              </strong>
+                              <span className="plot-analysis__hero-unit">NDVI</span>
+                            </div>
+                            {/* Verbal status — the app's existing NDVI thresholds. */}
+                            <span className="plot-analysis__status-chip" data-tone={ndviBand(stats.mean ?? 0)}>
+                              {bands[ndviBand(stats.mean ?? 0)]}
+                            </span>
                           </div>
-                          {/* Verbal status — the app's existing NDVI thresholds. */}
-                          <span className="plot-analysis__status-chip" data-tone={ndviBand(stats.mean ?? 0)}>
-                            {bands[ndviBand(stats.mean ?? 0)]}
+                          {distribution.length > 0 && (
+                            <div className="plot-analysis__dist plot-rise" style={{ "--i": 1 } as React.CSSProperties} aria-hidden>
+                              {distribution.map((bin, index) => (
+                                <span
+                                  key={index}
+                                  style={{
+                                    height: `${Math.round(8 + bin.share * 92)}%`,
+                                    background: bin.count > 0 ? bin.color : "rgba(255,255,255,0.06)",
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          )}
+                          <dl className="plot-analysis__stats plot-rise" style={{ "--i": 2 } as React.CSSProperties} data-testid="plot-analysis-stats">
+                            <div>
+                              <dt>{t.mean}</dt>
+                              <dd dir="ltr">{fmt(stats.mean)}</dd>
+                            </div>
+                            <div>
+                              <dt>{t.min}</dt>
+                              <dd dir="ltr">{fmt(stats.min)}</dd>
+                            </div>
+                            <div>
+                              <dt>{t.max}</dt>
+                              <dd dir="ltr">{fmt(stats.max)}</dd>
+                            </div>
+                          </dl>
+                        </>
+                      ) : (
+                        <p className="plot-analysis__status">{t.noMeasured}</p>
+                      ))}
+
+                    {/* ---------- NDMI / NDRE — the selected index, on its own ramp ---------- */}
+                    {(layer.id === "ndmi" || layer.id === "ndre") &&
+                      (lazyState?.status === "ready" && activeStats && activeDomain ? (
+                        activeStats.count > 0 ? (
+                          <>
+                            <div className="plot-analysis__hero plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+                              <div className="plot-analysis__hero-num-wrap">
+                                <span className="plot-analysis__hero-label">{t.mean}</span>
+                                <strong dir="ltr" className="plot-analysis__hero-num">
+                                  <CountUp value={activeStats.mean ?? 0} reduce={Boolean(reduce)} format={(value) => fmt(value)} />
+                                </strong>
+                                <span className="plot-analysis__hero-unit">{INDEX_NAME[layer.id]}</span>
+                              </div>
+                              {/* No invented thresholds: the layer's own one-line meaning. */}
+                              <span className="plot-analysis__status-chip plot-analysis__status-chip--meaning" data-tone="info">
+                                {rtl ? layer.meaningAr : layer.meaningFr}
+                              </span>
+                            </div>
+                            {distribution.length > 0 && (
+                              <div className="plot-analysis__dist plot-rise" style={{ "--i": 1 } as React.CSSProperties} aria-hidden>
+                                {distribution.map((bin, index) => (
+                                  <span
+                                    key={index}
+                                    style={{
+                                      height: `${Math.round(8 + bin.share * 92)}%`,
+                                      background: bin.count > 0 ? bin.color : "rgba(255,255,255,0.06)",
+                                    }}
+                                  />
+                                ))}
+                              </div>
+                            )}
+                            <dl className="plot-analysis__stats plot-rise" style={{ "--i": 2 } as React.CSSProperties} data-testid="plot-analysis-stats">
+                              <div>
+                                <dt>{t.mean}</dt>
+                                <dd dir="ltr">{fmt(activeStats.mean)}</dd>
+                              </div>
+                              <div>
+                                <dt>{t.min}</dt>
+                                <dd dir="ltr">{fmt(activeStats.min)}</dd>
+                              </div>
+                              <div>
+                                <dt>{t.max}</dt>
+                                <dd dir="ltr">{fmt(activeStats.max)}</dd>
+                              </div>
+                            </dl>
+                          </>
+                        ) : (
+                          <p className="plot-analysis__status">{t.noMeasured}</p>
+                        )
+                      ) : lazyState?.status === "error" && lazyState.fetchId ? (
+                        layerErrorCard(lazyState.fetchId, lazyState.reason, lazyState.technical)
+                      ) : (
+                        <p className="plot-analysis__status" role="status">
+                          <Loader2 size={14} className="plot-view__spinner" aria-hidden />
+                          <span>
+                            {t.layerLoading}
+                            <small>{t.layerLoadingHint}</small>
+                          </span>
+                        </p>
+                      ))}
+
+                    {/* ---------- الصورة الحقيقية — an image layer carries no numbers ---------- */}
+                    {layer.id === "truecolor" &&
+                      (trueColorState?.status === "ready" ? (
+                        <div className="plot-analysis__hero plot-analysis__hero--image plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+                          <span className="plot-analysis__hero-image-icon" aria-hidden>
+                            <ImageIcon size={20} />
+                          </span>
+                          <span className="plot-analysis__hero-text">
+                            <strong>{rtl ? layer.labelAr : layer.labelFr}</strong>
+                            <small>{t.imageNote}</small>
+                            {trueColorCount !== null && (
+                              <small dir="ltr">{new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(trueColorCount)} px</small>
+                            )}
                           </span>
                         </div>
-                        {distribution.length > 0 && (
-                          <div className="plot-analysis__dist plot-rise" style={{ "--i": 1 } as React.CSSProperties} aria-hidden>
-                            {distribution.map((bin, index) => (
-                              <span
-                                key={index}
-                                style={{
-                                  height: `${Math.round(8 + bin.share * 92)}%`,
-                                  background: bin.count > 0 ? bin.color : "rgba(255,255,255,0.06)",
-                                }}
-                              />
-                            ))}
-                          </div>
-                        )}
-                        <dl className="plot-analysis__stats plot-rise" style={{ "--i": 2 } as React.CSSProperties} data-testid="plot-analysis-stats">
-                          <div>
-                            <dt>{t.mean}</dt>
-                            <dd dir="ltr">{fmt(stats.mean)}</dd>
-                          </div>
-                          <div>
-                            <dt>{t.min}</dt>
-                            <dd dir="ltr">{fmt(stats.min)}</dd>
-                          </div>
-                          <div>
-                            <dt>{t.max}</dt>
-                            <dd dir="ltr">{fmt(stats.max)}</dd>
-                          </div>
-                        </dl>
-                      </>
-                    ) : (
-                      <p className="plot-analysis__status">{t.noMeasured}</p>
-                    )}
+                      ) : trueColorState?.status === "error" && trueColorState.fetchId ? (
+                        layerErrorCard(trueColorState.fetchId, trueColorState.reason, trueColorState.technical)
+                      ) : (
+                        <p className="plot-analysis__status" role="status">
+                          <Loader2 size={14} className="plot-view__spinner" aria-hidden />
+                          <span>
+                            {t.layerLoading}
+                            <small>{t.layerLoadingHint}</small>
+                          </span>
+                        </p>
+                      ))}
                   </>
                 ) : (
                   <div className="plot-analysis__error plot-analysis__error--soft" role="note">
@@ -501,60 +694,82 @@ export default function PlotAnalysisPanel({
           </div>
         )}
 
-        {/* ---------- الخرائط: layer cards + slim legend ---------- */}
+        {/* ---------- الخرائط: layer cards + per-layer legend ---------- */}
         {tab === 1 && (
           <div className="plot-analysis__stack">
             {/* Layer cards — driven entirely by PLOT_LAYERS so adding a layer
                 is a config entry plus its data path. */}
             <div className="plot-analysis__layers" role="group" aria-label={t.layers}>
               {PLOT_LAYERS.map((entry) => {
-                const wired = entry.available && (entry.id !== "ndvi" || Boolean(raster));
+                const isSelectable = selectable(entry);
                 const active = entry.id === layer.id;
+                const entryLazy = entry.fetchId ? lazyLayers[entry.fetchId] : undefined;
+                const entryLoading = entryLazy?.status === "loading";
                 return (
                   <button
                     key={entry.id}
                     type="button"
-                    disabled={!wired}
+                    disabled={!isSelectable}
                     aria-pressed={active}
-                    data-testid={`plot-layer-${entry.id}`}
+                    aria-busy={entryLoading || undefined}
+                    data-testid={`plot-layer-chip-${entry.id}`}
                     className={`plot-analysis__layer${active ? " is-active" : ""}`}
-                    onClick={() => setLayerId(entry.id)}
+                    onClick={() => isSelectable && onLayerSelect(entry.id)}
                   >
-                    <span
-                      aria-hidden
-                      className={`plot-analysis__layer-thumb${
-                        entry.id === "moisture" ? " plot-analysis__layer-thumb--moisture" : entry.id === "thermal" ? " plot-analysis__layer-thumb--thermal" : ""
-                      }`}
-                    />
+                    <span aria-hidden className={`plot-analysis__layer-thumb plot-analysis__layer-thumb--${entry.id}`} />
                     <span className="plot-analysis__layer-text">
                       <span>{rtl ? entry.labelAr : entry.labelFr}</span>
-                      <small>{wired ? entry.unit : t.soon}</small>
+                      <small>{isSelectable ? rtl ? entry.meaningAr ?? entry.unit : entry.meaningFr ?? entry.unit : t.soon}</small>
                     </span>
-                    {!wired && (
+                    {!isSelectable && (
                       <span className="plot-analysis__layer-lock">
                         <Lock size={11} aria-hidden />
                         {t.soon}
                       </span>
                     )}
+                    {isSelectable && entryLoading && <Loader2 size={16} className="plot-view__spinner plot-analysis__layer-spin" aria-hidden />}
                   </button>
                 );
               })}
             </div>
 
-            {raster && domain && stats ? (
+            {/* The legend + caption follow the SELECTED layer. */}
+            {isIndexLayer && activeRaster && activeDomain && activeStats ? (
               <>
                 <div className="plot-analysis__legend plot-rise" style={{ "--i": 1 } as React.CSSProperties} dir="ltr">
                   <span className="plot-analysis__legend-title" dir={rtl ? "rtl" : "ltr"}>
                     {t.legend} · {layer.unit}
                   </span>
-                  <div className="plot-analysis__legend-bar" />
+                  <div
+                    className="plot-analysis__legend-bar"
+                    style={layer.id === "ndvi" ? undefined : { background: layerLegendGradientCss(layer.id) }}
+                  />
                   <div className="plot-analysis__legend-labels">
-                    <span>{fmt(domain[0])}</span>
-                    <span>{fmt(domain[1])}</span>
+                    <span>{fmt(activeDomain[0])}</span>
+                    <span>{fmt(activeDomain[1])}</span>
                   </div>
                 </div>
+                {(rtl ? layer.captionAr : layer.captionFr) && (
+                  <p className="plot-analysis__caption">{rtl ? layer.captionAr : layer.captionFr}</p>
+                )}
                 <p className="plot-analysis__hint">{t.tapHint}</p>
               </>
+            ) : layer.id === "truecolor" && trueColorState?.status === "ready" ? (
+              <>
+                <p className="plot-analysis__caption">{rtl ? layer.meaningAr : layer.meaningFr}</p>
+                <p className="plot-analysis__hint">{t.trueColorHint}</p>
+              </>
+            ) : layer.fetchId && lazyState?.status === "error" ? (
+              layerErrorCard(layer.fetchId, lazyState.reason, lazyState.technical)
+            ) : layer.fetchId ? (
+              /* Shimmer while the selected lazy layer is on its way. */
+              <div className="plot-analysis__legend plot-analysis__legend--loading plot-rise" style={{ "--i": 1 } as React.CSSProperties} role="status" aria-label={t.layerLoading}>
+                <span className="plot-analysis__legend-title">
+                  {t.layerLoading}
+                </span>
+                <div className="plot-analysis__legend-bar plot-analysis__legend-bar--skeleton" aria-hidden />
+                <p className="plot-analysis__hint">{t.layerLoadingHint}</p>
+              </div>
             ) : (
               <p className="plot-analysis__hint">{t.loadingHint}</p>
             )}
@@ -568,12 +783,12 @@ export default function PlotAnalysisPanel({
           </div>
         )}
 
-        {/* ---------- التفاصيل: vertical timeline of the real sources ---------- */}
+        {/* ---------- التفاصيل: each fact on ONE row — label right, value left ---------- */}
         {tab === 3 && (
           <div className="plot-analysis__stack">
             {observation && raster && domain && stats ? (
               <>
-                <dl className="plot-analysis__timeline plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+                <dl className="plot-analysis__details plot-rise" style={{ "--i": 0 } as React.CSSProperties} data-testid="plot-analysis-details">
                   {observation.sceneDate && (
                     <div>
                       <dt><Satellite size={12} aria-hidden />{t.scene}</dt>
@@ -587,17 +802,21 @@ export default function PlotAnalysisPanel({
                     </div>
                   )}
                   <div>
-                    <dt><Ruler size={12} aria-hidden />{t.caption.replace("{res}", String(raster.resolutionM))}</dt>
-                    <dd dir="ltr">Sentinel-2 · {raster.resolutionM} m</dd>
+                    <dt><Ruler size={12} aria-hidden />{t.resolution}</dt>
+                    <dd dir="ltr">{t.resolutionValue.replace("{res}", String(raster.resolutionM))}</dd>
                   </div>
                   <div>
-                    <dt><ScanLine size={12} aria-hidden />{t.layers}</dt>
-                    <dd>{layer.source}</dd>
+                    <dt><ScanLine size={12} aria-hidden />{t.activeLayer}</dt>
+                    <dd>{rtl ? layer.labelAr : layer.labelFr} · {layer.source}</dd>
+                  </div>
+                  <div>
+                    <dt><ScanLine size={12} aria-hidden />{t.pixelsRow}</dt>
+                    <dd dir="ltr">{new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(shownCount)}</dd>
                   </div>
                 </dl>
                 <p className="plot-analysis__note">
                   {t.measured
-                    .replace("{n}", new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(stats.count))
+                    .replace("{n}", new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(shownCount))
                     .replace("{source}", layer.source)}
                 </p>
               </>

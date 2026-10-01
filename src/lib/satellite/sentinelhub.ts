@@ -46,7 +46,7 @@
  */
 
 import { bboxOf, closeRing, pointInRing, type Bbox, type Ring } from "../geo/polygon";
-import type { NdviRaster } from "../field-data/types";
+import type { FieldLayerId, LayerRaster, NdviRaster } from "../field-data/types";
 import {
   getAccessToken,
   isConfigured,
@@ -110,6 +110,92 @@ function evaluatePixel(s) {
   return [valid ? (s.B08 - s.B04) / sum : NaN, valid];
 }`;
 
+/**
+ * One script shape for every normalised-difference index this app reads:
+ * `(hi − lo) / (hi + lo)`. Byte-for-byte the NDVI evalscript when called as
+ * `buildIndexEvalscript("B08", "B04", "NDVI")` — same SCL classes, same
+ * `dataMask` gate, same FLOAT32 two-band answer (index + valid), so every
+ * layer keeps the NDVI layer's masking semantics exactly.
+ */
+export function buildIndexEvalscript(hi: string, lo: string, name: string): string {
+  return `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["${lo}", "${hi}", "SCL", "dataMask"] }],
+    output: { bands: 2, sampleType: "FLOAT32" },
+    mosaicking: "SIMPLE"
+  };
+}
+function evaluatePixel(s) {
+  var bad = [1, 3, 8, 9, 10, 11];
+  var sum = s.${hi} + s.${lo};
+  var valid = s.dataMask === 1 && bad.indexOf(s.SCL) === -1 && sum > 0 ? 1 : 0;
+  // Band 1: ${name} (NaN where unusable). Band 2: 1 when the pixel is usable.
+  return [valid ? (s.${hi} - s.${lo}) / sum : NaN, valid];
+}`;
+}
+
+/**
+ * NDMI = (B8A − B11) / (B8A + B11) — canopy water content. B8A and B11 are
+ * native 20 m bands; the Process request resamples them onto the same 10 m
+ * grid the NDVI layer uses (see `SATELLITE_LAYERS`).
+ */
+export const NDMI_EVALSCRIPT = buildIndexEvalscript("B8A", "B11", "NDMI");
+
+/**
+ * NDRE = (B8A − B05) / (B8A + B05) — red-edge chlorophyll. B05 is a native
+ * 20 m band, resampled onto the NDVI layer's 10 m grid like B11 above.
+ */
+export const NDRE_EVALSCRIPT = buildIndexEvalscript("B8A", "B05", "NDRE");
+
+/**
+ * True colour (B04 red, B03 green, B02 blue) — an image, not an index. Same
+ * `dataMask` ∧ SCL gate as NDVI; band 4 is the valid flag, bands 1-3 are the
+ * reflectances (NaN where unusable), so masked pixels stay transparent.
+ */
+export const TRUE_COLOR_EVALSCRIPT = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B03", "B02", "SCL", "dataMask"] }],
+    output: { bands: 4, sampleType: "FLOAT32" },
+    mosaicking: "SIMPLE"
+  };
+}
+function evaluatePixel(s) {
+  var bad = [1, 3, 8, 9, 10, 11];
+  var sum = s.B02 + s.B03 + s.B04;
+  var valid = s.dataMask === 1 && bad.indexOf(s.SCL) === -1 && sum > 0 ? 1 : 0;
+  // Bands 1-3: true colour R,G,B (NaN where unusable). Band 4: 1 when usable.
+  return [valid ? s.B04 : NaN, valid ? s.B03 : NaN, valid ? s.B02 : NaN, valid];
+}`;
+
+/** The lazily-fetchable layers and the exact script each one sends. */
+export const SATELLITE_LAYERS: Readonly<
+  Record<
+    FieldLayerId,
+    {
+      evalscript: string;
+      /** The evalscript's input bands — pinned by tests. */
+      bands: readonly string[];
+      /**
+       * 20 m bands resampled onto the 10 m output grid: bilinear
+       * interpolation instead of the provider's NEAREST default. Only set
+       * where a layer actually mixes in a 20 m band — the NDVI request body
+       * stays byte-for-byte what it always was.
+       */
+      upsampling?: "NEAREST" | "BILINEAR" | "BICUBIC";
+      /** Index of the valid (dataMask) band in the FLOAT32 answer. */
+      validBand: number;
+    }
+  >
+> = {
+  // Band order mirrors each evalscript's input array (the lo band first, then
+  // hi — the same shape NDVI's own `["B04", "B08", …]` uses).
+  ndmi: { evalscript: NDMI_EVALSCRIPT, bands: ["B11", "B8A", "SCL", "dataMask"], upsampling: "BILINEAR", validBand: 1 },
+  ndre: { evalscript: NDRE_EVALSCRIPT, bands: ["B05", "B8A", "SCL", "dataMask"], upsampling: "BILINEAR", validBand: 1 },
+  truecolor: { evalscript: TRUE_COLOR_EVALSCRIPT, bands: ["B04", "B03", "B02", "SCL", "dataMask"], validBand: 3 },
+};
+
 /** Pixel grid that gives ≈ `PIXEL_SIZE_M` pixels over the bbox. */
 export function rasterSize(bbox: Bbox): { width: number; height: number } {
   return rasterSizeFor(bbox, PIXEL_SIZE_M);
@@ -164,10 +250,21 @@ export interface ProcessRequestOptions {
    * the transport budget.
    */
   resolutionM?: number;
+  /**
+   * The evalscript to run. Defaults to the NDVI script, which keeps every
+   * existing request byte-for-byte unchanged; the lazy layers pass their own
+   * script from `SATELLITE_LAYERS` over the identical request shape.
+   */
+  evalscript?: string;
+  /**
+   * Provider-side interpolation used when a requested band is coarser than the
+   * output grid (e.g. the 20 m B11/B05 at 10 m). Omitted on the NDVI path.
+   */
+  upsampling?: "NEAREST" | "BILINEAR" | "BICUBIC";
 }
 
 export function buildProcessRequest(options: ProcessRequestOptions): Record<string, unknown> {
-  const { bbox, ring, from, to, order, maxCloudCoverage, resolutionM } = options;
+  const { bbox, ring, from, to, order, maxCloudCoverage, resolutionM, evalscript, upsampling } = options;
   const { width, height } = rasterSizeFor(bbox, resolutionM ?? PIXEL_SIZE_M);
   return {
     input: {
@@ -184,6 +281,7 @@ export function buildProcessRequest(options: ProcessRequestOptions): Record<stri
             mosaickingOrder: order,
             ...(maxCloudCoverage !== undefined ? { maxCloudCoverage } : {}),
           },
+          ...(upsampling !== undefined ? { processing: { upsampling } } : {}),
         },
       ],
     },
@@ -192,7 +290,7 @@ export function buildProcessRequest(options: ProcessRequestOptions): Record<stri
       height,
       responses: [{ identifier: "default", format: { type: "image/tiff" } }],
     },
-    evalscript: EVALSCRIPT,
+    evalscript: evalscript ?? EVALSCRIPT,
   };
 }
 
@@ -307,9 +405,13 @@ export function tiffToNdviRaster(tiff: DecodedTiff, bbox: Bbox, resolutionM: num
   };
 }
 
-/** Pixels of a decoded raster the provider actually measured (its band 2). */
-function measuredPixels(tiff: DecodedTiff): number {
-  const [, validBand] = tiff.bands;
+/**
+ * Pixels of a decoded raster the provider actually measured. `at` is the
+ * index of the valid band: band 2 for every index script, band 4 for the
+ * true-colour script.
+ */
+function measuredPixels(tiff: DecodedTiff, at = 1): number {
+  const validBand = tiff.bands[at];
   if (!validBand) return tiff.width * tiff.height;
   let count = 0;
   for (let i = 0; i < validBand.length; i += 1) if (validBand[i] >= 0.5) count += 1;
@@ -340,6 +442,12 @@ export interface SceneScore<T> {
   ok: boolean;
   /** True when trying an older pass cannot improve the answer. */
   goodEnough: boolean;
+  /**
+   * True unless the decoded raster is structurally unusable (wrong band count,
+   * etc.) and must NEVER be adopted as the answer. Defaults to true, so every
+   * existing score keeps its current behaviour byte for byte.
+   */
+  eligible?: boolean;
   /** Whatever the caller wants back for the winning scene. */
   value: T;
 }
@@ -358,6 +466,10 @@ interface SceneFetchOptions<T> {
   to: string;
   /** Metres per pixel of the Process request (default 10 m). */
   resolutionM?: number;
+  /** The evalscript to run; defaults to the NDVI script. */
+  evalscript?: string;
+  /** Provider-side interpolation for bands coarser than the output grid. */
+  upsampling?: "NEAREST" | "BILINEAR" | "BICUBIC";
   /** Evaluates one decoded scene; called once per attempt, newest first. */
   score: (tiff: DecodedTiff) => SceneScore<T>;
 }
@@ -462,6 +574,8 @@ async function fetchSceneRaster<T>(
         to: attempt.to,
         order: attempt.order,
         ...(options.resolutionM !== undefined ? { resolutionM: options.resolutionM } : {}),
+        ...(options.evalscript !== undefined ? { evalscript: options.evalscript } : {}),
+        ...(options.upsampling !== undefined ? { upsampling: options.upsampling } : {}),
         ...(attempt.date === null ? { maxCloudCoverage: MAX_SCENE_CLOUD_PCT } : {}),
       });
       let res;
@@ -529,7 +643,9 @@ async function fetchSceneRaster<T>(
         break;
       }
 
-      if (!best || score.quality > best.score.quality) best = { tiff, attempt, score };
+      if (score.eligible !== false && (!best || score.quality > best.score.quality)) {
+        best = { tiff, attempt, score };
+      }
       // Good enough: half of what the caller wanted is measured — an older
       // pass is unlikely to beat it.
       if (score.goodEnough) break;
@@ -723,6 +839,176 @@ export async function fetchNdviRaster(
     reason: validPixels > 0 ? undefined : "noScenes",
     raster,
     sceneDate: outcome.sceneDate,
+    cloudCoverPct: outcome.cloudCoverPct,
+    validPixels,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Lazy layers — NDMI, NDRE, true colour                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The true-colour answer re-expressed for transport: quantised sRGB per
+ * pixel, row-major, `null` wherever `dataMask` is 0 — the exact masking rule
+ * of the index layers. Reflectances are clamped into [0, 1] before the 0-255
+ * quantisation (a display clamp, never an invented value); `ndvi` stays all
+ * `null` because an image layer carries no index values.
+ */
+export function tiffToTrueColorRaster(tiff: DecodedTiff, bbox: Bbox, resolutionM: number, sceneDate: string): LayerRaster {
+  const [redBand, greenBand, blueBand, validBand] = tiff.bands;
+  const count = tiff.width * tiff.height;
+  const rgb: ([number, number, number] | null)[] = new Array(count).fill(null);
+  const ndvi: (number | null)[] = new Array(count).fill(null);
+  const dataMask: number[] = new Array(count).fill(0);
+  const channel = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+  for (let i = 0; i < count; i += 1) {
+    const measured =
+      (validBand ? validBand[i] >= 0.5 : true) &&
+      Number.isFinite(redBand[i]) &&
+      Number.isFinite(greenBand[i]) &&
+      Number.isFinite(blueBand[i]);
+    if (!measured) continue;
+    dataMask[i] = 1;
+    rgb[i] = [channel(redBand[i]), channel(greenBand[i]), channel(blueBand[i])];
+  }
+  return {
+    layer: "truecolor",
+    sceneDate,
+    bbox: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north },
+    width: tiff.width,
+    height: tiff.height,
+    resolutionM,
+    ndvi,
+    dataMask,
+    rgb,
+  };
+}
+
+export interface LayerRasterOptions {
+  layer: FieldLayerId;
+  /**
+   * `YYYY-MM-DD` — the NDVI scene's own date. The request window is that ONE
+   * day, so the layer is read from the same scene that painted the NDVI.
+   */
+  sceneDate: string;
+  bbox: Bbox;
+  /** The plot polygon the raster is clipped to. */
+  ring: Ring;
+}
+
+export interface LayerRasterResult {
+  ok: boolean;
+  reason?: NdviFailure;
+  layer: FieldLayerId;
+  /**
+   * Index layers (NDMI/NDRE) reuse the NDVI transport shape — `ndvi` carries
+   * the layer's own values. True colour: `ndvi` all `null`, colours in `rgb`.
+   */
+  raster: LayerRaster | null;
+  /** `YYYY-MM-DD` of the scene that produced the raster. */
+  sceneDate: string | null;
+  /** Scene-level cloud cover (%) when the catalog reported it. */
+  cloudCoverPct: number | null;
+  validPixels: number;
+  status?: number;
+}
+
+/**
+ * One lazy layer over the SAME polygon, grid and scene as the plot's NDVI:
+ * the shared token → catalog → Process flow with the layer's own evalscript,
+ * pinned to the NDVI scene's date (`from = to = sceneDate`, `leastCC` — the
+ * same tile pick NDVI's own per-day attempt made). Resolution is recomputed
+ * from the bbox exactly as the NDVI path does, so both rasters share one
+ * pixel grid and every layer pixel lands on the NDVI pixel under it.
+ * Never throws; failures resolve to a typed result plus trace steps.
+ */
+export async function fetchSatelliteLayer(
+  config: OpeneoConfig,
+  options: LayerRasterOptions,
+  fetchImpl?: OpeneoFetch,
+  trace?: SatelliteTrace,
+): Promise<LayerRasterResult> {
+  const empty: LayerRasterResult = {
+    ok: false,
+    layer: options.layer,
+    raster: null,
+    sceneDate: null,
+    cloudCoverPct: null,
+    validPixels: 0,
+  };
+  if (!isConfigured(config)) return { ...empty, reason: "notConfigured" };
+  const doFetch = fetchImpl ?? (typeof fetch === "function" ? (fetch as unknown as OpeneoFetch) : undefined);
+  if (!doFetch) return { ...empty, reason: "network" };
+  const box = options.bbox ?? bboxOf(options.ring);
+  // Local pre-flight; NOT a provider answer, so it is never "malformed".
+  if (!box || options.ring.length < 3 || !/^\d{4}-\d{2}-\d{2}$/.test(options.sceneDate)) {
+    return { ...empty, reason: "invalid-input" };
+  }
+  const spec = SATELLITE_LAYERS[options.layer];
+  const resolutionM = rasterResolutionM(box);
+
+  // Same denominator the NDVI path uses to judge a scene (pixel centres of
+  // the drawn boundary on this grid).
+  const { width, height } = rasterSizeFor(box, resolutionM);
+  let polygonPixels = 0;
+  for (let y = 0; y < height; y += 1) {
+    const lat = box.north - ((y + 0.5) / height) * (box.north - box.south);
+    for (let x = 0; x < width; x += 1) {
+      const lon = box.west + ((x + 0.5) / width) * (box.east - box.west);
+      if (pointInRing(options.ring, [lon, lat])) polygonPixels += 1;
+    }
+  }
+
+  const outcome = await fetchSceneRaster(
+    config,
+    {
+      bbox: box,
+      ring: options.ring,
+      from: options.sceneDate,
+      to: options.sceneDate,
+      resolutionM,
+      evalscript: spec.evalscript,
+      ...(spec.upsampling !== undefined ? { upsampling: spec.upsampling } : {}),
+      score: (tiff) => {
+        if (tiff.bands.length <= spec.validBand) {
+          // Wrong shape for this layer: never adopt it, never invent pixels.
+          return { quality: -1, ok: false, goodEnough: true, eligible: false, value: null };
+        }
+        const valid = measuredPixels(tiff, spec.validBand);
+        return {
+          quality: valid,
+          ok: valid > 0,
+          goodEnough: valid > 0 && (polygonPixels === 0 || valid >= polygonPixels / 2),
+          value: null,
+        };
+      },
+    },
+    doFetch,
+    trace,
+  );
+  if (!outcome.ok) {
+    return { ...empty, reason: outcome.reason, ...(outcome.status !== undefined ? { status: outcome.status } : {}) };
+  }
+  // The window was the scene's own day: even a catalog that failed (date
+  // unknown to the flow) can only have served that same date.
+  const sceneDate = outcome.sceneDate ?? options.sceneDate;
+  const raster =
+    options.layer === "truecolor"
+      ? tiffToTrueColorRaster(outcome.tiff, box, resolutionM, sceneDate)
+      : { ...tiffToNdviRaster(outcome.tiff, box, resolutionM), layer: options.layer, sceneDate };
+  let validPixels = 0;
+  for (const measured of raster.dataMask) validPixels += measured;
+  if (validPixels === 0) {
+    // Nothing usable on this scene: report noScenes and NO raster — a
+    // fully-masked layer is a missing measurement, not an empty image.
+    return { ...empty, reason: "noScenes", sceneDate, cloudCoverPct: outcome.cloudCoverPct };
+  }
+  return {
+    ok: true,
+    layer: options.layer,
+    raster,
+    sceneDate,
     cloudCoverPct: outcome.cloudCoverPct,
     validPixels,
   };
