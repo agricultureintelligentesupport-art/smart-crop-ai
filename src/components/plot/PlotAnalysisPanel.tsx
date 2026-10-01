@@ -18,15 +18,17 @@
  * pixel is never filled, averaged or guessed.
  */
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { motion, useDragControls, useReducedMotion } from "framer-motion";
-import { Cloud, CloudOff, Droplets, Loader2, RotateCcw, Ruler, Satellite, ScanLine, ThermometerSun, Wind } from "lucide-react";
+import { Cloud, CloudOff, Droplets, Loader2, Lock, RotateCcw, Ruler, Satellite, ScanLine, ThermometerSun, Wind } from "lucide-react";
 import type { ClimateObservation, FieldDataReason, FieldObservation } from "@/lib/field-data/types";
 import type { FieldDataState } from "@/lib/field-data/useFieldData";
+import { ndviBand } from "@/lib/agronomy";
+import { DASHBOARD } from "@/lib/dashboard/copy";
 import {
   measuredPixelMask,
   ndviColorDomain,
-  ndviLegendGradientCss,
+  ndviCssColor,
   PLOT_LAYERS,
   rasterStats,
 } from "@/lib/plot/ndvi-layers";
@@ -118,7 +120,7 @@ const COPY = {
       timeout: "Le service satellite a mis trop de temps à répondre. Aucun chiffre non mesuré n'est affiché.",
       http: "Le service satellite a renvoyé une erreur. Aucun chiffre non mesuré n'est affiché.",
       quota: "Le quota de traitement mensuel du Copernicus Data Space est épuisé. Aucun chiffre non mesuré n'est affiché.",
-      noScenes: "Aucun passage Sentinel-2 sans nuages au-dessus de cette parcelle depuis trois semaines. Aucun chiffre non mesuré n'est affiché.",
+      noScenes: "Aucun passage Sentinel-2 sans nuage au-dessus de cette parcelle depuis trois semaines. Aucun chiffre non mesuré n'est affiché.",
       malformed: "Le service satellite a renvoyé une réponse illisible. Aucun chiffre non mesuré n'est affiché.",
       "invalid-input": "Le contour de cette parcelle n'a pas pu être analysé : un contrôle local a échoué avant tout envoi au satellite.",
       tooSmall: "Cette parcelle est trop petite pour une mesure fiable. Tracez au moins 0,05 ha.",
@@ -135,35 +137,62 @@ const UI = {
   noTech: "لا توجد تفاصيل تقنية بعد.",
 };
 
-/** The NASA POWER day, compact small cards — shown even when the satellite step failed. */
+/** Sheet snap heights as a share of the analysis stage (hero keeps the rest). */
+const SNAP_HEIGHT = { peek: "27%", half: "45%", tall: "72%" } as const;
+const SNAP_ORDER = { peek: 0, half: 1, tall: 2 } as const;
+
+/** The NASA POWER day — icon tiles with semantic tones, big value, small unit. */
 function WeatherStrip({ climate, lang }: { climate: ClimateObservation; lang: Lang }) {
   const t = COPY[lang];
   const rtl = lang === "ar";
-  const fmt = (value: number | null, decimals = 1, unit = "") =>
+  const fmt = (value: number | null, decimals = 1) =>
     value === null
       ? "—"
-      : `${new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(value)}${unit ? ` ${unit}` : ""}`;
+      : new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).format(value);
   const items = [
-    { icon: <Droplets size={13} aria-hidden />, label: t.rain, value: fmt(climate.rainMm, 1, t.mm) },
-    { icon: <ThermometerSun size={13} aria-hidden />, label: t.tmax, value: fmt(climate.tempMaxC, 1, "°C") },
-    { icon: <ThermometerSun size={13} aria-hidden />, label: t.tmin, value: fmt(climate.tempMinC, 1, "°C") },
-    { icon: <Wind size={13} aria-hidden />, label: t.et0, value: fmt(climate.et0, 1, t.mm) },
+    { tone: "water", icon: <Droplets size={15} aria-hidden />, label: t.rain, value: fmt(climate.rainMm), unit: t.mm },
+    { tone: "heat", icon: <ThermometerSun size={15} aria-hidden />, label: t.tmax, value: fmt(climate.tempMaxC), unit: "°C" },
+    { tone: "cool", icon: <ThermometerSun size={15} aria-hidden />, label: t.tmin, value: fmt(climate.tempMinC), unit: "°C" },
+    { tone: "caution", icon: <Wind size={15} aria-hidden />, label: t.et0, value: fmt(climate.et0), unit: t.mm },
   ];
   return (
     <div className="plot-analysis__weather">
       <span className="plot-analysis__weather-title">{t.weatherTitle}</span>
       <ul>
         {items.map((item) => (
-          <li key={item.label}>
-            {item.icon}
-            <span>{item.label}</span>
-            <strong dir="ltr">{item.value}</strong>
+          <li key={item.label} data-tone={item.tone}>
+            <span className="plot-analysis__weather-tile-head">
+              <span className="plot-analysis__weather-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </span>
+            <strong dir="ltr">
+            {item.value}
+              <em>{item.unit}</em>
+            </strong>
           </li>
         ))}
       </ul>
       <small>{t.weatherNote}</small>
     </div>
   );
+}
+
+/** Eased count-up for the hero NDVI value; static under reduced motion. */
+function CountUp({ value, reduce, format }: { value: number; reduce: boolean; format: (value: number) => string }) {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    if (reduce) return;
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / 900);
+      setDisplay(value * (1 - Math.pow(1 - t, 3)));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [value, reduce]);
+  return <>{format(reduce ? value : display)}</>;
 }
 
 export default function PlotAnalysisPanel({
@@ -190,12 +219,13 @@ export default function PlotAnalysisPanel({
 }) {
   const t = COPY[lang];
   const rtl = lang === "ar";
+  const bands = DASHBOARD[lang].satellite.bands;
   const [layerId, setLayerId] = useState<string>("ndvi");
   const layer = PLOT_LAYERS.find((l) => l.id === layerId) ?? PLOT_LAYERS[0];
   /** Active sheet tab: overview · maps · weather · details. */
   const [tab, setTab] = useState(0);
   /** Draggable sheet size; the grabber drags up/down to move between these. */
-  const [snap, setSnap] = useState<"peek" | "half" | "tall">("half");
+  const [snap, setSnap] = useState<keyof typeof SNAP_HEIGHT>("half");
   const controls = useDragControls();
   const reduce = useReducedMotion();
   const baseId = useId();
@@ -215,6 +245,27 @@ export default function PlotAnalysisPanel({
     [observation, raster],
   );
 
+  /* Distribution of the REAL measured pixels over the field's own domain —
+     24 bins, painted with the same ramp the raster layer uses. */
+  const distribution = useMemo(() => {
+    if (!raster || !mask || !domain || stats?.count === 0) return [];
+    const BINS = 24;
+    const [min, max] = domain;
+    const counts = new Array<number>(BINS).fill(0);
+    for (let i = 0; i < raster.ndvi.length; i += 1) {
+      const value = raster.ndvi[i];
+      if (!mask[i] || value === null) continue;
+      const ratio = max > min ? (value - min) / (max - min) : 0.5;
+      counts[Math.min(BINS - 1, Math.max(0, Math.floor(ratio * BINS)))] += 1;
+    }
+    const peak = Math.max(...counts, 1);
+    return counts.map((count, index) => ({
+      share: count / peak,
+      color: ndviCssColor(min + ((index + 0.5) / BINS) * (max - min), domain),
+      count,
+    }));
+  }, [raster, mask, domain, stats]);
+
   const fmt = (value: number | null | undefined, decimals = 2) =>
     value === null || value === undefined
       ? "—"
@@ -223,13 +274,43 @@ export default function PlotAnalysisPanel({
           maximumFractionDigits: decimals,
         }).format(value);
 
-  const grow = () => setSnap((current) => (current === "peek" ? "half" : "tall"));
-  const shrink = () => setSnap((current) => (current === "tall" ? "half" : "peek"));
+  /* A tab with little to say keeps the sheet at its peek snap, so the hero
+     plot — not an empty half-screen — owns the stage. */
+  const substantial =
+    tab === 0
+      ? state === "ready" && Boolean(observation) && (raster ? Boolean(stats && stats.count > 0) : cellValues.length > 0)
+      : tab === 1
+        ? Boolean(raster && domain && stats)
+        : tab === 2
+          ? Boolean(climate)
+          : Boolean(observation && raster && domain && stats);
+  /* The sheet never grows past what its tab actually has to say: a thin tab
+     stays at peek, a filled one reaches half, and only the data-long tabs
+     (layers + legend, the timeline) reach tall. No empty half-screens. */
+  const maxSnap: keyof typeof SNAP_HEIGHT =
+    tab === 0
+      ? substantial
+        ? "half"
+        : "peek"
+      : tab === 1
+        ? Boolean(raster && domain && stats)
+          ? "tall"
+          : "peek"
+        : tab === 2
+          ? Boolean(climate)
+            ? "half"
+            : "peek"
+          : Boolean(observation && raster && domain && stats)
+            ? "tall"
+            : "peek";
+  const snapShown = SNAP_ORDER[snap] <= SNAP_ORDER[maxSnap] ? snap : maxSnap;
+  const grow = () => setSnap(snapShown === "peek" ? (SNAP_ORDER[maxSnap] >= 1 ? "half" : "peek") : SNAP_ORDER[maxSnap] >= 2 ? "tall" : snapShown);
+  const shrink = () => setSnap(snapShown === "tall" ? "half" : "peek");
 
   return (
     <motion.section
       className="plot-analysis"
-      data-snap={snap}
+      data-snap={snapShown}
       data-testid="plot-analysis"
       aria-label={t.title}
       drag="y"
@@ -237,6 +318,7 @@ export default function PlotAnalysisPanel({
       dragControls={controls}
       dragConstraints={{ top: 0, bottom: 0 }}
       dragElastic={{ top: 0.04, bottom: 0.04 }}
+      animate={{ height: SNAP_HEIGHT[snapShown] }}
       transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 380, damping: 40, mass: 0.9 }}
       onDragEnd={(_, info) => {
         if (info.offset.y < -40 || info.velocity.y < -450) grow();
@@ -249,28 +331,42 @@ export default function PlotAnalysisPanel({
           type="button"
           className="plot-analysis__grabber"
           aria-label={UI.sheetSize}
-          onClick={() => setSnap((current) => (current === "peek" ? "half" : current === "half" ? "tall" : "peek"))}
+          onClick={() => setSnap(snapShown === "peek" ? "half" : snapShown === "half" ? "tall" : "peek")}
         >
           <span aria-hidden />
         </button>
       </div>
 
       <div className="plot-analysis__tabs" role="tablist" aria-label={UI.tabsLabel}>
-        {UI.tabs.map((label, index) => (
-          <button
-            key={label}
-            type="button"
-            role="tab"
-            id={tabId(index)}
-            aria-selected={tab === index}
-            aria-controls={panelId}
-            tabIndex={tab === index ? 0 : -1}
-            className={`plot-analysis__tab${tab === index ? " is-active" : ""}`}
-            onClick={() => setTab(index)}
-          >
-            {label}
-          </button>
-        ))}
+        {UI.tabs.map((label, index) => {
+          const active = tab === index;
+          return (
+            <button
+              key={label}
+              type="button"
+              role="tab"
+              id={tabId(index)}
+              aria-selected={active}
+              aria-controls={panelId}
+              tabIndex={active ? 0 : -1}
+              className={`plot-analysis__tab${active ? " is-active" : ""}`}
+              onClick={() => { setTab(index); setSnap("half"); }}
+            >
+              {active &&
+                (reduce ? (
+                  <span className="plot-analysis__tab-glow" aria-hidden />
+                ) : (
+                  <motion.span
+                    layoutId="plot-analysis-tab-glow"
+                    className="plot-analysis__tab-glow"
+                    aria-hidden
+                    transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                  />
+                ))}
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       <div
@@ -280,10 +376,10 @@ export default function PlotAnalysisPanel({
         aria-labelledby={tabId(tab)}
         tabIndex={0}
       >
-        {/* ---------- نظرة عامة: key numbers + status summary ---------- */}
+        {/* ---------- نظرة عامة: hero number + verbal status + distribution ---------- */}
         {tab === 0 && (
           <div className="plot-analysis__stack">
-            {stale && observation && <span className="plot-analysis__stale">{t.staleBadge}</span>}
+            {stale && observation && <span className="plot-analysis__stale plot-rise" style={{ "--i": 0 } as React.CSSProperties}>{t.staleBadge}</span>}
 
             {state === "loading" && (
               <p className="plot-analysis__status" role="status">
@@ -324,20 +420,48 @@ export default function PlotAnalysisPanel({
                 {raster && domain && stats ? (
                   <>
                     {stats.count > 0 ? (
-                      <dl className="plot-analysis__stats" data-testid="plot-analysis-stats">
-                        <div>
-                          <dt>{t.mean}</dt>
-                          <dd dir="ltr">{fmt(stats.mean)}</dd>
+                      <>
+                        <div className="plot-analysis__hero plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+                          <div className="plot-analysis__hero-num-wrap">
+                            <span className="plot-analysis__hero-label">{t.mean}</span>
+                            <strong dir="ltr" className="plot-analysis__hero-num">
+                              <CountUp value={stats.mean ?? 0} reduce={Boolean(reduce)} format={(value) => fmt(value)} />
+                            </strong>
+                            <span className="plot-analysis__hero-unit">NDVI</span>
+                          </div>
+                          {/* Verbal status — the app's existing NDVI thresholds. */}
+                          <span className="plot-analysis__status-chip" data-tone={ndviBand(stats.mean ?? 0)}>
+                            {bands[ndviBand(stats.mean ?? 0)]}
+                          </span>
                         </div>
-                        <div>
-                          <dt>{t.min}</dt>
-                          <dd dir="ltr">{fmt(stats.min)}</dd>
-                        </div>
-                        <div>
-                          <dt>{t.max}</dt>
-                          <dd dir="ltr">{fmt(stats.max)}</dd>
-                        </div>
-                      </dl>
+                        {distribution.length > 0 && (
+                          <div className="plot-analysis__dist plot-rise" style={{ "--i": 1 } as React.CSSProperties} aria-hidden>
+                            {distribution.map((bin, index) => (
+                              <span
+                                key={index}
+                                style={{
+                                  height: `${Math.round(8 + bin.share * 92)}%`,
+                                  background: bin.count > 0 ? bin.color : "rgba(255,255,255,0.06)",
+                                }}
+                              />
+                            ))}
+                          </div>
+                        )}
+                        <dl className="plot-analysis__stats plot-rise" style={{ "--i": 2 } as React.CSSProperties} data-testid="plot-analysis-stats">
+                          <div>
+                            <dt>{t.mean}</dt>
+                            <dd dir="ltr">{fmt(stats.mean)}</dd>
+                          </div>
+                          <div>
+                            <dt>{t.min}</dt>
+                            <dd dir="ltr">{fmt(stats.min)}</dd>
+                          </div>
+                          <div>
+                            <dt>{t.max}</dt>
+                            <dd dir="ltr">{fmt(stats.max)}</dd>
+                          </div>
+                        </dl>
+                      </>
                     ) : (
                       <p className="plot-analysis__status">{t.noMeasured}</p>
                     )}
@@ -377,12 +501,12 @@ export default function PlotAnalysisPanel({
           </div>
         )}
 
-        {/* ---------- الخرائط: layer chips + legend ---------- */}
+        {/* ---------- الخرائط: layer cards + slim legend ---------- */}
         {tab === 1 && (
           <div className="plot-analysis__stack">
-            {/* Layer chips — RTL row, driven entirely by PLOT_LAYERS so adding a
-                layer is a config entry plus its data path. */}
-            <div className="plot-analysis__chips" role="group" aria-label={t.layers}>
+            {/* Layer cards — driven entirely by PLOT_LAYERS so adding a layer
+                is a config entry plus its data path. */}
+            <div className="plot-analysis__layers" role="group" aria-label={t.layers}>
               {PLOT_LAYERS.map((entry) => {
                 const wired = entry.available && (entry.id !== "ndvi" || Boolean(raster));
                 const active = entry.id === layer.id;
@@ -393,11 +517,25 @@ export default function PlotAnalysisPanel({
                     disabled={!wired}
                     aria-pressed={active}
                     data-testid={`plot-layer-${entry.id}`}
-                    className={`plot-analysis__chip${active ? " is-active" : ""}`}
+                    className={`plot-analysis__layer${active ? " is-active" : ""}`}
                     onClick={() => setLayerId(entry.id)}
                   >
-                    <span>{rtl ? entry.labelAr : entry.labelFr}</span>
-                    <small>{wired ? entry.unit : t.soon}</small>
+                    <span
+                      aria-hidden
+                      className={`plot-analysis__layer-thumb${
+                        entry.id === "moisture" ? " plot-analysis__layer-thumb--moisture" : entry.id === "thermal" ? " plot-analysis__layer-thumb--thermal" : ""
+                      }`}
+                    />
+                    <span className="plot-analysis__layer-text">
+                      <span>{rtl ? entry.labelAr : entry.labelFr}</span>
+                      <small>{wired ? entry.unit : t.soon}</small>
+                    </span>
+                    {!wired && (
+                      <span className="plot-analysis__layer-lock">
+                        <Lock size={11} aria-hidden />
+                        {t.soon}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -405,11 +543,11 @@ export default function PlotAnalysisPanel({
 
             {raster && domain && stats ? (
               <>
-                <div className="plot-analysis__legend" dir="ltr">
+                <div className="plot-analysis__legend plot-rise" style={{ "--i": 1 } as React.CSSProperties} dir="ltr">
                   <span className="plot-analysis__legend-title" dir={rtl ? "rtl" : "ltr"}>
                     {t.legend} · {layer.unit}
                   </span>
-                  <div className="plot-analysis__legend-bar" style={{ background: ndviLegendGradientCss() }} />
+                  <div className="plot-analysis__legend-bar" />
                   <div className="plot-analysis__legend-labels">
                     <span>{fmt(domain[0])}</span>
                     <span>{fmt(domain[1])}</span>
@@ -423,40 +561,40 @@ export default function PlotAnalysisPanel({
           </div>
         )}
 
-        {/* ---------- الطقس: NASA POWER small cards (satellite-independent) ---------- */}
+        {/* ---------- الطقس: NASA POWER tiles (satellite-independent) ---------- */}
         {tab === 2 && (
           <div className="plot-analysis__stack">
             {climate ? <WeatherStrip climate={climate} lang={lang} /> : <p className="plot-analysis__empty">{UI.noWeather}</p>}
           </div>
         )}
 
-        {/* ---------- التفاصيل: sources, scene date, cloud, resolution ---------- */}
+        {/* ---------- التفاصيل: vertical timeline of the real sources ---------- */}
         {tab === 3 && (
           <div className="plot-analysis__stack">
             {observation && raster && domain && stats ? (
               <>
-                <ul className="plot-analysis__meta">
+                <dl className="plot-analysis__timeline plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
                   {observation.sceneDate && (
-                    <li>
-                      <Satellite size={13} aria-hidden />
-                      <span>
-                        {t.scene}: <bdi dir="ltr">{observation.sceneDate}</bdi>
-                      </span>
-                    </li>
+                    <div>
+                      <dt><Satellite size={12} aria-hidden />{t.scene}</dt>
+                      <dd dir="ltr">{observation.sceneDate}</dd>
+                    </div>
                   )}
                   {observation.cloudCoverPct != null && (
-                    <li>
-                      <Cloud size={13} aria-hidden />
-                      <span>
-                        {t.cloud}: <bdi dir="ltr">{fmt(observation.cloudCoverPct, 1)}%</bdi>
-                      </span>
-                    </li>
+                    <div>
+                      <dt><Cloud size={12} aria-hidden />{t.cloud}</dt>
+                      <dd dir="ltr">{fmt(observation.cloudCoverPct, 1)}%</dd>
+                    </div>
                   )}
-                  <li>
-                    <Ruler size={13} aria-hidden />
-                    <span>{t.caption.replace("{res}", String(raster.resolutionM))}</span>
-                  </li>
-                </ul>
+                  <div>
+                    <dt><Ruler size={12} aria-hidden />{t.caption.replace("{res}", String(raster.resolutionM))}</dt>
+                    <dd dir="ltr">Sentinel-2 · {raster.resolutionM} m</dd>
+                  </div>
+                  <div>
+                    <dt><ScanLine size={12} aria-hidden />{t.layers}</dt>
+                    <dd>{layer.source}</dd>
+                  </div>
+                </dl>
                 <p className="plot-analysis__note">
                   {t.measured
                     .replace("{n}", new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(stats.count))

@@ -23,6 +23,7 @@ import Sheet from "@/components/app/Sheet";
 import StepHeader from "@/components/app/StepHeader";
 import PlotAnalysisPanel from "./PlotAnalysisPanel";
 import type { Lang } from "@/lib/wilayas";
+import "./plot-theme.css";
 import "./plot-view.css";
 
 const COPY = {
@@ -242,7 +243,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
      screens: the satellite texture clipped to the real polygon, the NDVI
      raster over it and the clipped shimmer while loading. */
   const figure = (
-    <figure className="plot-view__figure" aria-label={t.outline}>
+    <figure className="plot-view__figure plot-rise" style={{ "--i": 0 } as React.CSSProperties} aria-label={t.outline}>
       <div className="plot-view__figure-heading"><span>{t.outline}</span><span className="plot-view__north"><ArrowRight size={15} aria-hidden />{t.north}</span></div>
       <div className="plot-view__art" data-testid="plot-art" data-imagery={loading ? "loading" : texture ? "satellite" : "fallback"} data-min-zoom={texture?.minZoom} data-max-zoom={texture?.maxZoom}>
         <svg
@@ -254,7 +255,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stopColor="#65b991" /><stop offset="48%" stopColor="#168367" /><stop offset="100%" stopColor="#064e3b" />
+              <stop offset="0%" className="plot-fig__stop-a" /><stop offset="48%" className="plot-fig__stop-b" /><stop offset="100%" className="plot-fig__stop-c" />
             </linearGradient>
             <clipPath id={clipId}><polygon points={geometry.points} /></clipPath>
             <linearGradient id={shimmerId} x1="0" y1="0" x2="1" y2="0">
@@ -277,8 +278,8 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
               <rect x="0" y="0" width={Math.max(30, geometry.svgWidth * 0.35)} height={geometry.svgHeight} fill={`url(#${shimmerId})`} className="plot-view__shimmer-sweep" />
             </g>
           )}
-          <polygon points={geometry.points} fill="none" stroke="#fff" strokeWidth="5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
-          <polygon points={geometry.points} fill="none" stroke="#08765b" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+          <polygon points={geometry.points} fill="none" className="plot-fig__outline" strokeWidth="5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+          <polygon points={geometry.points} fill="none" className="plot-fig__outline-inner" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
         </svg>
       </div>
       <figcaption>
@@ -298,7 +299,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     <motion.section
       ref={rootRef}
       role="dialog" aria-modal="true" aria-labelledby={titleId}
-      dir={rtl ? "rtl" : "ltr"} className="plot-view" data-testid="plot-view"
+      dir={rtl ? "rtl" : "ltr"} className={`plot-view plot-theme${showAnalysis ? " plot-view--night" : ""}`} data-testid="plot-view"
       initial={reduceMotion ? false : { opacity: 0, scale: 0.975 }}
       animate={{ opacity: 1, scale: 1 }} exit={reduceMotion ? { opacity: 1 } : { opacity: 0, scale: 0.985 }}
       transition={{ duration: reduceMotion ? 0 : 0.26, ease: [0.2, 0.8, 0.2, 1] }}
@@ -321,22 +322,24 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
         }
       }}
     >
-      <header className="plot-view__header" inert={confirmDelete}>
-        <button
-          ref={backRef}
-          className="plot-view__icon-button"
-          aria-label={showAnalysis ? UI.analysisBack : t.back}
-          onClick={() => (showAnalysis ? setShowAnalysis(false) : onBack())}
-          disabled={renaming || deleting}
-        >
-          {rtl ? <ArrowRight size={22} /> : <ArrowLeft size={22} />}
-        </button>
-        <h2 id={titleId}>{t.title}</h2>
-        <span className="plot-view__saved"><CheckCheck size={15} aria-hidden />{t.saved}</span>
-      </header>
+      <div className="plot-view__chrome">
+        <header className="plot-view__header" inert={confirmDelete}>
+          <button
+            ref={backRef}
+            className="plot-view__icon-button"
+            aria-label={showAnalysis ? UI.analysisBack : t.back}
+            onClick={() => (showAnalysis ? setShowAnalysis(false) : onBack())}
+            disabled={renaming || deleting}
+          >
+            {rtl ? <ArrowRight size={22} /> : <ArrowLeft size={22} />}
+          </button>
+          <h2 id={titleId}>{t.title}</h2>
+          <span className="plot-view__saved"><CheckCheck size={15} aria-hidden />{t.saved}</span>
+        </header>
 
-      {/* Draw → confirm → analyse: display-only flow header (steps 2 and 3). */}
-      <StepHeader current={showAnalysis ? 3 : 2} />
+        {/* Draw → confirm → analyse: display-only flow header (steps 2 and 3). */}
+        <StepHeader current={showAnalysis ? 3 : 2} tone={showAnalysis ? "night" : "light"} />
+      </div>
 
       {showAnalysis ? (
         /* ---- Analysis screen: hero plot map + draggable results sheet ---- */
@@ -361,7 +364,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
             <div className="plot-view__layout">
               {figure}
               <div className="plot-view__information">
-                <section className="plot-view__identity">
+                <section className="plot-view__identity plot-rise" style={{ "--i": 1 } as React.CSSProperties}>
                   <span className="plot-view__eyebrow">{t.name}</span>
                   {editing ? <form className="plot-view__name-form" onSubmit={(e) => { e.preventDefault(); void saveName(); }}>
                     <input ref={nameRef} aria-label={t.name} value={name} maxLength={60} disabled={renaming} onChange={(e) => setName(e.target.value)} />
@@ -371,21 +374,21 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
                 </section>
                 {error && !confirmDelete && <p role="alert" className="plot-view__error">{error}</p>}
 
-                {/* Compact key stats — the two numbers that describe the shape. */}
-                <dl className="plot-view__stats-row">
+                {/* One featured area card + a compact perimeter chip. */}
+                <dl className="plot-view__stats-row plot-rise" style={{ "--i": 2 } as React.CSSProperties}>
                   <div className="plot-view__stats-area">
                     <dt><Expand size={15} aria-hidden />{t.area}</dt>
                     <dd><strong dir="ltr">{number(area, 2)}</strong><span>{t.ha}</span></dd>
                     <dd className="plot-view__square-metres"><bdi>{number(area * 10000)}</bdi> {t.sqm}</dd>
                   </div>
-                  <div>
+                  <div className="plot-view__stats-perimeter">
                     <dt><Ruler size={15} aria-hidden />{t.perimeter}</dt>
                     <dd><strong dir="ltr">{number(perimeterMetres(plot.ring), 1)}</strong><span>{t.metres}</span></dd>
                   </div>
                 </dl>
 
                 {/* Everything a technician might audit stays one tap away. */}
-                <details className="plot-view__tech">
+                <details className="plot-view__tech plot-rise" style={{ "--i": 3 } as React.CSSProperties}>
                   <summary className="plot-view__tech-summary">
                     <Info size={16} aria-hidden />
                     <span className="plot-view__tech-title">
@@ -405,7 +408,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
             </div>
           </div>
 
-          <footer className="plot-view__footer" inert={confirmDelete}>
+          <footer className="plot-view__footer plot-rise" style={{ "--i": 2 } as React.CSSProperties} inert={confirmDelete}>
             <div className="plot-view__actions">
               <button type="button" className="plot-view__analyze plot-view__analyze--on" onClick={startAnalysis} disabled={renaming || deleting} aria-busy={analyzing}>
                 {analyzing ? <Loader2 size={21} className="plot-view__spinner" aria-hidden /> : <ScanLine size={21} aria-hidden />}
