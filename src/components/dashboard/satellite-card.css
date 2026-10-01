@@ -1,0 +1,598 @@
+/* ==================================================================
+   «مؤشر الغطاء النباتي» — the real Sentinel-2 NDVI time-series card.
+
+   This sheet is global CSS, so EVERY selector is prefixed `nds-`: nothing
+   here can leak into another card, the assistant or the plot flow.
+
+   MOTION: CSS only. Every animation lives inside
+   `prefers-reduced-motion: no-preference` and starts when the card gets
+   `.nds-card--in` (the IntersectionObserver reveal), so nothing plays
+   off-screen. The DEFAULT state of every rule below is the finished picture:
+   with reduced motion (or no scripting) the card simply appears, complete.
+   ================================================================== */
+
+.nds-card {
+  --nds-ink: #022c22;
+  /* 5.6:1 on white: tick labels and captions stay readable at 10.5 px. */
+  --nds-muted: #46705f;
+  /* The NDVI palette's deepest stop. The palette's tan stops are under 3:1 on
+     white, so the stroke (and every outline) uses this, never a palette tan. */
+  --nds-line: #0b4e34;
+  --nds-grid: rgba(6, 78, 59, 0.17);
+  --nds-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* ---- soft entrance on scroll ------------------------------------ */
+
+.nds-card--pending {
+  opacity: 0;
+  transform: translateY(14px);
+}
+.nds-card--in {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 520ms var(--nds-ease),
+    transform 520ms var(--nds-ease);
+}
+@media (prefers-reduced-motion: reduce), (scripting: none) {
+  .nds-card--pending {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Observed by the reveal: a 1 px strip that takes no room. */
+.nds-sentinel {
+  height: 1px;
+  margin-bottom: -1px;
+  pointer-events: none;
+}
+
+.nds-chip-name {
+  display: block;
+  max-width: 5.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- hero -------------------------------------------------------- */
+
+.nds-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 26px;
+  padding: 0 9px 0 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.nds-delta--up {
+  color: #065f46;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+.nds-delta--down {
+  color: #9f1239;
+  background: #fff1f2;
+  border-color: #fecdd3;
+}
+.nds-delta--flat {
+  color: #475569;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+/* ---- chart ------------------------------------------------------- */
+
+.nds-chart {
+  position: relative;
+  /* Pixel coordinates are physical, so the chart is laid out LTR; the text
+     inside its labels carries its own `dir`. */
+  direction: ltr;
+  margin-bottom: 26px;
+  /* Horizontal drags scrub the chart, vertical drags still scroll the page. */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  border-radius: 14px;
+  outline: none;
+  cursor: crosshair;
+}
+.nds-chart:focus-visible {
+  box-shadow: 0 0 0 3px rgba(4, 120, 87, 0.5);
+}
+.nds-chart svg {
+  display: block;
+  overflow: visible;
+}
+
+.nds-grid {
+  stroke: var(--nds-grid);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+.nds-baseline {
+  stroke: rgba(6, 78, 59, 0.3);
+  stroke-width: 1;
+}
+
+.nds-area {
+  opacity: 1;
+}
+.nds-line {
+  fill: none;
+  stroke: var(--nds-line);
+  stroke-width: 2.4;
+  stroke-linejoin: round;
+  /* `butt`: with a round cap the zero-length dash of the draw-in shows as a dot. */
+  stroke-linecap: butt;
+  /* `pathLength="1"` on the element: the dash is measured in whole lines. */
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+/* Dots: a white halo, then the palette colour with a deep-green rim. */
+.nds-dotg {
+  opacity: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.nds-halo {
+  fill: #ffffff;
+}
+.nds-dot {
+  stroke: var(--nds-line);
+  stroke-width: 1.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 140ms var(--nds-ease);
+}
+.nds-dotg--active .nds-dot {
+  transform: scale(1.38);
+}
+
+/* The newest real observation gets a ring that breathes. */
+.nds-pulse {
+  fill: none;
+  stroke: var(--nds-line);
+  stroke-width: 1.6;
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0.32;
+  transform: scale(1.9);
+}
+
+/* A pass with no usable pixel: a hollow marker on the axis row. */
+.nds-cloud {
+  fill: #ffffff;
+  stroke: #5b6b78;
+  stroke-width: 1.5;
+}
+
+/* Scrubber. */
+.nds-scrub {
+  stroke: var(--nds-line);
+  stroke-width: 1.25;
+  stroke-dasharray: 4 3;
+  opacity: 0.75;
+  transition: transform 140ms var(--nds-ease);
+}
+
+/* Axis text is HTML (the global rule pins SVG text to LTR). */
+.nds-tick {
+  position: absolute;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--nds-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.nds-tick--y {
+  transform: translateY(-50%);
+}
+.nds-tick--x {
+  transform: translateX(-50%);
+}
+.nds-tick--cloud {
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: #4b5a66;
+}
+
+/* Floating tooltip: positioned by two custom properties so moving between
+   points can transition `transform`. It exists only while a point is shown. */
+.nds-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 124px;
+  padding: 7px 10px 8px;
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid rgba(6, 78, 59, 0.16);
+  box-shadow:
+    0 14px 28px -14px rgba(2, 44, 34, 0.55),
+    0 2px 6px rgba(2, 44, 34, 0.08);
+  pointer-events: none;
+  transform: translate(var(--x), var(--y));
+  transition: transform 150ms var(--nds-ease);
+  z-index: 2;
+}
+.nds-tip-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.15;
+  color: var(--nds-ink);
+  font-variant-numeric: tabular-nums;
+}
+.nds-tip-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1.5px solid var(--nds-line);
+  flex: none;
+}
+.nds-tip-date {
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: #1f4a3b;
+}
+.nds-tip-cloud {
+  margin-top: 1px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #4b5a66;
+}
+
+/* ---- legend / notes ---------------------------------------------- */
+
+.nds-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--nds-muted);
+}
+.nds-legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  border: 1.5px solid var(--nds-line);
+  background: #9fc79a;
+}
+.nds-legend-dot--cloud {
+  border-color: #5b6b78;
+  background: #ffffff;
+}
+
+.nds-note {
+  border-radius: 12px;
+  padding: 8px 11px;
+  background: #fffbeb;
+  box-shadow: inset 0 0 0 1px #fde68a;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: #78350f;
+}
+
+/* ---- states (error, empty, no plot) ------------------------------- */
+
+.nds-state {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: stretch;
+  border-radius: 16px;
+  padding: 14px;
+}
+.nds-state--error {
+  background: #fff7ed;
+  box-shadow: inset 0 0 0 1px #fed7aa;
+}
+.nds-state--empty,
+.nds-state--noplot {
+  background: #f4f9f4;
+  box-shadow: inset 0 0 0 1px #d4e6d5;
+}
+.nds-state-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.nds-state-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+}
+.nds-state--error .nds-state-icon {
+  background: #ffedd5;
+  color: #9a3412;
+}
+.nds-state--empty .nds-state-icon,
+.nds-state--noplot .nds-state-icon {
+  background: #dcefdd;
+  color: #166534;
+}
+.nds-state-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.5;
+  color: var(--nds-ink);
+}
+.nds-state-msg {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  font-weight: 800;
+  line-height: 1.75;
+  color: var(--nds-ink);
+}
+.nds-state-text {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.75;
+  color: #355c4c;
+}
+.nds-tech {
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(154, 52, 18, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #7c2d12;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.nds-tech--soft {
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(53, 92, 76, 0.2);
+  color: #355c4c;
+}
+.nds-tech b {
+  display: block;
+  margin-bottom: 2px;
+  text-align: start;
+  font-family: var(--font-arabic), system-ui, sans-serif;
+  font-size: 11.5px;
+  font-weight: 900;
+}
+.nds-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 14px;
+  border: 1px solid #fdba74;
+  background: #ffffff;
+  color: #9a3412;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    transform 160ms ease;
+}
+.nds-retry:hover {
+  background: #fff7ed;
+}
+.nds-retry:active {
+  transform: scale(0.985);
+}
+.nds-retry:focus-visible {
+  outline: 3px solid #9a3412;
+  outline-offset: 2px;
+}
+/* The no-plot call to action. Same shape and green family as the «قطعتي»
+   card's button, with its white text actually applied and a start colour dark
+   enough for white text (4.6:1 at the lightest point). */
+.nds-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 14px;
+  background: linear-gradient(140deg, #2a8553, #1f7a4d);
+  color: #ffffff;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    0 14px 28px -16px rgba(31, 122, 77, 0.75);
+  transition:
+    filter 180ms ease,
+    transform 180ms ease;
+}
+.nds-cta:hover {
+  filter: brightness(1.06);
+}
+.nds-cta:active {
+  transform: scale(0.985);
+}
+.nds-cta:focus-visible {
+  outline: 3px solid #166534;
+  outline-offset: 2px;
+}
+
+/* ---- loading skeleton: shaped like the chart ---------------------- */
+
+.nds-skel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #e4efe6 25%, #f6faf6 50%, #e4efe6 75%);
+  background-size: 200% 100%;
+}
+/* The area-under-a-curve silhouette: the mask is a scalable SVG, so the
+   skeleton keeps the chart's shape at any width. */
+.nds-skel--chart {
+  height: 148px;
+  border-radius: 6px;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 148' preserveAspectRatio='none'%3E%3Cpath d='M0 104 C28 98 44 70 78 74 C112 78 128 44 162 48 C196 52 224 24 258 30 C278 34 291 20 300 16 L300 148 L0 148 Z' fill='black'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 148' preserveAspectRatio='none'%3E%3Cpath d='M0 104 C28 98 44 70 78 74 C112 78 128 44 162 48 C196 52 224 24 258 30 C278 34 291 20 300 16 L300 148 L0 148 Z' fill='black'/%3E%3C/svg%3E");
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+/* Newest on the left in RTL: the silhouette rises toward the left like the real series. */
+.nds-skel--chart:dir(rtl) {
+  transform: scaleX(-1);
+}
+.nds-skel-grid {
+  position: absolute;
+  inset: 0 0 0 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 35px,
+    rgba(6, 78, 59, 0.12) 35px 36px
+  );
+}
+
+/* ================================================================== */
+/*  MOTION — only when the user has not asked for less                 */
+/* ================================================================== */
+
+@keyframes nds-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes nds-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes nds-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes nds-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.22);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes nds-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.7);
+  }
+}
+@keyframes nds-tip-in {
+  from {
+    opacity: 0;
+    scale: 0.94;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+@keyframes nds-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nds-skel {
+    animation: nds-shimmer 1.5s linear infinite;
+  }
+
+  /* Before the reveal the chart sits in its "not drawn yet" state… */
+  .nds-card--pending .nds-line {
+    stroke-dashoffset: 1;
+  }
+  .nds-card--pending .nds-area,
+  .nds-card--pending .nds-dotg {
+    opacity: 0;
+  }
+  .nds-card--pending .nds-pulse {
+    opacity: 0;
+  }
+
+  /* …and draws itself when the card scrolls into view (and again whenever a
+     fresh series arrives, because the chart is re-mounted then). */
+  .nds-card--in .nds-line {
+    stroke-dashoffset: 1;
+    animation: nds-draw 1100ms cubic-bezier(0.45, 0.05, 0.25, 1) 140ms forwards;
+  }
+  .nds-card--in .nds-area {
+    opacity: 0;
+    animation: nds-fade 650ms ease-out 980ms forwards;
+  }
+  /* Each dot pops as the line reaches it (`--d` is set per dot, inline). */
+  .nds-card--in .nds-dotg {
+    opacity: 0;
+    animation: nds-pop 380ms var(--nds-ease) var(--d, 600ms) forwards;
+  }
+  .nds-card--in .nds-pulse {
+    opacity: 0;
+    animation: nds-pulse 2.4s ease-out 1.5s infinite;
+  }
+  .nds-card--in .nds-hero-rise {
+    animation: nds-rise 520ms var(--nds-ease) both;
+  }
+  .nds-tip {
+    animation: nds-tip-in 140ms var(--nds-ease);
+  }
+}

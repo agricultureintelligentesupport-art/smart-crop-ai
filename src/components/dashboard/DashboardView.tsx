@@ -346,7 +346,15 @@ export default function DashboardView() {
                 }}
                 onDraw={() => setMapOpen(true)}
               />
-              <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
+              <SatelliteCard
+                t={t}
+                lang={lang}
+                wilayaCode={wilayaCode}
+                crop={crop}
+                plot={fieldData.activePlot}
+                loading={fieldData.loadingPlots}
+                onDraw={() => setMapOpen(true)}
+              />
               <ScanCard t={t} wilayaCode={wilayaCode} />
             </div>
           </section>
