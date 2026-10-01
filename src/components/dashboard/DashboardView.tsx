@@ -21,9 +21,10 @@ import FieldMapSheet from "@/components/map/FieldMapSheet";
 import { CROPS, DEFAULT_WILAYA_CODE, SOILS, getWilaya, type Lang } from "@/lib/wilayas";
 import { useLang } from "@/lib/use-lang";
 import { useLiveWeather } from "@/lib/weather/useLiveWeather";
+import type { Plot } from "@/lib/field-data/types";
 import AccountSheet from "./AccountSheet";
 import CalculatorDetailModal from "./CalculatorDetailModal";
-import FieldHeatmapCard from "./FieldHeatmapCard";
+import MyPlotCard from "./MyPlotCard";
 import HeroCard from "./HeroCard";
 import IrrigationWindowSheet from "./IrrigationWindowSheet";
 import type { ParcelInput } from "./IrrigationCard";
@@ -123,6 +124,11 @@ export default function DashboardView() {
   const plotUid = authUser?.uid ?? (isGuest ? GUEST_UID : null);
   const fieldData = useFieldData(plotUid, areaHa);
   const [mapOpen, setMapOpen] = useState(false);
+  /**
+   * Plot to open on the details screen as the map sheet mounts («عرض القطعة»
+   * from Home). `null` = the sheet opens on the map itself.
+   */
+  const [initialViewPlot, setInitialViewPlot] = useState<Plot | null>(null);
   const weather = liveWeather.snapshot;
   // Parcel inputs: the user's own choice while it belongs to the current
   // wilaya, otherwise that wilaya's defaults (the calculator's old reset rule).
@@ -323,26 +329,22 @@ export default function DashboardView() {
             </section>
           </div>
 
-          {/* Field health: satellite index + leaf diagnosis */}
+          {/* Field health: the real plot summary + leaf diagnosis */}
           <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
-              {/* The map reads the same irrigation result as the hero card, so the
-                  moisture layer always averages back to the daily L/ha figure.
-                  With a saved plot it is fed real per-cell values instead. */}
-              <FieldHeatmapCard
-                t={t}
+              {/* The single plot card: the saved boundary, its area and the
+                  last analysis date, with the one action into the flow. */}
+              <MyPlotCard
                 lang={lang}
-                wilayaCode={wilayaCode}
-                crop={crop}
-                areaHa={areaHa}
-                irrigation={irrigation}
-                weather={weather}
+                plot={fieldData.activePlot}
+                loading={fieldData.loadingPlots}
                 observation={fieldData.observation}
-                observationReason={fieldData.activePlot ? fieldData.reason : null}
-                observationTechnical={fieldData.activePlot ? fieldData.technical : null}
-                plotName={fieldData.activePlot?.name ?? null}
-                onOpenMap={() => setMapOpen(true)}
+                onView={() => {
+                  setInitialViewPlot(fieldData.activePlot);
+                  setMapOpen(true);
+                }}
+                onDraw={() => setMapOpen(true)}
               />
               <SatelliteCard t={t} lang={lang} wilayaCode={wilayaCode} crop={crop} />
               <ScanCard t={t} wilayaCode={wilayaCode} />
@@ -355,11 +357,14 @@ export default function DashboardView() {
         </div>
       </main>
 
-      {/* Field map: draw the parcel boundary that the heatmap's real NDVI is
-          computed from. Rendered last so it sits above every other sheet. */}
+      {/* Field map: draw the parcel boundary, then confirm and analyse it.
+          Rendered last so it sits above every other sheet. */}
       {mapOpen && (
         <FieldMapSheet
-          onClose={() => setMapOpen(false)}
+          onClose={() => {
+            setMapOpen(false);
+            setInitialViewPlot(null);
+          }}
           plots={fieldData.plots}
           activeId={fieldData.activeId}
           loading={fieldData.loadingPlots}
@@ -370,6 +375,7 @@ export default function DashboardView() {
           copy={t.fieldMap}
           lang={lang}
           fallbackCenter={[wilaya.lat, wilaya.lon]}
+          initialViewPlot={initialViewPlot}
         />
       )}
 

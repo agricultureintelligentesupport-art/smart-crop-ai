@@ -42,13 +42,13 @@
 }
 
 /*
- * The search pill owns the map's top strip (top-3, 48 px tall); the zoom
- * control — Leaflet's default top-left — would tuck under its edge on a
- * 360–412 px screen, so it lives just below the pill. Fixed position: moving
- * controls between states would break the thumb's memory of them.
+ * The search pill now lives in its own strip above the map, so Leaflet's
+ * default top-left zoom control starts at the top of the canvas. Fixed
+ * position: moving controls between states would break the thumb's memory of
+ * them.
  */
 .leaflet-top.leaflet-left {
-  top: 4.25rem;
+  top: 0.5rem;
 }
 
 @media (prefers-reduced-motion: reduce) {

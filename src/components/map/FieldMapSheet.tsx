@@ -34,13 +34,22 @@
  *
  * Coordinates: Leaflet works in `[lat, lng]`, GeoJSON in `[lng, lat]`. The
  * conversion happens at this boundary and nowhere else.
+ *
+ * LAYOUT (draw screen — step 1 of the flow)
+ * ----------------------------------------
+ * Step header on top, the place search above the map, the map itself, and one
+ * compact bottom bar (live-area chip + a single primary button). GPS, undo and
+ * clear stay as floating map controls so the drawing behaviour is unchanged.
+ * The plot list / rename / delete chrome now lives on the confirm screen
+ * (PlotView), which opens right after a boundary is saved.
  */
 
 import dynamic from "next/dynamic";
 import { AnimatePresence } from "framer-motion";
 import PlotView from "@/components/plot/PlotView";
+import StepHeader from "@/components/app/StepHeader";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, LocateFixed, Map as MapIcon, Trash2, Undo2 } from "lucide-react";
+import { Loader2, LocateFixed, Undo2, X } from "lucide-react";
 import type { Lang } from "@/lib/wilayas";
 import type { Plot } from "@/lib/field-data/types";
 import { ringAreaHa, validatePlot, type Ring } from "@/lib/geo/polygon";
@@ -140,6 +149,7 @@ export default function FieldMapSheet({
   lang,
   busy = false,
   fallbackCenter,
+  initialViewPlot = null,
 }: {
   onClose: () => void;
   plots: Plot[];
@@ -153,8 +163,15 @@ export default function FieldMapSheet({
   busy?: boolean;
   /** Wilaya-capital fallback for the opening view, `[lat, lng]`. */
   fallbackCenter?: [number, number];
+  /**
+   * Open the plot-details (confirm) screen for this plot as the sheet mounts —
+   * the «عرض القطعة» path from Home. `null` opens the draw map itself.
+   */
+  initialViewPlot?: Plot | null;
 }) {
-  const [viewPlot, setViewPlot] = useState<Plot | null>(null);
+  const [viewPlot, setViewPlot] = useState<Plot | null>(() => initialViewPlot);
+  /** Whether the confirm screen was entered from Home (back closes the sheet). */
+  const [viewOrigin, setViewOrigin] = useState<"map" | "external">(initialViewPlot ? "external" : "map");
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const mountedRef = useRef(true);
@@ -235,6 +252,7 @@ export default function FieldMapSheet({
       if (!mountedRef.current) return;
       if (!result.ok || !result.plot) { setError(result.error ?? copy.errorGeneric); return; }
       setName(result.plot.name);
+      setViewOrigin("map");
       setViewPlot(result.plot);
       clearDraft();
     } catch { if (mountedRef.current) setError(copy.errorGeneric); }
@@ -244,6 +262,11 @@ export default function FieldMapSheet({
   const handleSave = useCallback(() => {
     if (draft) void saveDraft(draft);
   }, [draft, saveDraft]);
+
+  /* Compact bottom bar: one contextual primary action — draw, close the
+     polygon, or save the pending draft (the retry after a failed save). */
+  const primaryLabel = saving ? copy.saving : drawing ? copy.finish : draft ? copy.save : copy.draw;
+  const primaryDisabled = saving || busy || (!drawing && !draft ? !mapReady : false) || (draft && !drawing ? !valid : false);
 
   return (
     <>
@@ -272,68 +295,67 @@ export default function FieldMapSheet({
           </button>
         </header>
 
-        <div className="relative min-h-0 flex-1" inert={saving}>
-          <FieldMapCanvas
-            plots={plots}
-            activeId={activeId}
-            fallbackCenter={fallbackCenter}
-            onDraftChange={(ring) => {
-              setDraft(ring);
-              if (ring) {
+        <StepHeader current={1} />
+
+        <div className="flex min-h-0 flex-1 flex-col" inert={saving}>
+          {/* Place search: its own strip above the map (never draws — it only
+              flies). Hidden while drawing, whose controls own the map. */}
+          <div className="flex h-14 shrink-0 items-start">
+            {!drawing && (
+              <MapSearch
+                copy={{
+                  placeholder: copy.searchPlaceholder,
+                  label: copy.searchLabel,
+                  noResults: copy.searchNoResults,
+                  error: copy.searchError,
+                  retry: copy.searchRetry,
+                  clear: copy.searchClear,
+                }}
+                lang={lang}
+                onSelect={flyToPlace}
+              />
+            )}
+          </div>
+
+          <div className="relative min-h-0 flex-1">
+            <FieldMapCanvas
+              plots={plots}
+              activeId={activeId}
+              fallbackCenter={fallbackCenter}
+              onDraftChange={(ring) => {
+                setDraft(ring);
+                if (ring) {
+                  setDrawing(false);
+                  setDrawingArea(null);
+                  void saveDraft(ring);
+                }
+              }}
+              onDrawingArea={setDrawingArea}
+              onPick={(plot) => { onActivate(plot.id); setName(plot.name); setViewOrigin("map"); setViewPlot(plot); }}
+              onReady={(handle) => {
+                handleRef.current = handle;
+                setMapReady(true);
+              }}
+              onDrawingChange={setDrawing}
+              onInvalid={() => {
                 setDrawing(false);
                 setDrawingArea(null);
-                void saveDraft(ring);
-              }
-            }}
-            onDrawingArea={setDrawingArea}
-            onPick={(plot) => { onActivate(plot.id); setName(plot.name); setViewPlot(plot); }}
-            onReady={(handle) => {
-              handleRef.current = handle;
-              setMapReady(true);
-            }}
-            onDrawingChange={setDrawing}
-            onInvalid={() => {
-              setDrawing(false);
-              setDrawingArea(null);
-              setError(copy.errorCrossing);
-            }}
-            onLocateResult={(ok) => {
-              if (!ok) setError(copy.locateDenied);
-            }}
-            lang={lang}
-            ariaLabel={copy.mapTitle}
-          />
-
-          {/* Place search: floats over the canvas, top-centre (opposite corner
-              from the zoom buttons), and only ever flies the map — it draws
-              nothing. Hidden while drawing, whose toolbar owns the sheet. */}
-          {!drawing && (
-            <MapSearch
-              copy={{
-                placeholder: copy.searchPlaceholder,
-                label: copy.searchLabel,
-                noResults: copy.searchNoResults,
-                error: copy.searchError,
-                retry: copy.searchRetry,
-                clear: copy.searchClear,
+                setError(copy.errorCrossing);
+              }}
+              onLocateResult={(ok) => {
+                if (!ok) setError(copy.locateDenied);
               }}
               lang={lang}
-              onSelect={flyToPlace}
+              ariaLabel={copy.mapTitle}
             />
-          )}
 
           {loading && (
-            <div
-              className={`absolute inset-x-0 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white ${
-                drawing ? "top-3" : "top-[4.6rem]"
-              }`}
-            >
+            <div className="absolute inset-x-0 top-3 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white">
               {copy.loading}
             </div>
           )}
 
-          {/* GPS jump: thumb-reachable, away from the search control (top-end)
-              and the zoom buttons (top-start). */}
+          {/* GPS jump: thumb-reachable at the map's bottom-end corner. */}
           {!drawing && mapReady && (
             <button
               type="button"
@@ -350,73 +372,35 @@ export default function FieldMapSheet({
             </button>
           )}
 
-          {/* While drawing: live area so the farmer can stop at the right size,
-              plus undo / finish / cancel within thumb reach. All ≥ 44 px. */}
-          {drawing && (
-            <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center gap-2 rounded-[1.1rem] bg-white/95 p-2.5 shadow-[0_18px_40px_-22px_rgba(6,78,59,0.7)]">
-              <span className="text-[11.5px] font-black leading-5 text-emerald-950">
-                {drawingArea === null
-                  ? copy.drawing
-                  : copy.liveArea.replace("{area}", drawingArea.toFixed(3))}
-              </span>
-              <div className="ms-auto flex items-center gap-1.5">
+          {/* Drawing helpers (undo / clear) float at the map's bottom-start —
+              same map behaviour, out of the compact bottom bar. All ≥ 44 px. */}
+          {(drawing || (draft && !saving)) && (
+            <div className="absolute bottom-3 start-3 flex items-center gap-2">
+              {drawing && (
                 <button
                   type="button"
                   onClick={undoVertex}
                   aria-label={copy.undo}
-                  className="flex min-h-[2.75rem] items-center gap-1 rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                  className="flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-emerald-900/80 shadow-[0_14px_28px_-14px_rgba(6,78,59,0.7)] hover:bg-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
                 >
-                  <Undo2 size={14} strokeWidth={2.6} aria-hidden />
-                  {copy.undo}
+                  <Undo2 size={18} strokeWidth={2.6} aria-hidden />
                 </button>
-                <button
-                  type="button"
-                  onClick={clearDraft}
-                  disabled={saving || busy}
-                  className="flex min-h-[2.75rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {copy.clear}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleRef.current?.finishDraw()}
-                  className="flex min-h-[2.75rem] items-center rounded-full bg-emerald-600 px-4 text-[11px] font-extrabold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {copy.finish}
-                </button>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={clearDraft}
+                disabled={saving || busy}
+                aria-label={copy.clear}
+                className="flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-emerald-900/80 shadow-[0_14px_28px_-14px_rgba(6,78,59,0.7)] hover:bg-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+              >
+                <X size={18} strokeWidth={2.6} aria-hidden />
+              </button>
             </div>
           )}
-
-          {draft && (
-            <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center gap-2 rounded-[1.1rem] bg-white/95 p-2.5 shadow-[0_18px_40px_-22px_rgba(6,78,59,0.7)]">
-              <span className="text-[11.5px] font-black text-emerald-950">
-                {draftAreaHa === null ? copy.drawing : `${draftAreaHa.toFixed(3)} ${copy.areaLabel}`}
-              </span>
-              <div className="ms-auto flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={clearDraft}
-                  disabled={saving || busy}
-                  className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-900/5 px-3 text-[11px] font-extrabold text-emerald-900/80 hover:bg-emerald-900/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {copy.clear}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={!valid || busy || saving}
-                  className="flex min-h-[2.25rem] items-center rounded-full bg-emerald-600 px-4 text-[11px] font-extrabold text-white disabled:opacity-45 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-                >
-                  {busy || saving ? copy.saving : copy.save}
-                </button>
-              </div>
-            </div>
-          )}
+          </div>
         </div>
 
-        {saving && <p role="status" className="bg-emerald-50 px-4 py-2 text-center text-sm font-bold text-emerald-900">{copy.saving}</p>}
-        <footer inert={saving} className="flex flex-col gap-2 border-t border-emerald-900/10 px-4 py-3">
+        <footer className="flex flex-col gap-2 border-t border-emerald-900/10 bg-[#f6fbf8] px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2.5">
           {error && (
             <p
               role="alert"
@@ -426,71 +410,33 @@ export default function FieldMapSheet({
             </p>
           )}
 
-          {plots.length > 0 && (
-            <label className="flex items-center gap-2">
-              <span className="sr-only">{copy.namePlaceholder}</span>
-              <input
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder={copy.namePlaceholder}
-                maxLength={60}
-                className="min-h-[2.75rem] flex-1 rounded-[0.9rem] border border-emerald-900/15 bg-white px-3 text-[12.5px] font-bold text-emerald-950 placeholder:text-emerald-900/35 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
-              />
-            </label>
-          )}
-
-          {plots.length > 0 && (
-            <ul className="flex flex-wrap gap-1.5">
-              {plots.map((plot) => (
-                <li key={plot.id}>
-                  <button
-                    type="button"
-                    onClick={() => { onActivate(plot.id); setName(plot.name); setViewPlot(plot); }}
-                    aria-pressed={plot.id === activeId}
-                    className={`flex min-h-[2.5rem] items-center gap-1.5 rounded-full px-3 text-[11px] font-extrabold transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45 ${
-                      plot.id === activeId
-                        ? "bg-emerald-600 text-white"
-                        : "bg-white text-emerald-900/70 ring-1 ring-emerald-900/10"
-                    }`}
-                  >
-                    <MapIcon size={11} strokeWidth={2.8} aria-hidden />
-                    {plot.name} · {plot.areaHa.toFixed(2)} ha
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
+          {/* The one compact bar: live-area chip + one primary button. */}
           <div className="flex items-center gap-2">
+            {(drawing || draft) && (
+              <span className="flex min-h-[2.75rem] shrink-0 items-center rounded-full bg-emerald-900/5 px-3 text-[11.5px] font-black tabular-nums leading-5 text-emerald-950">
+                {drawing
+                  ? drawingArea === null
+                    ? copy.drawing
+                    : copy.liveArea.replace("{area}", drawingArea.toFixed(3))
+                  : draftAreaHa === null
+                    ? copy.drawing
+                    : `${draftAreaHa.toFixed(3)} ${copy.areaLabel}`}
+              </span>
+            )}
             <button
               type="button"
               ref={drawButtonRef}
-              onClick={drawing ? () => handleRef.current?.finishDraw() : startDraw}
-              disabled={!mapReady || saving || busy}
+              onClick={drawing ? () => handleRef.current?.finishDraw() : draft ? handleSave : startDraw}
+              disabled={primaryDisabled}
               className="flex min-h-[2.75rem] flex-1 items-center justify-center gap-1.5 rounded-[0.9rem] bg-emerald-600 px-4 text-[12px] font-extrabold text-white hover:bg-emerald-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
             >
-              {drawing ? copy.finish : copy.draw}
+              {saving && <Loader2 size={15} className="animate-spin" aria-hidden />}
+              {primaryLabel}
             </button>
-            {activeId && (
-              <button
-                type="button"
-                disabled={saving || busy}
-                onClick={() => onDelete(activeId)}
-                aria-label={copy.delete}
-                className="flex h-11 w-11 items-center justify-center rounded-[0.9rem] bg-red-50 text-red-700 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-red-300/50"
-              >
-                <Trash2 size={15} strokeWidth={2.6} aria-hidden />
-              </button>
-            )}
           </div>
+          {saving && <p role="status" className="sr-only">{copy.saving}</p>}
 
-          {plots.length === 0 && !loading && (
-            <p className="text-[11px] font-semibold leading-5 text-emerald-900/55">
-              {copy.noPlots} {copy.noPlotsHint}
-            </p>
-          )}
-
-          <p className="text-[9.5px] font-semibold leading-4 text-emerald-900/40">{copy.attribution}</p>
+          <p className="text-center text-[9.5px] font-semibold leading-4 text-emerald-900/40">{copy.attribution}</p>
         </footer>
       </div>
     </div>
@@ -499,8 +445,12 @@ export default function FieldMapSheet({
         key={viewPlot.id}
         plot={viewPlot}
         lang={lang}
-        onBack={() => setViewPlot(null)}
-        onRedraw={() => { setViewPlot(null); void startDraw(); }}
+        onBack={() => {
+          setViewPlot(null);
+          // Home's «عرض القطعة» opened this sheet only for the details screen.
+          if (viewOrigin === "external") onClose();
+        }}
+        onRedraw={() => { setViewPlot(null); setViewOrigin("map"); void startDraw(); }}
         onDelete={onDelete}
         onRename={(updated) => { setViewPlot(updated); setName(updated.name); }}
       />}

@@ -1,18 +1,25 @@
 "use client";
 
 /**
- * The analysis section of the plot-details screen: the layer chips, the NDVI
- * legend (real min/max, scene date, cloud cover), the stats computed from
- * measured pixels only, and the failure card — which keeps the NASA POWER
- * day visible, because the weather upstream is independent of the satellite
- * one and a failed pass is no reason to hide real meteorology.
+ * The analysis screen's draggable bottom sheet: four tabs over the hero plot
+ * map — نظرة عامة (key numbers + status), الخرائط (layer chips + legend),
+ * الطقس (the NASA POWER day) and التفاصيل (sources, scene date, cloud,
+ * resolution).
+ *
+ * Existing output only, re-arranged: the stats computed from measured pixels,
+ * the legend (real min/max), the layer switcher, the failure card and the
+ * POWER values all keep their wording and their gates. The weather tab stays
+ * live even when the satellite step fails, because the weather upstream is
+ * independent of the satellite one and a failed pass is no reason to hide
+ * real meteorology.
  *
  * Every number this panel prints comes from `FieldObservation.raster` pixels
  * with a real measurement (`dataMask` ∧ inside the drawn boundary). A masked
  * pixel is never filled, averaged or guessed.
  */
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
+import { motion, useDragControls, useReducedMotion } from "framer-motion";
 import { Cloud, CloudOff, Droplets, Loader2, RotateCcw, Ruler, Satellite, ScanLine, ThermometerSun, Wind } from "lucide-react";
 import type { ClimateObservation, FieldDataReason, FieldObservation } from "@/lib/field-data/types";
 import type { FieldDataState } from "@/lib/field-data/useFieldData";
@@ -119,7 +126,16 @@ const COPY = {
   },
 };
 
-/** The NASA POWER day, compact — shown even when the satellite step failed. */
+/** Sheet chrome — Arabic only, the flow's language. */
+const UI = {
+  tabsLabel: "أقسام التحليل",
+  tabs: ["نظرة عامة", "الخرائط", "الطقس", "التفاصيل"],
+  sheetSize: "تغيير حجم اللوحة",
+  noWeather: "لا تتوفر بيانات الطقس بعد.",
+  noTech: "لا توجد تفاصيل تقنية بعد.",
+};
+
+/** The NASA POWER day, compact small cards — shown even when the satellite step failed. */
 function WeatherStrip({ climate, lang }: { climate: ClimateObservation; lang: Lang }) {
   const t = COPY[lang];
   const rtl = lang === "ar";
@@ -176,6 +192,15 @@ export default function PlotAnalysisPanel({
   const rtl = lang === "ar";
   const [layerId, setLayerId] = useState<string>("ndvi");
   const layer = PLOT_LAYERS.find((l) => l.id === layerId) ?? PLOT_LAYERS[0];
+  /** Active sheet tab: overview · maps · weather · details. */
+  const [tab, setTab] = useState(0);
+  /** Draggable sheet size; the grabber drags up/down to move between these. */
+  const [snap, setSnap] = useState<"peek" | "half" | "tall">("half");
+  const controls = useDragControls();
+  const reduce = useReducedMotion();
+  const baseId = useId();
+  const panelId = `${baseId}-panel`;
+  const tabId = (index: number) => `${baseId}-tab-${index}`;
 
   const raster = observation?.raster ?? null;
   /* The one mask that drives display, stats and the probe: the provider
@@ -198,170 +223,256 @@ export default function PlotAnalysisPanel({
           maximumFractionDigits: decimals,
         }).format(value);
 
+  const grow = () => setSnap((current) => (current === "peek" ? "half" : "tall"));
+  const shrink = () => setSnap((current) => (current === "tall" ? "half" : "peek"));
+
   return (
-    <section className="plot-analysis" data-testid="plot-analysis" aria-label={t.title}>
-      <div className="plot-analysis__heading">
-        <ScanLine size={16} aria-hidden />
-        <h3>{t.title}</h3>
-        {stale && observation && <span className="plot-analysis__stale">{t.staleBadge}</span>}
+    <motion.section
+      className="plot-analysis"
+      data-snap={snap}
+      data-testid="plot-analysis"
+      aria-label={t.title}
+      drag="y"
+      dragListener={false}
+      dragControls={controls}
+      dragConstraints={{ top: 0, bottom: 0 }}
+      dragElastic={{ top: 0.04, bottom: 0.04 }}
+      transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 380, damping: 40, mass: 0.9 }}
+      onDragEnd={(_, info) => {
+        if (info.offset.y < -40 || info.velocity.y < -450) grow();
+        else if (info.offset.y > 40 || info.velocity.y > 450) shrink();
+      }}
+    >
+      {/* Grabber: drag up/down (pointer) or press (keyboard) to resize. */}
+      <div className="plot-analysis__grab-row" onPointerDown={(event) => controls.start(event)}>
+        <button
+          type="button"
+          className="plot-analysis__grabber"
+          aria-label={UI.sheetSize}
+          onClick={() => setSnap((current) => (current === "peek" ? "half" : current === "half" ? "tall" : "peek"))}
+        >
+          <span aria-hidden />
+        </button>
       </div>
 
-      {/* Layer chips — RTL row, driven entirely by PLOT_LAYERS so adding a
-          layer is a config entry plus its data path. */}
-      <div className="plot-analysis__chips" role="group" aria-label={t.layers}>
-        {PLOT_LAYERS.map((entry) => {
-          const wired = entry.available && (entry.id !== "ndvi" || Boolean(raster));
-          const active = entry.id === layer.id;
-          return (
-            <button
-              key={entry.id}
-              type="button"
-              disabled={!wired}
-              aria-pressed={active}
-              data-testid={`plot-layer-${entry.id}`}
-              className={`plot-analysis__chip${active ? " is-active" : ""}`}
-              onClick={() => setLayerId(entry.id)}
-            >
-              <span>{rtl ? entry.labelAr : entry.labelFr}</span>
-              <small>{wired ? entry.unit : t.soon}</small>
-            </button>
-          );
-        })}
-      </div>
-
-      {state === "loading" && (
-        <p className="plot-analysis__status" role="status">
-          <Loader2 size={14} className="plot-view__spinner" aria-hidden />
-          <span>
-            {t.loading}
-            <small>{t.loadingHint}</small>
-          </span>
-        </p>
-      )}
-
-      {state === "error" && (
-        <div className="plot-analysis__error" role="alert">
-          <p>
-            <CloudOff size={17} aria-hidden />
-            <span>
-              <strong>{t.errorTitle}</strong>
-              {reason ? t.reason[reason] : ""}
-            </span>
-          </p>
-          {technical && (
-            <code dir="ltr" className="plot-analysis__technical">
-              {technical}
-            </code>
-          )}
-          <button type="button" className="plot-analysis__retry" onClick={onRetry}>
-            <RotateCcw size={15} aria-hidden />
-            {t.retry}
+      <div className="plot-analysis__tabs" role="tablist" aria-label={UI.tabsLabel}>
+        {UI.tabs.map((label, index) => (
+          <button
+            key={label}
+            type="button"
+            role="tab"
+            id={tabId(index)}
+            aria-selected={tab === index}
+            aria-controls={panelId}
+            tabIndex={tab === index ? 0 : -1}
+            className={`plot-analysis__tab${tab === index ? " is-active" : ""}`}
+            onClick={() => setTab(index)}
+          >
+            {label}
           </button>
-          {/* POWER is independent: the satellite failing never hides the weather. */}
-          {climate && <WeatherStrip climate={climate} lang={lang} />}
-        </div>
-      )}
+        ))}
+      </div>
 
-      {state === "ready" && observation && (
-        <>
-          {stale && <p className="plot-analysis__stale-note">{t.staleNote.replace("{date}", observation.sceneDate ?? observation.date)}</p>}
+      <div
+        className="plot-analysis__body"
+        role="tabpanel"
+        id={panelId}
+        aria-labelledby={tabId(tab)}
+        tabIndex={0}
+      >
+        {/* ---------- نظرة عامة: key numbers + status summary ---------- */}
+        {tab === 0 && (
+          <div className="plot-analysis__stack">
+            {stale && observation && <span className="plot-analysis__stale">{t.staleBadge}</span>}
 
-          {raster && domain && stats ? (
-            <>
-              <div className="plot-analysis__legend" dir="ltr">
-                <span className="plot-analysis__legend-title" dir={rtl ? "rtl" : "ltr"}>
-                  {t.legend} · {layer.unit}
-                </span>
-                <div className="plot-analysis__legend-bar" style={{ background: ndviLegendGradientCss() }} />
-                <div className="plot-analysis__legend-labels">
-                  <span>{fmt(domain[0])}</span>
-                  <span>{fmt(domain[1])}</span>
-                </div>
-              </div>
-
-              <ul className="plot-analysis__meta">
-                {observation.sceneDate && (
-                  <li>
-                    <Satellite size={13} aria-hidden />
-                    <span>
-                      {t.scene}: <bdi dir="ltr">{observation.sceneDate}</bdi>
-                    </span>
-                  </li>
-                )}
-                {observation.cloudCoverPct != null && (
-                  <li>
-                    <Cloud size={13} aria-hidden />
-                    <span>
-                      {t.cloud}: <bdi dir="ltr">{fmt(observation.cloudCoverPct, 1)}%</bdi>
-                    </span>
-                  </li>
-                )}
-                <li>
-                  <Ruler size={13} aria-hidden />
-                  <span>{t.caption.replace("{res}", String(raster.resolutionM))}</span>
-                </li>
-              </ul>
-
-              {stats.count > 0 ? (
-                <dl className="plot-analysis__stats" data-testid="plot-analysis-stats">
-                  <div>
-                    <dt>{t.mean}</dt>
-                    <dd dir="ltr">{fmt(stats.mean)}</dd>
-                  </div>
-                  <div>
-                    <dt>{t.min}</dt>
-                    <dd dir="ltr">{fmt(stats.min)}</dd>
-                  </div>
-                  <div>
-                    <dt>{t.max}</dt>
-                    <dd dir="ltr">{fmt(stats.max)}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <p className="plot-analysis__status">{t.noMeasured}</p>
-              )}
-              <p className="plot-analysis__note">
-                {t.measured.replace("{n}", new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(stats.count)).replace(
-                  "{source}",
-                  layer.source,
-                )}
-              </p>
-              <p className="plot-analysis__hint">{t.tapHint}</p>
-            </>
-          ) : (
-            <div className="plot-analysis__error plot-analysis__error--soft" role="note">
-              <p>
+            {state === "loading" && (
+              <p className="plot-analysis__status" role="status">
+                <Loader2 size={14} className="plot-view__spinner" aria-hidden />
                 <span>
-                  <strong>{t.legacyTitle}</strong>
-                  {t.legacyNote}
+                  {t.loading}
+                  <small>{t.loadingHint}</small>
                 </span>
               </p>
-              {cellValues.length > 0 && (
-                <dl className="plot-analysis__stats">
-                  <div>
-                    <dt>{t.mean}</dt>
-                    <dd dir="ltr">{fmt(cellValues.reduce((s, v) => s + v, 0) / cellValues.length)}</dd>
-                  </div>
-                  <div>
-                    <dt>{t.min}</dt>
-                    <dd dir="ltr">{fmt(Math.min(...cellValues))}</dd>
-                  </div>
-                  <div>
-                    <dt>{t.max}</dt>
-                    <dd dir="ltr">{fmt(Math.max(...cellValues))}</dd>
-                  </div>
-                </dl>
-              )}
-              <button type="button" className="plot-analysis__retry" onClick={onRetry}>
-                <RotateCcw size={15} aria-hidden />
-                {t.retry}
-              </button>
-            </div>
-          )}
+            )}
 
-          {climate && <WeatherStrip climate={climate} lang={lang} />}
-        </>
-      )}
-    </section>
+            {state === "error" && (
+              /* One clear failure card: the existing technical reason + retry. */
+              <div className="plot-analysis__error" role="alert">
+                <p>
+                  <CloudOff size={17} aria-hidden />
+                  <span>
+                    <strong>{t.errorTitle}</strong>
+                    {reason ? t.reason[reason] : ""}
+                  </span>
+                </p>
+                {technical && (
+                  <code dir="ltr" className="plot-analysis__technical">
+                    {technical}
+                  </code>
+                )}
+                <button type="button" className="plot-analysis__retry" onClick={onRetry}>
+                  <RotateCcw size={15} aria-hidden />
+                  {t.retry}
+                </button>
+              </div>
+            )}
+
+            {state === "ready" && observation && (
+              <>
+                {stale && <p className="plot-analysis__stale-note">{t.staleNote.replace("{date}", observation.sceneDate ?? observation.date)}</p>}
+
+                {raster && domain && stats ? (
+                  <>
+                    {stats.count > 0 ? (
+                      <dl className="plot-analysis__stats" data-testid="plot-analysis-stats">
+                        <div>
+                          <dt>{t.mean}</dt>
+                          <dd dir="ltr">{fmt(stats.mean)}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.min}</dt>
+                          <dd dir="ltr">{fmt(stats.min)}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.max}</dt>
+                          <dd dir="ltr">{fmt(stats.max)}</dd>
+                        </div>
+                      </dl>
+                    ) : (
+                      <p className="plot-analysis__status">{t.noMeasured}</p>
+                    )}
+                  </>
+                ) : (
+                  <div className="plot-analysis__error plot-analysis__error--soft" role="note">
+                    <p>
+                      <span>
+                        <strong>{t.legacyTitle}</strong>
+                        {t.legacyNote}
+                      </span>
+                    </p>
+                    {cellValues.length > 0 && (
+                      <dl className="plot-analysis__stats">
+                        <div>
+                          <dt>{t.mean}</dt>
+                          <dd dir="ltr">{fmt(cellValues.reduce((s, v) => s + v, 0) / cellValues.length)}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.min}</dt>
+                          <dd dir="ltr">{fmt(Math.min(...cellValues))}</dd>
+                        </div>
+                        <div>
+                          <dt>{t.max}</dt>
+                          <dd dir="ltr">{fmt(Math.max(...cellValues))}</dd>
+                        </div>
+                      </dl>
+                    )}
+                    <button type="button" className="plot-analysis__retry" onClick={onRetry}>
+                      <RotateCcw size={15} aria-hidden />
+                      {t.retry}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ---------- الخرائط: layer chips + legend ---------- */}
+        {tab === 1 && (
+          <div className="plot-analysis__stack">
+            {/* Layer chips — RTL row, driven entirely by PLOT_LAYERS so adding a
+                layer is a config entry plus its data path. */}
+            <div className="plot-analysis__chips" role="group" aria-label={t.layers}>
+              {PLOT_LAYERS.map((entry) => {
+                const wired = entry.available && (entry.id !== "ndvi" || Boolean(raster));
+                const active = entry.id === layer.id;
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    disabled={!wired}
+                    aria-pressed={active}
+                    data-testid={`plot-layer-${entry.id}`}
+                    className={`plot-analysis__chip${active ? " is-active" : ""}`}
+                    onClick={() => setLayerId(entry.id)}
+                  >
+                    <span>{rtl ? entry.labelAr : entry.labelFr}</span>
+                    <small>{wired ? entry.unit : t.soon}</small>
+                  </button>
+                );
+              })}
+            </div>
+
+            {raster && domain && stats ? (
+              <>
+                <div className="plot-analysis__legend" dir="ltr">
+                  <span className="plot-analysis__legend-title" dir={rtl ? "rtl" : "ltr"}>
+                    {t.legend} · {layer.unit}
+                  </span>
+                  <div className="plot-analysis__legend-bar" style={{ background: ndviLegendGradientCss() }} />
+                  <div className="plot-analysis__legend-labels">
+                    <span>{fmt(domain[0])}</span>
+                    <span>{fmt(domain[1])}</span>
+                  </div>
+                </div>
+                <p className="plot-analysis__hint">{t.tapHint}</p>
+              </>
+            ) : (
+              <p className="plot-analysis__hint">{t.loadingHint}</p>
+            )}
+          </div>
+        )}
+
+        {/* ---------- الطقس: NASA POWER small cards (satellite-independent) ---------- */}
+        {tab === 2 && (
+          <div className="plot-analysis__stack">
+            {climate ? <WeatherStrip climate={climate} lang={lang} /> : <p className="plot-analysis__empty">{UI.noWeather}</p>}
+          </div>
+        )}
+
+        {/* ---------- التفاصيل: sources, scene date, cloud, resolution ---------- */}
+        {tab === 3 && (
+          <div className="plot-analysis__stack">
+            {observation && raster && domain && stats ? (
+              <>
+                <ul className="plot-analysis__meta">
+                  {observation.sceneDate && (
+                    <li>
+                      <Satellite size={13} aria-hidden />
+                      <span>
+                        {t.scene}: <bdi dir="ltr">{observation.sceneDate}</bdi>
+                      </span>
+                    </li>
+                  )}
+                  {observation.cloudCoverPct != null && (
+                    <li>
+                      <Cloud size={13} aria-hidden />
+                      <span>
+                        {t.cloud}: <bdi dir="ltr">{fmt(observation.cloudCoverPct, 1)}%</bdi>
+                      </span>
+                    </li>
+                  )}
+                  <li>
+                    <Ruler size={13} aria-hidden />
+                    <span>{t.caption.replace("{res}", String(raster.resolutionM))}</span>
+                  </li>
+                </ul>
+                <p className="plot-analysis__note">
+                  {t.measured
+                    .replace("{n}", new Intl.NumberFormat(rtl ? "ar-DZ-u-nu-latn" : "fr-FR").format(stats.count))
+                    .replace("{source}", layer.source)}
+                </p>
+              </>
+            ) : (
+              <p className="plot-analysis__empty">{UI.noTech}</p>
+            )}
+            {/* The scan-line mark keeps the analysis identity on this tab too. */}
+            <p className="plot-analysis__hint">
+              <ScanLine size={12} aria-hidden /> {t.title}
+            </p>
+          </div>
+        )}
+      </div>
+    </motion.section>
   );
 }

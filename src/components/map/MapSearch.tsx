@@ -237,7 +237,7 @@ export default function MapSearch({ copy, lang, onSelect }: { copy: MapSearchCop
   const dir = lang === "ar" ? "rtl" : "ltr";
 
   return (
-    <div ref={rootRef} dir={dir} className="pointer-events-none absolute inset-x-3 top-3 z-[1000] flex justify-center">
+    <div ref={rootRef} dir={dir} className="pointer-events-none relative z-[1000] flex w-full justify-center px-3 pt-1">
       <div className="pointer-events-auto relative w-full max-w-[21rem]">
         <form
           role="search"
