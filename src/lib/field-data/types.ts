@@ -89,6 +89,48 @@ export interface NdviRaster {
   dataMask: number[];
 }
 
+/**
+ * The lazily-requested Sentinel-2 layers of the plot analysis. They are read
+ * ONLY when the farmer selects the layer — never with the initial analysis —
+ * and always over the SAME scene/date the plot's NDVI raster came from.
+ */
+export type FieldLayerId = "ndmi" | "ndre" | "truecolor";
+
+/**
+ * Per-pixel raster of one lazily-fetched analysis layer, row-major, over the
+ * exact same bbox/resolution grid as the plot's NDVI raster (so every pixel
+ * lands on its own ground). Structurally the NDVI transport shape:
+ *
+ *  • index layers (NDMI, NDRE) — `ndvi` carries the layer's own index value,
+ *    `null` wherever `dataMask` is 0 (the name is the transport field, the
+ *    layer id says what the numbers mean);
+ *  • the true-colour image layer — `ndvi` is all `null` (an image carries no
+ *    index values) and `rgb` carries the quantised sRGB triple instead.
+ */
+export interface LayerRaster extends NdviRaster {
+  layer: FieldLayerId;
+  /** The NDVI scene's `YYYY-MM-DD` this raster was read from. */
+  sceneDate: string;
+  /**
+   * True-colour layer only: quantised sRGB (0-255) per pixel, row-major,
+   * `null` wherever `dataMask` is 0. Absent on index layers.
+   */
+  rgb?: ([number, number, number] | null)[];
+}
+
+/** What `/api/field-data/layer` hands to the client for one lazy layer. */
+export interface FieldLayerResponse {
+  ok: boolean;
+  layer: FieldLayerId;
+  reason?: FieldDataReason;
+  raster: LayerRaster | null;
+  /** Short technical reason of a failed layer read (no secrets). */
+  technical?: string;
+  /** Every upstream call of this layer request: host, status, code, message. */
+  diagnostics?: import("@/lib/satellite/trace").StepLog[];
+  message?: string;
+}
+
 /** The field-wide NASA POWER day, with its FAO-56 method recorded. */
 export interface ClimateObservation {
   /** Always "nasa-power" — the only upstream behind these numbers. */

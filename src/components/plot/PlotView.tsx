@@ -10,14 +10,20 @@ import { renamePlot } from "@/lib/field-data/plots";
 import { centroidOf, normalizeRing, pointInRing, ringAreaHa } from "@/lib/geo/polygon";
 import { mercator, perimeterMetres, plotGeometry } from "@/lib/plot/geometry";
 import {
+  composeIndexLayer,
   composeNdviLayer,
+  composeTrueColorLayer,
+  layerCssColor,
   measuredPixelMask,
   ndviColorDomain,
-  ndviCssColor,
   nearestMeasuredPixel,
+  PLOT_LAYERS,
   pixelAtIsMeasured,
   type PixelProbe,
+  type PlotLayerId,
 } from "@/lib/plot/ndvi-layers";
+import { requestPlotLayer, type LazyLayerState } from "@/lib/plot/layer-fetch";
+import type { FieldLayerId, NdviRaster } from "@/lib/field-data/types";
 import { composePlotTexture, type PlotTexture } from "@/lib/plot/imagery";
 import Sheet from "@/components/app/Sheet";
 import StepHeader from "@/components/app/StepHeader";
@@ -40,8 +46,9 @@ const COPY = {
     confirm: "هل تريد حذف هذه القطعة؟", deleteHint: "ستُحذف الحدود والاسم المحفوظان. لا يمكن التراجع عن الحذف.",
     deleteError: "تعذّر حذف القطعة. حاول مرة أخرى.",
     probeTitle: "قراءة النقطة", probeSubtitle: "أقرب بكسل مُقاس من Sentinel-2",
-    probeValue: "قيمة NDVI", probeCoords: "إحداثيات البكسل", probeNote: "النقطة المضغوطة غير مُقاسة (غيوم) — هذه أقرب قراءة حقيقية، على بُعد {m} م.",
+    probeValue: "قيمة {index}", probeCoords: "إحداثيات البكسل", probeNote: "النقطة المضغوطة غير مُقاسة (غيوم) — هذه أقرب قراءة حقيقية، على بُعد {m} م.",
     probeHere: "قراءة البكسل المضغوط مباشرة.", probePixel: "بكسل Sentinel-2 بدقة {res} م",
+    layerLoading: "جارٍ تحميل الطبقة…",
   },
   fr: {
     title: "Détails de la parcelle", back: "Retour à la carte de tracé", saved: "Parcelle enregistrée", name: "Nom de la parcelle",
@@ -56,10 +63,14 @@ const COPY = {
     confirm: "Supprimer cette parcelle ?", deleteHint: "Le nom et les limites enregistrés seront supprimés. Cette action est irréversible.",
     deleteError: "Impossible de supprimer. Réessayez.",
     probeTitle: "Lecture du point", probeSubtitle: "Pixel Sentinel-2 mesuré le plus proche",
-    probeValue: "Valeur NDVI", probeCoords: "Coordonnées du pixel", probeNote: "Le point touché n'est pas mesuré (nuages) — voici la lecture réelle la plus proche, à {m} m.",
+    probeValue: "Valeur {index}", probeCoords: "Coordonnées du pixel", probeNote: "Le point touché n'est pas mesuré (nuages) — voici la lecture réelle la plus proche, à {m} m.",
     probeHere: "Lecture directe du pixel touché.", probePixel: "Pixel Sentinel-2 de {res} m",
+    layerLoading: "Chargement de la couche…",
   },
 };
+
+/** Index name of a probe reading — unit-free, the name IS the unit. */
+const PROBE_INDEX: Record<"ndvi" | "ndmi" | "ndre", string> = { ndvi: "NDVI", ndmi: "NDMI", ndre: "NDRE" };
 
 /** New chrome labels — Arabic only, the flow's language. */
 const UI = {
@@ -68,6 +79,19 @@ const UI = {
   more: "خيارات إضافية",
   analysisBack: "العودة إلى تفاصيل القطعة",
 };
+
+/** Paint a composed RGBA layer to a PNG data-url, pixel for pixel. */
+function composedToPng(composed: { width: number; height: number; data: Uint8ClampedArray }): string | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = composed.width;
+  canvas.height = composed.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const imageData = ctx.createImageData(composed.width, composed.height);
+  imageData.data.set(composed.data);
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL("image/png");
+}
 
 export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRename }: {
   plot: Plot;
@@ -132,6 +156,117 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     return canvas.toDataURL("image/png");
   }, [raster, rasterMask, rasterDomain]);
 
+  /* ---------------- Lazy layers: NDMI, NDRE, true colour ------------------
+     Requested ONLY the first time the farmer selects the chip, over the NDVI
+     scene's own date; the module cache in `layer-fetch` memoises one raster
+     per plot + scene + layer, so switching back costs nothing and a retry is
+     one fresh request. Nothing is asked before a chip is selected. */
+  const [layerId, setLayerId] = useState<PlotLayerId>("ndvi");
+  const sceneDate = fieldData.observation?.sceneDate ?? null;
+  // A different NDVI scene supersedes every layer state (the cache is keyed
+  // per scene, so the chips simply re-ask on their next selection). The store
+  // remembers the scene its entries belong to, and the visible map is derived
+  // from that — a new scene therefore starts blank with no reset effect.
+  const sceneNonce = `${plot.id}·${sceneDate ?? "-"}`;
+  const [lazyStore, setLazyStore] = useState<{
+    nonce: string;
+    layers: Partial<Record<FieldLayerId, LazyLayerState>>;
+  }>({ nonce: "", layers: {} });
+  const lazyLayers = lazyStore.nonce === sceneNonce ? lazyStore.layers : {};
+  // The in-flight promise's resolution needs the scene that is current AT THAT
+  // MOMENT, not the one of the render that started the request.
+  const sceneDateRef = useRef(sceneDate);
+  useEffect(() => {
+    sceneDateRef.current = sceneDate;
+  }, [sceneDate]);
+
+  function ensureLayer(id: FieldLayerId, force: boolean) {
+    const observation = fieldData.observation;
+    const scene = observation?.raster ? observation.sceneDate : null;
+    if (!scene) return; // no anchored scene → nothing honest to request
+    const current = lazyLayers[id];
+    if (!force && current && (current.status === "loading" || current.status === "ready")) return;
+    const nonce = sceneNonce;
+    setLazyStore((prev) => ({
+      nonce,
+      layers: {
+        ...(prev.nonce === nonce ? prev.layers : {}),
+        [id]: {
+          fetchId: id,
+          status: "loading",
+          raster: (prev.nonce === nonce ? prev.layers[id]?.raster : undefined) ?? null,
+          reason: null,
+          technical: null,
+        },
+      },
+    }));
+    void requestPlotLayer(
+      { uid: plot.uid, plotId: plot.id, ring: plot.ring, layer: id, sceneDate: scene },
+      { force },
+    ).then((result) => {
+      // A newer scene arrived while this was in flight: its answer belongs to
+      // the old scene, and the new scene's keys will fetch their own.
+      if (sceneDateRef.current !== scene) return;
+      setLazyStore((prev) => ({
+        nonce,
+        layers: {
+          ...(prev.nonce === nonce ? prev.layers : {}),
+          [id]: result.ok
+            ? { fetchId: id, status: "ready", raster: result.raster, reason: null, technical: null }
+            : { fetchId: id, status: "error", raster: null, reason: result.reason, technical: result.technical },
+        },
+      }));
+    });
+  }
+
+  function selectLayer(id: PlotLayerId) {
+    setLayerId(id);
+    const entry = PLOT_LAYERS.find((l) => l.id === id);
+    if (entry?.fetchId) ensureLayer(entry.fetchId, false);
+  }
+
+  /* The selected layer's pixels: NDVI's own raster, a settled lazy index
+     raster, or (true colour) the image raster — always the SAME grid as the
+     NDVI layer, so every overlay lands pixel-for-pixel on its ground. */
+  const activeIndexId: "ndvi" | "ndmi" | "ndre" | null =
+    layerId === "ndvi" || layerId === "ndmi" || layerId === "ndre" ? layerId : null;
+  const activeIndexRaster: NdviRaster | null =
+    activeIndexId === "ndvi"
+      ? raster
+      : activeIndexId
+        ? lazyLayers[activeIndexId]?.status === "ready"
+          ? lazyLayers[activeIndexId]?.raster ?? null
+          : null
+        : null;
+  const activeMask = useMemo(
+    () => (activeIndexRaster ? measuredPixelMask(plot.ring, activeIndexRaster) : null),
+    [plot.ring, activeIndexRaster],
+  );
+  const activeDomain = useMemo(() => (activeIndexRaster ? ndviColorDomain(activeIndexRaster) : null), [activeIndexRaster]);
+  const trueColorState = layerId === "truecolor" ? lazyLayers.truecolor : undefined;
+  const trueColorRaster = trueColorState?.status === "ready" ? trueColorState.raster : null;
+  const trueColorMask = useMemo(
+    () => (trueColorRaster ? measuredPixelMask(plot.ring, trueColorRaster) : null),
+    [plot.ring, trueColorRaster],
+  );
+
+  /* The selected lazy index layer (NDMI/NDRE) painted on its OWN ramp. */
+  const indexLayerImage = useMemo(() => {
+    if (!activeIndexId || activeIndexId === "ndvi") return null;
+    if (!activeIndexRaster || !activeMask || !activeDomain || typeof document === "undefined") return null;
+    return composedToPng(composeIndexLayer(activeIndexId, activeIndexRaster, activeMask, activeDomain));
+  }, [activeIndexId, activeIndexRaster, activeMask, activeDomain]);
+
+  /* The true-colour image layer: the scene's real colours, masked pixels transparent. */
+  const trueColorImage = useMemo(() => {
+    if (!trueColorRaster || !trueColorMask || !trueColorRaster.rgb || typeof document === "undefined") return null;
+    return composedToPng(composeTrueColorLayer(trueColorRaster, trueColorMask, trueColorRaster.rgb));
+  }, [trueColorRaster, trueColorMask]);
+
+  const overlayImage = layerId === "ndvi" ? ndviImage : layerId === "truecolor" ? trueColorImage : indexLayerImage;
+  const activeLazy = layerId !== "ndvi" ? lazyLayers[layerId as FieldLayerId] : undefined;
+  const layerLoading = Boolean(showAnalysis && activeLazy?.status === "loading");
+
   /* The drawn boundary in the figure's own coordinates, for tap hit-testing. */
   const shapeRing = useMemo(() => {
     const scale = geometry.width > 0 ? geometry.svgWidth / geometry.width : 1;
@@ -160,7 +295,9 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
   }
 
   function handleFigureTap(event: React.MouseEvent<SVGSVGElement>) {
-    if (!raster || !rasterMask || !showAnalysis) return;
+    // The probe follows the selected index layer; the image layer carries no
+    // values, so a tap there has nothing to read.
+    if (!activeIndexRaster || !activeMask || !showAnalysis) return;
     const svg = event.currentTarget;
     const ctm = svg.getScreenCTM();
     if (!ctm) return;
@@ -169,10 +306,10 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
     /* The raster <image> spans [0..svgWidth]×[0..svgHeight] linearly, which
        is exactly the raster's bbox in this figure — so the inverse mapping is
        linear too and the probe lands on the pixel the farmer tapped. */
-    const lon = raster.bbox.west + (point.x / geometry.svgWidth) * (raster.bbox.east - raster.bbox.west);
-    const lat = raster.bbox.north - (point.y / geometry.svgHeight) * (raster.bbox.north - raster.bbox.south);
-    const found = nearestMeasuredPixel(raster, rasterMask, lon, lat);
-    if (found) setProbe({ ...found, tappedMeasured: pixelAtIsMeasured(raster, rasterMask, lon, lat) });
+    const lon = activeIndexRaster.bbox.west + (point.x / geometry.svgWidth) * (activeIndexRaster.bbox.east - activeIndexRaster.bbox.west);
+    const lat = activeIndexRaster.bbox.north - (point.y / geometry.svgHeight) * (activeIndexRaster.bbox.north - activeIndexRaster.bbox.south);
+    const found = nearestMeasuredPixel(activeIndexRaster, activeMask, lon, lat);
+    if (found) setProbe({ ...found, tappedMeasured: pixelAtIsMeasured(activeIndexRaster, activeMask, lon, lat) });
   }
 
   const center = centroidOf(plot.ring) ?? plot.centroid;
@@ -250,8 +387,9 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
           viewBox={`-20 -20 ${geometry.svgWidth + 40} ${geometry.svgHeight + 40}`}
           role="img" aria-label={t.shape} preserveAspectRatio="xMidYMid meet"
           onClick={handleFigureTap}
-          data-ndvi={showAnalysis && ndviImage ? "on" : undefined}
-          className={showAnalysis && ndviImage ? "plot-view__art-svg--probe" : undefined}
+          data-ndvi={showAnalysis && overlayImage && layerId === "ndvi" ? "on" : undefined}
+          data-layer={showAnalysis && overlayImage ? layerId : undefined}
+          className={showAnalysis && overlayImage && activeIndexId ? "plot-view__art-svg--probe" : undefined}
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
@@ -266,10 +404,20 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
           </defs>
           <polygon points={geometry.points} fill={`url(#${gradientId})`} />
           {texture && <image href={texture.url} x="0" y="0" width={geometry.svgWidth} height={geometry.svgHeight} preserveAspectRatio="none" clipPath={`url(#${clipId})`} />}
-          {showAnalysis && ndviImage && (
-            <image href={ndviImage} x="0" y="0" width={geometry.svgWidth} height={geometry.svgHeight} preserveAspectRatio="none" clipPath={`url(#${clipId})`} className="plot-view__ndvi" data-testid="plot-ndvi-layer" />
+          {showAnalysis && overlayImage && (
+            <image
+              href={overlayImage}
+              x="0"
+              y="0"
+              width={geometry.svgWidth}
+              height={geometry.svgHeight}
+              preserveAspectRatio="none"
+              clipPath={`url(#${clipId})`}
+              className="plot-view__ndvi"
+              data-testid={layerId === "ndvi" ? "plot-ndvi-layer" : `plot-layer-${layerId}`}
+            />
           )}
-          {analyzing && (
+          {(analyzing || layerLoading) && (
             /* Soft shimmer over the REAL plot shape only — the sweep is
                clipped to the drawn boundary, so the wait happens on the
                farmer's parcel, not on a rectangle around it. */
@@ -286,9 +434,11 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
         <span role="status">
           {analyzing
             ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.analyzing}</>
-            : loading
-              ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.loading}</>
-              : texture ? t.satellite : t.fallback}
+            : layerLoading
+              ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.layerLoading}</>
+              : loading
+                ? <><Loader2 size={13} className="plot-view__spinner" aria-hidden />{t.loading}</>
+                : texture ? t.satellite : t.fallback}
         </span>
         {texture && <small dir="ltr">Esri · Maxar · Earthstar Geographics · GIS User Community</small>}
       </figcaption>
@@ -355,6 +505,10 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
             climate={fieldData.climate}
             ring={plot.ring}
             onRetry={fieldData.refresh}
+            layerId={layerId}
+            onLayerSelect={selectLayer}
+            lazyLayers={lazyLayers}
+            onLayerRetry={(id) => ensureLayer(id, true)}
           />
         </div>
       ) : (
@@ -457,14 +611,14 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
       {/* Tap-a-point probe: the value of the nearest REAL pixel and its
           coordinates — never an interpolated colour from the smoothed layer. */}
       <Sheet open={probe !== null} onClose={() => setProbe(null)} title={t.probeTitle} subtitle={t.probeSubtitle} lang={lang}>
-        {probe && raster && rasterDomain && (
+        {probe && activeIndexRaster && activeDomain && activeIndexId && (
           <div className="plot-view__probe" data-testid="plot-pixel-probe">
             <div className="plot-view__probe-value">
-              <span className="plot-view__probe-swatch" style={{ background: ndviCssColor(probe.ndvi, rasterDomain) }} aria-hidden />
+              <span className="plot-view__probe-swatch" style={{ background: layerCssColor(activeIndexId, probe.ndvi, activeDomain) }} aria-hidden />
               <div>
-                <span className="plot-view__probe-label">{t.probeValue}</span>
+                <span className="plot-view__probe-label">{t.probeValue.replace("{index}", PROBE_INDEX[activeIndexId])}</span>
                 <strong dir="ltr">{number(probe.ndvi, 3)}</strong>
-                <small dir="ltr">NDVI</small>
+                <small dir="ltr">{PROBE_INDEX[activeIndexId]}</small>
               </div>
             </div>
             <dl className="plot-view__probe-coords">
@@ -474,7 +628,7 @@ export default function PlotView({ plot, lang, onBack, onRedraw, onDelete, onRen
             <p className="plot-view__probe-note" role="note">
               {probe.tappedMeasured ? t.probeHere : t.probeNote.replace("{m}", number(Math.round(probe.distanceM)))}
             </p>
-            <p className="plot-view__probe-pixel">{t.probePixel.replace("{res}", String(raster.resolutionM))}</p>
+            <p className="plot-view__probe-pixel">{t.probePixel.replace("{res}", String(activeIndexRaster.resolutionM))}</p>
           </div>
         )}
       </Sheet>

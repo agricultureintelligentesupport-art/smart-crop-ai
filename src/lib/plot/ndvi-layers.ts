@@ -14,15 +14,27 @@
  */
 
 import { pointInRing, type Ring } from "@/lib/geo/polygon";
-import type { NdviRaster } from "@/lib/field-data/types";
+import type { FieldLayerId, NdviRaster } from "@/lib/field-data/types";
 
 /* ------------------------------------------------------------------ */
 /*  Layer configuration                                                */
 /* ------------------------------------------------------------------ */
 
+/** Every layer id the switcher knows, wired, lazy or still locked. */
+export type PlotLayerId = "ndvi" | FieldLayerId | "moisture" | "thermal";
+
+/**
+ * How a layer gets its pixels:
+ *  • `primary` — rides on the main field-data observation (NDVI only);
+ *  • `lazy`    — one Process API request of its own, sent the FIRST time the
+ *                farmer selects the chip, over the NDVI scene's own date;
+ *  • `locked`  — listed but not wired yet ("قريباً").
+ */
+export type PlotLayerMode = "primary" | "lazy" | "locked";
+
 /** One switchable layer of the plot-details analysis. */
 export interface PlotLayerConfig {
-  id: string;
+  id: PlotLayerId;
   /** Arabic label of the chip (the app's primary language). */
   labelAr: string;
   /** French label, for the fr locale. */
@@ -32,15 +44,28 @@ export interface PlotLayerConfig {
   /** Where the numbers come from — printed under the legend. */
   source: string;
   /**
-   * False while the layer is listed but not yet wired to real data. Only NDVI
-   * is wired today; adding a layer = one config entry + its data path.
+   * True when the layer's pixels ride on the primary field-data observation
+   * (NDVI). Lazy layers answer their own request instead, so this flag stays
+   * their transport story, not their availability in the UI — `mode` drives
+   * the switcher.
    */
   available: boolean;
+  mode: PlotLayerMode;
+  /** Lazy layers only: the layer id their own request carries. */
+  fetchId?: FieldLayerId;
+  /** One-line meaning of the layer, shown on its card and in the overview. */
+  meaningAr?: string;
+  meaningFr?: string;
+  /** Extra caption under the legend, e.g. the 20 m resampling note. */
+  captionAr?: string;
+  captionFr?: string;
+  /** Unit-free index layers get a fixed gradient from `LAYER_COLOR_STOPS`. */
+  hasIndex?: boolean;
 }
 
 /**
- * The layer switcher's source of truth. Rendered as RTL chips; unavailable
- * layers stay visible but disabled, so the switcher is already extensible.
+ * The layer switcher's source of truth. Rendered as RTL chips; locked layers
+ * stay visible but disabled, so the switcher is already extensible.
  */
 export const PLOT_LAYERS: readonly PlotLayerConfig[] = [
   {
@@ -50,6 +75,53 @@ export const PLOT_LAYERS: readonly PlotLayerConfig[] = [
     unit: "NDVI",
     source: "Sentinel-2 L2A · Copernicus",
     available: true,
+    mode: "primary",
+    meaningAr: "كثافة الغطاء النباتي وقوّته",
+    meaningFr: "Densité et vigueur de la végétation",
+    hasIndex: true,
+  },
+  {
+    id: "ndmi",
+    labelAr: "رطوبة النبات (NDMI)",
+    labelFr: "Eau du couvert (NDMI)",
+    unit: "بدون وحدة",
+    source: "Sentinel-2 L2A · Copernicus",
+    available: false,
+    mode: "lazy",
+    fetchId: "ndmi",
+    meaningAr: "رطوبة الغطاء النباتي، لا رطوبة التربة",
+    meaningFr: "Eau dans le couvert végétal, pas dans le sol",
+    captionAr: "الحزمة B11 بدقة 20 م مُعاد أخذ العينات إلى شبكة 10 م",
+    captionFr: "Bande B11 à 20 m rééchantillonnée sur la grille 10 m",
+    hasIndex: true,
+  },
+  {
+    id: "ndre",
+    labelAr: "الكلوروفيل (NDRE)",
+    labelFr: "Chlorophylle (NDRE)",
+    unit: "بدون وحدة",
+    source: "Sentinel-2 L2A · Copernicus",
+    available: false,
+    mode: "lazy",
+    fetchId: "ndre",
+    meaningAr: "كلوروفيل الأوراق على الحافة الحمراء — إنذار مبكر للإجهاد",
+    meaningFr: "Chlorophylle foliaire (red edge) — alerte précoce de stress",
+    captionAr: "الحزمة B05 بدقة 20 م مُعاد أخذ العينات إلى شبكة 10 م",
+    captionFr: "Bande B05 à 20 m rééchantillonnée sur la grille 10 m",
+    hasIndex: true,
+  },
+  {
+    id: "truecolor",
+    labelAr: "الصورة الحقيقية",
+    labelFr: "Image vraie",
+    unit: "صورة",
+    source: "Sentinel-2 L2A · Copernicus",
+    available: false,
+    mode: "lazy",
+    fetchId: "truecolor",
+    meaningAr: "ألوان القطعة كما رآها القمر في نفس اللقطة — بدون قيم رقمية",
+    meaningFr: "Les couleurs de la parcelle telles que vues par le satellite — sans valeurs",
+    hasIndex: false,
   },
   {
     id: "moisture",
@@ -58,6 +130,7 @@ export const PLOT_LAYERS: readonly PlotLayerConfig[] = [
     unit: "لتر/هكتار",
     source: "—",
     available: false,
+    mode: "locked",
   },
   {
     id: "thermal",
@@ -66,6 +139,7 @@ export const PLOT_LAYERS: readonly PlotLayerConfig[] = [
     unit: "٪",
     source: "—",
     available: false,
+    mode: "locked",
   },
 ];
 
@@ -166,16 +240,97 @@ export function ndviCssColor(value: number, domain: readonly [number, number]): 
  * extra parameters, no way for the bar and the pixels to disagree.
  */
 export function ndviLegendGradientCss(): string {
-  const stops = Array.from({ length: 9 }, (_, i) => {
+  return legendGradientCss(NDVI_COLOR_STOPS);
+}
+
+/** Legend-bar CSS across any ramp — 9 samples of the same scale the canvas paints. */
+export function legendGradientCss(stops: readonly { at: number; rgb: readonly [number, number, number] }[]): string {
+  const parts = Array.from({ length: 9 }, (_, i) => {
     const t = i / 8;
-    const [r, g, b] = ndviColorAt(t);
+    const [r, g, b] = colorAt(stops, t);
     return `rgb(${r}, ${g}, ${b}) ${(t * 100).toFixed(0)}%`;
   });
-  return `linear-gradient(to right, ${stops.join(", ")})`;
+  return `linear-gradient(to right, ${parts.join(", ")})`;
+}
+
+/** Generic ramp interpolation — the NDVI ramp's own implementation. */
+export function colorAt(stops: readonly { at: number; rgb: readonly [number, number, number] }[], t: number): [number, number, number] {
+  const clamped = Math.min(1, Math.max(0, t));
+  let lo = stops[0];
+  let hi = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i += 1) {
+    if (clamped >= stops[i].at && clamped <= stops[i + 1].at) {
+      lo = stops[i];
+      hi = stops[i + 1];
+      break;
+    }
+  }
+  const span = hi.at - lo.at;
+  const local = span > 0 ? (clamped - lo.at) / span : 0;
+  return [
+    Math.round(lerp(lo.rgb[0], hi.rgb[0], local)),
+    Math.round(lerp(lo.rgb[1], hi.rgb[1], local)),
+    Math.round(lerp(lo.rgb[2], hi.rgb[2], local)),
+  ];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Per-layer colour scales (each layer's ONE fixed gradient)          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * NDMI — canopy water: dry canopy (warm tan) to a fully hydrated canopy
+ * (deep water blue). Unit-free index, legend quotes the field's real min/max.
+ */
+export const NDMI_COLOR_STOPS: readonly { at: number; rgb: readonly [number, number, number] }[] = [
+  { at: 0, rgb: [173, 143, 100] }, // dry canopy
+  { at: 0.3, rgb: [146, 170, 128] },
+  { at: 0.55, rgb: [96, 161, 150] },
+  { at: 0.8, rgb: [52, 126, 152] },
+  { at: 1, rgb: [23, 82, 124] }, // hydrated canopy
+];
+
+/**
+ * NDRE — red-edge chlorophyll: low chlorophyll (pale yellow-green) to dense
+ * active chlorophyll (deep green). Unit-free index, same real-min/max legend.
+ */
+export const NDRE_COLOR_STOPS: readonly { at: number; rgb: readonly [number, number, number] }[] = [
+  { at: 0, rgb: [199, 189, 108] }, // low chlorophyll
+  { at: 0.3, rgb: [168, 181, 94] },
+  { at: 0.55, rgb: [118, 165, 79] },
+  { at: 0.8, rgb: [61, 130, 70] },
+  { at: 1, rgb: [19, 84, 49] }, // dense chlorophyll
+];
+
+/** The fixed ramp of each index layer; unknown ids fall back to the NDVI ramp. */
+export function layerColorStops(layerId: string): readonly { at: number; rgb: readonly [number, number, number] }[] {
+  if (layerId === "ndmi") return NDMI_COLOR_STOPS;
+  if (layerId === "ndre") return NDRE_COLOR_STOPS;
+  return NDVI_COLOR_STOPS;
+}
+
+/** Pixel → colour in the field's own domain, painted with the layer's ramp. */
+export function layerColorFor(layerId: string, value: number, domain: readonly [number, number]): [number, number, number] {
+  const [min, max] = domain;
+  const t = max > min ? (value - min) / (max - min) : 0.5;
+  return colorAt(layerColorStops(layerId), t);
+}
+
+/** `rgb(r, g, b)` of a measured value on the layer's ramp — legend, probe. */
+export function layerCssColor(layerId: string, value: number, domain: readonly [number, number]): string {
+  const [r, g, b] = layerColorFor(layerId, value, domain);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** The layer's legend bar CSS — the same ramp its canvas paints. */
+export function layerLegendGradientCss(layerId: string): string {
+  return legendGradientCss(layerColorStops(layerId));
 }
 
 /** Opacity of a measured pixel over the satellite imagery (display choice). */
 export const NDVI_LAYER_ALPHA = 0.85;
+/** The true-colour image reads as an image: a touch more opaque than indices. */
+export const TRUE_COLOR_LAYER_ALPHA = 0.94;
 
 /* ------------------------------------------------------------------ */
 /*  Polygon clipping mask                                              */
@@ -319,6 +474,134 @@ export function composeNdviLayer(
           r += cr * ca;
           g += cg * ca;
           b += cb * ca;
+          a += ca;
+        }
+      }
+      const o = (oy * outW + ox) * 4;
+      if (a <= 0) continue; // stays fully transparent
+      data[o] = r / a;
+      data[o + 1] = g / a;
+      data[o + 2] = b / a;
+      data[o + 3] = a;
+    }
+  }
+  return { width: outW, height: outH, data };
+}
+
+/**
+ * Renders ANY unit-free index layer (NDVI, NDMI, NDRE) with the layer's own
+ * fixed ramp — the exact composition rules of `composeNdviLayer`: measured
+ * pixels only, the field's real domain, premultiplied bilinear smoothing that
+ * can soften an edge but never fill a masked pixel.
+ */
+export function composeIndexLayer(
+  layerId: string,
+  raster: NdviRaster,
+  mask: Uint8Array,
+  domain: readonly [number, number],
+): ComposedLayer {
+  const longest = Math.max(raster.width, raster.height);
+  const scale = Math.max(1, Math.min(6, Math.round(DISPLAY_TARGET_PX / Math.max(1, longest))));
+  const outW = Math.min(1024, raster.width * scale);
+  const outH = Math.min(1024, raster.height * scale);
+  const data = new Uint8ClampedArray(outW * outH * 4);
+  const baseAlpha = NDVI_LAYER_ALPHA * 255;
+
+  for (let oy = 0; oy < outH; oy += 1) {
+    const fy = (oy + 0.5) / scale - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let ox = 0; ox < outW; ox += 1) {
+      const fx = (ox + 0.5) / scale - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let dy = 0; dy <= 1; dy += 1) {
+        const wy = dy === 0 ? 1 - ty : ty;
+        if (wy <= 0) continue;
+        const y = y0 + dy;
+        if (y < 0 || y >= raster.height) continue;
+        for (let dx = 0; dx <= 1; dx += 1) {
+          const wx = dx === 0 ? 1 - tx : tx;
+          if (wx <= 0) continue;
+          const x = x0 + dx;
+          if (x < 0 || x >= raster.width) continue;
+          const i = y * raster.width + x;
+          if (mask[i] !== 1) continue;
+          const value = raster.ndvi[i];
+          if (value === null) continue;
+          const [cr, cg, cb] = layerColorFor(layerId, value, domain);
+          const weight = wx * wy;
+          const ca = baseAlpha * weight;
+          r += cr * ca;
+          g += cg * ca;
+          b += cb * ca;
+          a += ca;
+        }
+      }
+      const o = (oy * outW + ox) * 4;
+      if (a <= 0) continue; // stays fully transparent
+      data[o] = r / a;
+      data[o + 1] = g / a;
+      data[o + 2] = b / a;
+      data[o + 3] = a;
+    }
+  }
+  return { width: outW, height: outH, data };
+}
+
+/**
+ * Renders the true-colour layer as an RGBA image: measured pixels paint their
+ * REAL scene colours at `TRUE_COLOR_LAYER_ALPHA`, `dataMask` 0 pixels stay
+ * fully transparent (the imagery shows through — an image layer invents
+ * nothing either). Same premultiplied bilinear smoothing as the index layers.
+ */
+export function composeTrueColorLayer(
+  raster: NdviRaster,
+  mask: Uint8Array,
+  rgb: readonly ([number, number, number] | null)[],
+): ComposedLayer {
+  const longest = Math.max(raster.width, raster.height);
+  const scale = Math.max(1, Math.min(6, Math.round(DISPLAY_TARGET_PX / Math.max(1, longest))));
+  const outW = Math.min(1024, raster.width * scale);
+  const outH = Math.min(1024, raster.height * scale);
+  const data = new Uint8ClampedArray(outW * outH * 4);
+  const baseAlpha = TRUE_COLOR_LAYER_ALPHA * 255;
+
+  for (let oy = 0; oy < outH; oy += 1) {
+    const fy = (oy + 0.5) / scale - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let ox = 0; ox < outW; ox += 1) {
+      const fx = (ox + 0.5) / scale - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let dy = 0; dy <= 1; dy += 1) {
+        const wy = dy === 0 ? 1 - ty : ty;
+        if (wy <= 0) continue;
+        const y = y0 + dy;
+        if (y < 0 || y >= raster.height) continue;
+        for (let dx = 0; dx <= 1; dx += 1) {
+          const wx = dx === 0 ? 1 - tx : tx;
+          if (wx <= 0) continue;
+          const x = x0 + dx;
+          if (x < 0 || x >= raster.width) continue;
+          const i = y * raster.width + x;
+          if (mask[i] !== 1) continue;
+          const colour = rgb[i];
+          if (!colour) continue;
+          const weight = wx * wy;
+          const ca = baseAlpha * weight;
+          r += colour[0] * ca;
+          g += colour[1] * ca;
+          b += colour[2] * ca;
           a += ca;
         }
       }
