@@ -1,0 +1,617 @@
+/* ==================================================================
+   «المرصد الزراعي» — Agricultural Observatory design tokens & chrome
+   for the plot flow (Home plot card, draw, confirm, analysis).
+
+   EVERY selector below lives under `.plot-theme`, so nothing leaks
+   into the assistant, the account/settings sheets or the rest of the
+   dashboard. The NDVI ramp is the ONE fixed gradient: the same stops
+   `src/lib/plot/ndvi-layers.ts` paints on the canvas (its legend CSS
+   and this token are generated from the same scale).
+   ================================================================== */
+
+.plot-theme {
+  /* ---- type scale ---- */
+  --pt-text-hero: clamp(46px, 13.5vw, 62px);
+  --pt-text-title: clamp(22px, 6vw, 30px);
+  --pt-text-body: 15px;
+  --pt-text-caption: 11.5px;
+
+  /* ---- radius / elevation / spacing ---- */
+  --pt-r-sm: 12px;
+  --pt-r-md: 16px;
+  --pt-r-lg: 22px;
+  --pt-r-xl: 28px;
+  --pt-r-full: 999px;
+  --pt-shadow-1: 0 1px 2px rgba(28, 42, 30, 0.06), 0 10px 26px -20px rgba(28, 42, 30, 0.5);
+  --pt-shadow-2: 0 1px 2px rgba(28, 42, 30, 0.07), 0 22px 44px -24px rgba(28, 42, 30, 0.45);
+  --pt-shadow-night: 0 -24px 64px -28px rgba(0, 0, 0, 0.85);
+  --pt-s-1: 4px;
+  --pt-s-2: 8px;
+  --pt-s-3: 12px;
+  --pt-s-4: 16px;
+  --pt-s-5: 24px;
+
+  /* ---- semantic palette ---- */
+  --pt-health: #46a56b;            /* health green            */
+  --pt-health-deep: #1f7a4d;       /* readable green on light */
+  --pt-health-ink: #1c6a44;
+  --pt-health-wash: #e4f1e3;
+  --pt-caution: #d9a13b;           /* caution amber           */
+  --pt-caution-ink: #8a6215;
+  --pt-caution-wash: #f7edd6;
+  --pt-risk: #bf5b3d;              /* risk terracotta         */
+  --pt-risk-ink: #a1431f;
+  --pt-risk-wash: #f6e6dd;
+  --pt-water: #4a94c9;             /* water blue              */
+  --pt-water-ink: #2b6ea3;
+  --pt-water-wash: #e2eef6;
+  --pt-heat: #dd7f3c;              /* heat orange             */
+  --pt-heat-ink: #a85a17;
+  --pt-heat-wash: #f8e9da;
+
+  /* ---- light surfaces (home / draw / confirm) ---- */
+  --pt-canvas: #f3f6ee;
+  --pt-surface: #fbfcf7;
+  --pt-surface-2: #edf2e4;
+  --pt-line: #dbe3cd;
+  --pt-line-strong: #c4d1b4;
+  --pt-ink: #1c2a1e;
+  --pt-ink-soft: #56654e;
+  --pt-ink-faint: #627158;
+
+  /* ---- night surfaces (analysis observatory) ---- */
+  --pt-night-canvas: #0c120b;
+  --pt-night-surface: #131b10;
+  --pt-night-raised: #1b2616;
+  --pt-night-line: rgba(255, 255, 255, 0.09);
+  --pt-night-ink: #eef3e3;
+  --pt-night-soft: #aebca0;
+  --pt-night-faint: #87977a;
+  --pt-night-health: #7fd0a0;
+  --pt-night-caution: #eac176;
+  --pt-night-risk: #e79b7f;
+  --pt-night-water: #8fc0e4;
+  --pt-night-heat: #eeb083;
+
+  /* ---- the ONE fixed NDVI gradient (same scale the raster paints) ---- */
+  --pt-ndvi: linear-gradient(
+    to right,
+    rgb(154, 103, 60) 0%,
+    rgb(174, 132, 73) 13%,
+    rgb(193, 161, 85) 25%,
+    rgb(178, 171, 92) 38%,
+    rgb(140, 169, 95) 50%,
+    rgb(102, 155, 92) 63%,
+    rgb(63, 134, 85) 75%,
+    rgb(34, 107, 71) 88%,
+    rgb(11, 78, 52) 100%
+  );
+
+  /* ---- the plot shape's own ramp (fallback figure + thumbnails) ---- */
+  --pt-shape-1: #65b991;
+  --pt-shape-2: #168367;
+  --pt-shape-3: #064e3b;
+
+  font-family: var(--font-arabic);
+  color: var(--pt-ink);
+}
+
+.plot-theme button {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.plot-theme button:disabled {
+  cursor: not-allowed;
+}
+.plot-theme :is(button, input, a, summary):focus-visible {
+  outline: 3px solid var(--pt-health-ink);
+  outline-offset: 2px;
+}
+
+/* Faint «survey rows» texture for the observatory surfaces. */
+.plot-theme .plot-texture::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.4;
+  background-image: repeating-linear-gradient(
+    114deg,
+    rgba(28, 42, 30, 0.045) 0 1px,
+    transparent 1px 15px
+  );
+  -webkit-mask-image: linear-gradient(180deg, transparent, #000 26%, #000 78%, transparent);
+  mask-image: linear-gradient(180deg, transparent, #000 26%, #000 78%, transparent);
+}
+
+/* ---- SVG figure palette (stops / strokes pick up tokens) ---- */
+.plot-fig__stop-a { stop-color: var(--pt-shape-1); }
+.plot-fig__stop-b { stop-color: var(--pt-shape-2); }
+.plot-fig__stop-c { stop-color: var(--pt-shape-3); }
+.plot-fig__outline { stroke: #ffffff; }
+.plot-fig__outline-inner { stroke: var(--pt-health-deep); }
+
+/* ==================================================================
+   Shared motion: staggered rise, shimmer, spinner
+   ================================================================== */
+@keyframes plot-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+.plot-theme .plot-rise {
+  animation: plot-rise 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+@keyframes plot-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.plot-theme .plot-skeleton {
+  border-radius: var(--pt-r-sm);
+  background: linear-gradient(
+    90deg,
+    var(--pt-surface-2) 25%,
+    #ffffff 50%,
+    var(--pt-surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: plot-shimmer 1.6s linear infinite;
+}
+
+@keyframes plot-view-spin {
+  to { transform: rotate(360deg); }
+}
+.plot-theme .plot-view__spinner {
+  animation: plot-view-spin 1s linear infinite;
+}
+
+/* ==================================================================
+   StepHeader — «1 حدّد · 2 أكّد · 3 حلّل» (light + night tones)
+   ================================================================== */
+.plot-steps {
+  padding: var(--pt-s-1) var(--pt-s-4) var(--pt-s-2);
+  flex-shrink: 0;
+}
+.plot-steps ol {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  width: 100%;
+  max-width: 28rem;
+  display: flex;
+  align-items: center;
+}
+.plot-steps li {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.plot-steps li:last-child { flex: none; }
+.plot-steps__link {
+  height: 2px;
+  flex: 1 1 auto;
+  margin-inline: var(--pt-s-1);
+  border-radius: var(--pt-r-full);
+  background: rgba(28, 42, 30, 0.12);
+  transition: background-color 0.3s ease;
+}
+.plot-steps__link--on {
+  background: linear-gradient(to left, var(--pt-health), var(--pt-health-deep));
+}
+.plot-steps__step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding-inline: 6px;
+  border-radius: var(--pt-r-full);
+  color: var(--pt-ink-faint);
+}
+.plot-steps__num {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--pt-r-full);
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  background: rgba(28, 42, 30, 0.06);
+  color: var(--pt-ink-faint);
+}
+.plot-steps__step--done { color: var(--pt-health-ink); }
+.plot-steps__step--done .plot-steps__num {
+  background: var(--pt-health-wash);
+  color: var(--pt-health-ink);
+  box-shadow: inset 0 0 0 1px rgba(31, 122, 77, 0.35);
+}
+.plot-steps__step--current { color: var(--pt-ink); }
+.plot-steps__step--current .plot-steps__num {
+  background: linear-gradient(140deg, var(--pt-health), var(--pt-health-deep));
+  color: #ffffff;
+  box-shadow: 0 8px 18px -8px rgba(31, 122, 77, 0.75);
+}
+.plot-steps__label { font-size: 12.5px; font-weight: 700; line-height: 1; }
+.plot-steps__step--current .plot-steps__label { font-weight: 900; }
+
+/* Night tone — over the analysis hero. */
+.plot-steps--night .plot-steps__link { background: rgba(255, 255, 255, 0.14); }
+.plot-steps--night .plot-steps__link--on {
+  background: linear-gradient(to left, var(--pt-night-health), rgba(127, 208, 160, 0.35));
+}
+.plot-steps--night .plot-steps__step { color: rgba(238, 243, 227, 0.4); }
+.plot-steps--night .plot-steps__num {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(238, 243, 227, 0.45);
+}
+.plot-steps--night .plot-steps__step--done { color: var(--pt-night-health); }
+.plot-steps--night .plot-steps__step--done .plot-steps__num {
+  background: rgba(127, 208, 160, 0.16);
+  color: var(--pt-night-health);
+  box-shadow: inset 0 0 0 1px rgba(127, 208, 160, 0.35);
+}
+.plot-steps--night .plot-steps__step--current { color: var(--pt-night-ink); }
+.plot-steps--night .plot-steps__step--current .plot-steps__num {
+  background: linear-gradient(140deg, var(--pt-health), var(--pt-health-deep));
+  color: #ffffff;
+  box-shadow: 0 8px 20px -8px rgba(70, 165, 107, 0.9);
+}
+
+/* ==================================================================
+   Home — «قطعتي» hero card
+   ================================================================== */
+.plot-home {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pt-s-3);
+  min-width: 0;
+  padding: var(--pt-s-4);
+  border-radius: var(--pt-r-lg);
+  border: 1px solid var(--pt-line);
+  background:
+    radial-gradient(120% 60% at 100% 0%, rgba(70, 165, 107, 0.1), transparent 55%),
+    var(--pt-surface);
+  box-shadow: var(--pt-shadow-2);
+}
+.plot-home__head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--pt-s-3);
+}
+.plot-home__icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  background: var(--pt-health-wash);
+  color: var(--pt-health-ink);
+  box-shadow: inset 0 0 0 1px rgba(31, 122, 77, 0.25);
+}
+.plot-home__titles { min-width: 0; flex: 1; padding-top: 2px; }
+.plot-home__titles h2 {
+  margin: 0;
+  font-size: var(--pt-text-body);
+  font-weight: 900;
+  letter-spacing: -0.2px;
+  color: var(--pt-ink);
+}
+.plot-home__titles p {
+  margin: 2px 0 0;
+  font-size: var(--pt-text-caption);
+  font-weight: 600;
+  color: var(--pt-ink-faint);
+}
+.plot-home__ndvi-flag {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--pt-r-full);
+  background: var(--pt-surface-2);
+  border: 1px solid var(--pt-line);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  color: var(--pt-health-ink);
+}
+
+.plot-home__body { position: relative; display: flex; flex-direction: column; gap: var(--pt-s-3); }
+.plot-home__row { display: flex; align-items: center; gap: var(--pt-s-3); }
+.plot-home__thumb {
+  width: 86px;
+  height: 86px;
+  flex-shrink: 0;
+  padding: 7px;
+  border-radius: var(--pt-r-md);
+  background: var(--pt-surface-2);
+  box-shadow: inset 0 0 0 1px var(--pt-line);
+}
+.plot-home__thumb svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 7px 10px rgba(24, 62, 48, 0.3));
+}
+.plot-home__meta { min-width: 0; flex: 1; }
+.plot-home__name {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 900;
+  line-height: 1.5;
+  color: var(--pt-ink);
+  overflow-wrap: anywhere;
+}
+.plot-home__fact {
+  margin: 3px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pt-ink-soft);
+}
+.plot-home__fact svg { flex-shrink: 0; color: var(--pt-health-ink); }
+
+/* Mini NDVI gradient strip — rendered only with a real analysis. */
+.plot-home__strip {
+  position: relative;
+  height: 9px;
+  border-radius: var(--pt-r-full);
+  background: var(--pt-ndvi);
+  box-shadow: inset 0 0 0 1px rgba(11, 78, 52, 0.28);
+}
+.plot-home__strip-marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1.5px rgba(11, 78, 52, 0.55);
+}
+.plot-home__strip-note {
+  margin: 5px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--pt-ink-faint);
+}
+
+.plot-home__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--pt-s-3);
+  padding-block: var(--pt-s-1);
+  text-align: center;
+}
+.plot-home__empty-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: var(--pt-health-wash);
+  color: var(--pt-health-ink);
+  box-shadow: inset 0 0 0 1px rgba(31, 122, 77, 0.22);
+}
+.plot-home__empty p {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.7;
+  color: var(--pt-ink-soft);
+}
+
+/* The plot flow's shared CTA. */
+.plot-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--pt-s-2);
+  width: 100%;
+  min-height: 48px;
+  border-radius: 14px;
+  background: linear-gradient(140deg, var(--pt-health), var(--pt-health-deep));
+  color: #ffffff;
+  font-size: 13.5px;
+  font-weight: 800;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    0 14px 28px -16px rgba(31, 122, 77, 0.75);
+  transition: filter 0.18s ease, transform 0.18s ease;
+}
+.plot-cta:hover { filter: brightness(1.06); }
+.plot-cta:active { transform: scale(0.985); }
+.plot-cta:disabled { opacity: 0.6; }
+
+/* ==================================================================
+   Draw screen chrome
+   ================================================================== */
+.plot-draw {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(12, 18, 11, 0.52);
+}
+@media (min-width: 640px) {
+  .plot-draw { align-items: center; padding: var(--pt-s-5); }
+}
+.plot-draw__panel {
+  display: flex;
+  flex-direction: column;
+  height: 92dvh;
+  width: 100%;
+  max-width: 42rem;
+  overflow: hidden;
+  border-radius: var(--pt-r-xl) var(--pt-r-xl) 0 0;
+  background: var(--pt-canvas);
+  color: var(--pt-ink);
+  box-shadow: 0 -18px 60px -20px rgba(0, 0, 0, 0.5);
+}
+@media (min-width: 640px) {
+  .plot-draw__panel { height: 88dvh; border-radius: var(--pt-r-xl); }
+}
+.plot-draw__header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--pt-s-3);
+  padding: max(var(--pt-s-3), env(safe-area-inset-top)) var(--pt-s-4) 10px;
+  border-bottom: 1px solid var(--pt-line);
+  background: var(--pt-surface);
+}
+.plot-draw__title h2 { margin: 0; font-size: 15px; font-weight: 900; color: var(--pt-ink); }
+.plot-draw__title p {
+  margin: 3px 0 0;
+  font-size: var(--pt-text-caption);
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--pt-ink-faint);
+}
+.plot-draw__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+  border-radius: var(--pt-r-full);
+  color: var(--pt-ink-soft);
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+.plot-draw__close:hover { background: var(--pt-surface-2); }
+
+.plot-draw__footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px var(--pt-s-4) max(var(--pt-s-3), env(safe-area-inset-bottom));
+  border-top: 1px solid var(--pt-line);
+  background: var(--pt-surface);
+}
+.plot-draw__bar { display: flex; align-items: center; gap: var(--pt-s-2); }
+.plot-draw__chip {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  flex-shrink: 0;
+  padding-inline: 14px;
+  border-radius: var(--pt-r-full);
+  background: var(--pt-surface-2);
+  box-shadow: inset 0 0 0 1px var(--pt-line);
+  font-size: 11.5px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: var(--pt-ink);
+}
+.plot-draw__primary { flex: 1; }
+.plot-draw__primary:disabled { opacity: 0.5; }
+.plot-draw__attribution {
+  margin: 0;
+  text-align: center;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--pt-ink-faint);
+}
+.plot-draw__error {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: var(--pt-r-sm);
+  background: var(--pt-caution-wash);
+  box-shadow: inset 0 0 0 1px rgba(138, 98, 21, 0.3);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: var(--pt-caution-ink);
+}
+.plot-draw__loading {
+  position: absolute;
+  top: var(--pt-s-3);
+  inset-inline: 0;
+  margin-inline: auto;
+  width: max-content;
+  padding: 6px 14px;
+  border-radius: var(--pt-r-full);
+  background: rgba(12, 18, 11, 0.85);
+  color: var(--pt-night-ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+.plot-draw__locate {
+  position: absolute;
+  bottom: var(--pt-s-3);
+  inset-inline-end: var(--pt-s-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--pt-r-full);
+  background: var(--pt-health-deep);
+  color: #ffffff;
+  box-shadow: 0 14px 28px -12px rgba(6, 78, 59, 0.8);
+  transition: filter 0.15s ease;
+}
+.plot-draw__locate:hover { filter: brightness(1.08); }
+.plot-draw__locate:disabled { opacity: 0.6; }
+.plot-draw__helpers {
+  position: absolute;
+  bottom: var(--pt-s-3);
+  inset-inline-start: var(--pt-s-3);
+  display: flex;
+  align-items: center;
+  gap: var(--pt-s-2);
+}
+.plot-draw__helper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--pt-r-full);
+  background: var(--pt-surface);
+  color: var(--pt-ink-soft);
+  box-shadow: 0 14px 28px -14px rgba(6, 78, 59, 0.7);
+  transition: filter 0.15s ease;
+}
+.plot-draw__helper:hover { filter: brightness(1.03); }
+.plot-draw__helper:disabled { opacity: 0.5; }
+
+/* ================================================================== */
+/*  Reduced motion / transparency / contrast                          */
+/* ================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .plot-theme,
+  .plot-theme *,
+  .plot-theme *::before,
+  .plot-theme *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@media (prefers-contrast: more) {
+  .plot-theme :is(button, input, summary):focus-visible {
+    outline-color: currentColor;
+  }
+}

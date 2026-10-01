@@ -9,7 +9,9 @@
  *
  * No plot yet: an empty state whose primary button opens the draw screen.
  * Display only — every value comes straight from the saved `Plot` and the
- * existing observation, and nothing is recomputed here.
+ * existing observation, and nothing is recomputed here. The mini NDVI strip
+ * (the flow's one fixed gradient) is drawn only when a real analysis exists,
+ * with a marker at the measured mean when pixel data is present.
  */
 
 import { useEffect, useId, useMemo, useState } from "react";
@@ -17,9 +19,9 @@ import { CalendarDays, Expand, MapPinned } from "lucide-react";
 import type { FieldObservation, Plot } from "@/lib/field-data/types";
 import { plotGeometry } from "@/lib/plot/geometry";
 import { composePlotTexture, type PlotTexture } from "@/lib/plot/imagery";
+import { measuredPixelMask, ndviColorDomain, rasterStats } from "@/lib/plot/ndvi-layers";
 import type { Lang } from "@/lib/wilayas";
-import { PrimaryButton } from "@/components/auth/ui";
-import { Card } from "./parts";
+import "@/components/plot/plot-theme.css";
 
 /** Arabic labels only — the flow's language. */
 const COPY = {
@@ -32,6 +34,8 @@ const COPY = {
   lastAnalysis: "آخر تحليل",
   shape: "شكل قطعتك من الصورة الفضائية",
   loading: "جارٍ تحميل قطعتك…",
+  ndviScale: "مقياس NDVI للقطة الأخيرة",
+  mean: "المتوسط",
 };
 
 export default function MyPlotCard({
@@ -71,56 +75,85 @@ export default function MyPlotCard({
     return () => controller.abort();
   }, [geometry]);
 
+  /* Mean of the REAL measured pixels — positions the strip's marker. `null`
+     when the analysis carries no raster, then the strip stays unmarked. */
+  const meanNdvi = useMemo(() => {
+    const raster = observation?.raster;
+    if (!plot || !raster) return null;
+    const mask = measuredPixelMask(plot.ring, raster);
+    const stats = rasterStats(raster, mask);
+    return stats.count > 0 && stats.mean !== null ? { mean: stats.mean, domain: ndviColorDomain(raster) } : null;
+  }, [observation, plot]);
+
   const number = (value: number, decimals = 0) =>
     new Intl.NumberFormat(lang === "ar" ? "ar-DZ-u-nu-latn" : "fr-FR", {
       minimumFractionDigits: decimals,
       maximumFractionDigits: decimals,
     }).format(value);
 
+  const markerPos =
+    meanNdvi && meanNdvi.domain
+      ? Math.round(
+          Math.min(1, Math.max(0, (meanNdvi.mean - meanNdvi.domain[0]) / (meanNdvi.domain[1] - meanNdvi.domain[0]))) * 100,
+        )
+      : null;
+
   return (
-    <Card
-      title={COPY.title}
-      icon={<MapPinned size={18} strokeWidth={2.4} aria-hidden />}
-    >
+    <section aria-label={COPY.title} className="plot-theme plot-home">
+      <header className="plot-home__head plot-rise" style={{ "--i": 0 } as React.CSSProperties}>
+        <span className="plot-home__icon">
+          <MapPinned size={18} strokeWidth={2.4} aria-hidden />
+        </span>
+        <div className="plot-home__titles">
+          <h2>{COPY.title}</h2>
+          <p>{plot ? `${COPY.area}: ${number(plot.areaHa, 2)} ${COPY.ha}` : loading ? COPY.loading : ""}</p>
+        </div>
+        {observation && (
+          <span className="plot-home__ndvi-flag" dir="ltr">
+            NDVI
+          </span>
+        )}
+      </header>
+
       {loading && !plot ? (
-        <div className="flex items-center gap-3" aria-busy="true">
-          <div className="h-[76px] w-[76px] shrink-0 animate-pulse rounded-[1.1rem] bg-emerald-100/70" />
-          <div className="flex-1 space-y-2">
-            <div className="h-3.5 w-2/3 animate-pulse rounded-full bg-emerald-100/70" />
-            <div className="h-3 w-1/2 animate-pulse rounded-full bg-emerald-100/50" />
+        <div className="plot-home__body" aria-busy="true">
+          <div className="plot-home__row">
+            <div className="plot-skeleton" style={{ width: 86, height: 86, borderRadius: 16 }} />
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="plot-skeleton" style={{ height: 14, width: "66%" }} />
+              <div className="plot-skeleton" style={{ height: 11, width: "45%" }} />
+            </div>
           </div>
+          <div className="plot-skeleton" style={{ height: 48 }} />
         </div>
       ) : !plot ? (
-        <div className="flex flex-col items-center gap-3 py-1 text-center">
-          <span
-            aria-hidden
-            className="grid h-14 w-14 place-items-center rounded-[1.15rem] bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
-          >
+        <div className="plot-home__body plot-home__empty plot-rise" style={{ "--i": 1 } as React.CSSProperties}>
+          <span className="plot-home__empty-icon" aria-hidden>
             <MapPinned size={24} strokeWidth={2.2} />
           </span>
-          <p className="text-[12.5px] font-semibold leading-5 text-emerald-900/60">{COPY.empty}</p>
-          <PrimaryButton icon={<MapPinned size={17} strokeWidth={2.6} aria-hidden />} onClick={onDraw}>
+          <p>{COPY.empty}</p>
+          <button type="button" className="plot-cta" onClick={onDraw}>
+            <MapPinned size={17} strokeWidth={2.6} aria-hidden />
             {COPY.draw}
-          </PrimaryButton>
+          </button>
         </div>
       ) : (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
+        <div className="plot-home__body">
+          <div className="plot-home__row plot-rise" style={{ "--i": 1 } as React.CSSProperties}>
             {/* The real polygon, clipped out of the satellite texture. */}
-            <div className="h-[76px] w-[76px] shrink-0 rounded-[1.1rem] bg-gradient-to-br from-emerald-50 to-emerald-100/80 p-1.5 ring-1 ring-emerald-100">
+            <div className="plot-home__thumb">
               <svg
                 viewBox={`${-geometry!.svgWidth * 0.08} ${-geometry!.svgHeight * 0.08} ${geometry!.svgWidth * 1.16} ${geometry!.svgHeight * 1.16}`}
                 role="img"
                 aria-label={COPY.shape}
                 preserveAspectRatio="xMidYMid meet"
-                className="h-full w-full drop-shadow-[0_6px_8px_rgba(24,62,48,0.25)]"
                 data-testid="my-plot-thumb"
               >
                 <defs>
                   <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#65b991" />
-                    <stop offset="48%" stopColor="#168367" />
-                    <stop offset="100%" stopColor="#064e3b" />
+                    <stop offset="0%" className="plot-fig__stop-a" />
+                    <stop offset="48%" className="plot-fig__stop-b" />
+                    <stop offset="100%" className="plot-fig__stop-c" />
                   </linearGradient>
                   <clipPath id={clipId}>
                     <polygon points={geometry!.points} />
@@ -141,7 +174,7 @@ export default function MyPlotCard({
                 <polygon
                   points={geometry!.points}
                   fill="none"
-                  stroke="#fff"
+                  className="plot-fig__outline"
                   strokeWidth="3"
                   vectorEffect="non-scaling-stroke"
                   strokeLinejoin="round"
@@ -149,24 +182,24 @@ export default function MyPlotCard({
                 <polygon
                   points={geometry!.points}
                   fill="none"
-                  stroke="#08765b"
+                  className="plot-fig__outline-inner"
                   strokeWidth="1.25"
                   vectorEffect="non-scaling-stroke"
                   strokeLinejoin="round"
                 />
               </svg>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-[15px] font-black leading-6 text-emerald-950">{plot.name}</p>
-              <p className="mt-1 flex items-center gap-1.5 text-[12px] font-bold text-emerald-900/70">
-                <Expand size={13} strokeWidth={2.6} className="shrink-0" aria-hidden />
+            <div className="plot-home__meta">
+              <p className="plot-home__name">{plot.name}</p>
+              <p className="plot-home__fact">
+                <Expand size={13} strokeWidth={2.6} aria-hidden />
                 <span className="tabular-nums">
                   {COPY.area}: <bdi dir="ltr">{number(plot.areaHa, 2)}</bdi> {COPY.ha}
                 </span>
               </p>
               {observation && (
-                <p className="mt-1 flex items-center gap-1.5 text-[11px] font-semibold text-emerald-900/55">
-                  <CalendarDays size={12} strokeWidth={2.6} className="shrink-0" aria-hidden />
+                <p className="plot-home__fact" style={{ fontSize: 11, color: "var(--pt-ink-faint)" }}>
+                  <CalendarDays size={12} strokeWidth={2.6} aria-hidden />
                   <span>
                     {COPY.lastAnalysis}:{" "}
                     <bdi>
@@ -181,11 +214,30 @@ export default function MyPlotCard({
               )}
             </div>
           </div>
-          <PrimaryButton icon={<MapPinned size={17} strokeWidth={2.6} aria-hidden />} onClick={onView}>
+
+          {/* The one fixed NDVI gradient — only with a real analysis. */}
+          {observation && (
+            <div className="plot-rise" style={{ "--i": 2 } as React.CSSProperties}>
+              <div className="plot-home__strip" dir="ltr" aria-hidden>
+                {markerPos !== null && <span className="plot-home__strip-marker" style={{ left: `${markerPos}%` }} />}
+              </div>
+              <p className="plot-home__strip-note">
+                {COPY.ndviScale}
+                {meanNdvi ? (
+                  <span>
+                    · {COPY.mean} <bdi dir="ltr">{number(meanNdvi.mean, 2)}</bdi>
+                  </span>
+                ) : null}
+              </p>
+            </div>
+          )}
+
+          <button type="button" className="plot-cta plot-rise" style={{ "--i": 3 } as React.CSSProperties} onClick={onView}>
+            <MapPinned size={17} strokeWidth={2.6} aria-hidden />
             {COPY.view}
-          </PrimaryButton>
+          </button>
         </div>
       )}
-    </Card>
+    </section>
   );
 }

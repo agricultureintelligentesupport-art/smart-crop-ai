@@ -7,7 +7,9 @@
  * farmer is on and never acts as navigation.
  *
  * Arabic labels only (the app's flow language), one shared component so the
- * three screens of the flow can never drift apart visually.
+ * three screens of the flow can never drift apart visually. `tone="night"`
+ * is the translucent variant rendered over the analysis screen's dark hero.
+ * Styling lives with the plot-flow tokens (`.plot-steps` in plot-theme.css).
  */
 
 /** RTL reading order: step 1 first (right), step 3 last (left). */
@@ -17,49 +19,21 @@ const STEPS = [
   { n: 3, label: "حلّل" },
 ] as const;
 
-export default function StepHeader({ current }: { current: 1 | 2 | 3 }) {
+export default function StepHeader({ current, tone = "light" }: { current: 1 | 2 | 3; tone?: "light" | "night" }) {
   return (
-    <nav aria-label="خطوات تحليل القطعة" className="shrink-0 px-4 pb-2 pt-1">
-      <ol className="mx-auto flex w-full max-w-md items-center">
+    <nav aria-label="خطوات تحليل القطعة" className={`plot-steps${tone === "night" ? " plot-steps--night" : ""}`}>
+      <ol>
         {STEPS.map((step, index) => {
           const state = step.n < current ? "done" : step.n === current ? "current" : "next";
           return (
-            <li key={step.n} className="flex min-w-0 flex-1 items-center last:flex-none">
-              {index > 0 && (
-                <span
-                  aria-hidden
-                  className={`mx-1 h-[2px] flex-1 rounded-full ${
-                    step.n <= current
-                      ? "bg-gradient-to-l from-emerald-500 to-emerald-400"
-                      : "bg-emerald-900/10"
-                  }`}
-                />
-              )}
+            <li key={step.n}>
+              {index > 0 && <span aria-hidden className={`plot-steps__link${step.n <= current ? " plot-steps__link--on" : ""}`} />}
               <span
                 aria-current={state === "current" ? "step" : undefined}
-                className={`flex min-h-[44px] items-center gap-1.5 rounded-full px-1.5 ${
-                  state === "current" ? "text-emerald-950" : state === "done" ? "text-emerald-800/80" : "text-emerald-900/35"
-                }`}
+                className={`plot-steps__step${state === "done" ? " plot-steps__step--done" : state === "current" ? " plot-steps__step--current" : ""}`}
               >
-                <span
-                  aria-hidden
-                  className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[12px] font-black tabular-nums ${
-                    state === "current"
-                      ? "bg-gradient-to-br from-emerald-500 to-green-600 text-white shadow-[0_8px_16px_-8px_rgba(5,120,85,0.8)]"
-                      : state === "done"
-                        ? "bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200"
-                        : "bg-emerald-900/5 text-emerald-900/40"
-                  }`}
-                >
-                  {step.n}
-                </span>
-                <span
-                  className={`text-[12.5px] leading-none ${
-                    state === "current" ? "font-black" : "font-bold"
-                  }`}
-                >
-                  {step.label}
-                </span>
+                <span aria-hidden className="plot-steps__num">{step.n}</span>
+                <span className="plot-steps__label">{step.label}</span>
               </span>
             </li>
           );

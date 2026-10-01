@@ -277,19 +277,19 @@ export default function FieldMapSheet({
       role="dialog"
       aria-modal="true"
       aria-label={copy.title}
-      className="fixed inset-0 z-50 flex items-end justify-center bg-emerald-950/45 sm:items-center sm:p-6"
+      className="plot-theme plot-draw"
     >
-      <div className="flex h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-t-[1.5rem] bg-[#f6fbf8] sm:h-[88dvh] sm:rounded-[1.5rem]">
-        <header className="flex items-start justify-between gap-3 border-b border-emerald-900/10 px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="text-[15px] font-black text-emerald-950">{copy.title}</h2>
-            <p className="mt-0.5 text-[11.5px] font-semibold leading-5 text-emerald-900/60">{copy.subtitle}</p>
+      <div className="plot-draw__panel">
+        <header className="plot-draw__header">
+          <div className="plot-draw__title min-w-0">
+            <h2>{copy.title}</h2>
+            <p>{copy.subtitle}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label={copy.cancel}
-            className="flex h-11 min-w-11 items-center justify-center rounded-full text-[13px] font-extrabold text-emerald-900/70 hover:bg-emerald-900/5 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+            className="plot-draw__close"
           >
             ✕
           </button>
@@ -350,7 +350,7 @@ export default function FieldMapSheet({
             />
 
           {loading && (
-            <div className="absolute inset-x-0 top-3 mx-auto w-max rounded-full bg-emerald-950/85 px-3 py-1.5 text-[11px] font-bold text-white">
+            <div className="plot-draw__loading">
               {copy.loading}
             </div>
           )}
@@ -362,10 +362,10 @@ export default function FieldMapSheet({
               onClick={locateMe}
               disabled={locating}
               aria-label={locating ? copy.locating : copy.locate}
-              className="absolute bottom-3 end-3 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-600 text-white shadow-[0_14px_28px_-12px_rgba(6,78,59,0.8)] hover:bg-emerald-700 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+              className="plot-draw__locate"
             >
               {locating ? (
-                <Loader2 size={18} className="animate-spin" aria-hidden />
+                <Loader2 size={18} className="plot-view__spinner" aria-hidden />
               ) : (
                 <LocateFixed size={18} strokeWidth={2.6} aria-hidden />
               )}
@@ -375,13 +375,13 @@ export default function FieldMapSheet({
           {/* Drawing helpers (undo / clear) float at the map's bottom-start —
               same map behaviour, out of the compact bottom bar. All ≥ 44 px. */}
           {(drawing || (draft && !saving)) && (
-            <div className="absolute bottom-3 start-3 flex items-center gap-2">
+            <div className="plot-draw__helpers">
               {drawing && (
                 <button
                   type="button"
                   onClick={undoVertex}
                   aria-label={copy.undo}
-                  className="flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-emerald-900/80 shadow-[0_14px_28px_-14px_rgba(6,78,59,0.7)] hover:bg-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                  className="plot-draw__helper"
                 >
                   <Undo2 size={18} strokeWidth={2.6} aria-hidden />
                 </button>
@@ -391,7 +391,7 @@ export default function FieldMapSheet({
                 onClick={clearDraft}
                 disabled={saving || busy}
                 aria-label={copy.clear}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-emerald-900/80 shadow-[0_14px_28px_-14px_rgba(6,78,59,0.7)] hover:bg-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+                className="plot-draw__helper"
               >
                 <X size={18} strokeWidth={2.6} aria-hidden />
               </button>
@@ -400,20 +400,17 @@ export default function FieldMapSheet({
           </div>
         </div>
 
-        <footer className="flex flex-col gap-2 border-t border-emerald-900/10 bg-[#f6fbf8] px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2.5">
+        <footer className="plot-draw__footer">
           {error && (
-            <p
-              role="alert"
-              className="rounded-[0.9rem] bg-amber-50 px-3 py-2 text-[11px] font-bold text-amber-900 ring-1 ring-amber-200/70"
-            >
+            <p role="alert" className="plot-draw__error">
               {error}
             </p>
           )}
 
           {/* The one compact bar: live-area chip + one primary button. */}
-          <div className="flex items-center gap-2">
+          <div className="plot-draw__bar">
             {(drawing || draft) && (
-              <span className="flex min-h-[2.75rem] shrink-0 items-center rounded-full bg-emerald-900/5 px-3 text-[11.5px] font-black tabular-nums leading-5 text-emerald-950">
+              <span className="plot-draw__chip">
                 {drawing
                   ? drawingArea === null
                     ? copy.drawing
@@ -428,15 +425,15 @@ export default function FieldMapSheet({
               ref={drawButtonRef}
               onClick={drawing ? () => handleRef.current?.finishDraw() : draft ? handleSave : startDraw}
               disabled={primaryDisabled}
-              className="flex min-h-[2.75rem] flex-1 items-center justify-center gap-1.5 rounded-[0.9rem] bg-emerald-600 px-4 text-[12px] font-extrabold text-white hover:bg-emerald-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-emerald-400/45"
+              className="plot-cta plot-draw__primary"
             >
-              {saving && <Loader2 size={15} className="animate-spin" aria-hidden />}
+              {saving && <Loader2 size={15} className="plot-view__spinner" aria-hidden />}
               {primaryLabel}
             </button>
           </div>
           {saving && <p role="status" className="sr-only">{copy.saving}</p>}
 
-          <p className="text-center text-[9.5px] font-semibold leading-4 text-emerald-900/40">{copy.attribution}</p>
+          <p className="plot-draw__attribution">{copy.attribution}</p>
         </footer>
       </div>
     </div>
