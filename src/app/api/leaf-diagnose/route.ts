@@ -1,6 +1,4 @@
 import sharp from "sharp";
-// Read-only model definition: this route has its OWN client/deadline/retry policy.
-import { GEMINI_MODEL_DEFAULT } from "@/lib/assistant/gemini-models";
 import {
   LEAF_DIAGNOSIS_PROMPT,
   LEAF_MAX_BYTES,
@@ -11,12 +9,20 @@ import {
   validateLeafImage,
   type LeafFailure,
 } from "@/lib/leaf-diagnose";
+// This route's OWN Gemini policy (key rotation, model fallback, time budget).
+// It only reads the chat's key pool / model chain; nothing shared is modified.
+import {
+  LEAF_GEMINI_BUDGET_MS,
+  generateLeafGemini,
+  resolveLeafGeminiKeys,
+  resolveLeafGeminiModels,
+} from "@/lib/leaf-diagnose-gemini";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+// This route only: key rotation + model fallback may spend up to
+// LEAF_GEMINI_BUDGET_MS (50 s) upstream, so it needs headroom above 30 s.
+export const maxDuration = 60;
 
-const PROVIDER_TIMEOUT_MS = 25_000;
-const RETRY_BACKOFF_MS = 350;
 const MAX_MULTIPART_BYTES = LEAF_MAX_BYTES + 64 * 1024;
 const NO_STORE = { "Cache-Control": "no-store, private" };
 
@@ -65,31 +71,6 @@ async function readImage(request: Request): Promise<File> {
   return images[0];
 }
 
-/** Read existing credentials, independently; never mutate the chat key pool or env. */
-function apiKeys(): string[] {
-  const keys = Object.entries(process.env)
-    .filter(([name]) => name.startsWith("GEMINI_API_KEY"))
-    .sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([, value]) => (value ?? "").split(","))
-    .map((key) => key.trim()).filter(Boolean);
-  return [...new Set(keys)];
-}
-
-function backoff(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(new LeafDiagnosisError("provider-busy")); return; }
-    const abort = () => {
-      clearTimeout(timer);
-      reject(new LeafDiagnosisError("provider-busy"));
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }, RETRY_BACKOFF_MS);
-    signal.addEventListener("abort", abort, { once: true });
-  });
-}
-
 function providerText(value: unknown): string {
   if (typeof value !== "object" || value === null) throw new LeafDiagnosisError("malformed");
   const envelope = value as { candidates?: { finishReason?: string; content?: { parts?: { text?: unknown; thought?: boolean }[] } }[] };
@@ -105,6 +86,9 @@ function providerText(value: unknown): string {
 
 /** Multipart field `image`; images exist only in request memory, never storage or logs. */
 export async function POST(request: Request): Promise<Response> {
+  // The Gemini time budget counts from here, so a slow upload spends it too and
+  // the whole request stays inside `maxDuration`.
+  const startedAt = Date.now();
   let image: File;
   let bytes: Buffer;
   try {
@@ -127,65 +111,40 @@ export async function POST(request: Request): Promise<Response> {
     return failure(reason, reason === "too-large" ? 413 : 400);
   }
 
-  const keys = apiKeys();
-  if (!keys.length) return failure("provider-busy", 503);
-  const pinned = process.env.GEMINI_MODEL?.trim();
-  const model = pinned ? { id: pinned, thinking: undefined } : GEMINI_MODEL_DEFAULT;
-  if (!model.id) return failure("provider-busy", 503);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
-  const cancel = () => controller.abort();
-  request.signal.addEventListener("abort", cancel, { once: true });
-  if (request.signal.aborted) controller.abort();
+  // Same key pool and model chain the chat reads (read-only); see the helper.
+  const keys = resolveLeafGeminiKeys();
+  const models = resolveLeafGeminiModels();
+  if (!keys.length || !models.length) return failure("provider-busy", 503);
 
   try {
-    const body = JSON.stringify({
-      contents: [{ role: "user", parts: [
-        { text: LEAF_DIAGNOSIS_PROMPT },
-        { inlineData: { mimeType: image.type, data: bytes.toString("base64") } },
-      ] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 2048,
-        responseMimeType: "application/json",
-        responseSchema: LEAF_RESPONSE_SCHEMA,
-        ...(model.thinking ? { thinkingConfig: model.thinking } : {}),
-      },
-    });
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.id)}:generateContent`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": keys[attempt % keys.length] },
-          body,
-          signal: controller.signal,
-          cache: "no-store",
+    const mimeType = image.type;
+    const data = bytes.toString("base64");
+    const outcome = await generateLeafGemini({
+      keys,
+      models,
+      signal: request.signal,
+      budgetMs: LEAF_GEMINI_BUDGET_MS - (Date.now() - startedAt),
+      buildBody: (model) => JSON.stringify({
+        contents: [{ role: "user", parts: [
+          { text: LEAF_DIAGNOSIS_PROMPT },
+          { inlineData: { mimeType, data } },
+        ] }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 2048,
+          responseMimeType: "application/json",
+          responseSchema: LEAF_RESPONSE_SCHEMA,
+          ...(model.thinking ? { thinkingConfig: model.thinking } : {}),
         },
-      );
-      if (response.status === 429 || response.status === 503) {
-        await response.body?.cancel();
-        if (attempt === 0) { await backoff(controller.signal); continue; }
-        return failure("provider-busy", 503);
-      }
-      if (!response.ok) {
-        await response.body?.cancel();
-        return failure("provider-busy", 503);
-      }
-      let data: unknown;
-      try { data = await response.json(); } catch { throw new LeafDiagnosisError("malformed"); }
-      const result = parseLeafDiagnosis(providerText(data));
-      return Response.json(result, {
-        headers: { ...NO_STORE, ...(!result.isPlant ? { "X-Leaf-Diagnose-Reason": "not-a-plant" } : {}) },
-      });
-    }
-    return failure("provider-busy", 503);
+      }),
+    });
+    if (!outcome.ok) return failure(outcome.reason, outcome.status);
+    const result = parseLeafDiagnosis(providerText(outcome.data));
+    return Response.json(result, {
+      headers: { ...NO_STORE, ...(!result.isPlant ? { "X-Leaf-Diagnose-Reason": "not-a-plant" } : {}) },
+    });
   } catch (error) {
-    const reason = controller.signal.aborted ? "provider-busy" :
-      error instanceof LeafDiagnosisError ? error.reason : "network";
+    const reason = error instanceof LeafDiagnosisError ? error.reason : "network";
     return failure(reason, reason === "provider-busy" ? 504 : 502);
-  } finally {
-    clearTimeout(timeout);
-    request.signal.removeEventListener("abort", cancel);
   }
 }
