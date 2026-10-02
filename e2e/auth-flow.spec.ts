@@ -443,21 +443,35 @@ test.describe("member dashboard", () => {
     );
   });
 
-  test("leaf scan produces a diagnosis with field advice", async ({ page }) => {
+  test("leaf scan shows the real-diagnosis scan state and compact result sheet", async ({ page }) => {
+    await page.route("**/api/leaf-diagnose", async (route) => {
+      expect(route.request().method()).toBe("POST");
+      await route.fulfill({ json: {
+        isPlant: true, plantNameAr: "طماطم", verdict: "diseased", diseaseNameAr: "اللفحة المبكرة",
+        confidence: 0.84, findings: [{ labelAr: "بقع بنية", box: [200, 200, 500, 500], severity: "medium" }],
+      } });
+    });
     await openDashboard(page);
-    await page.setInputFiles('input[type="file"]', {
+    const card = page.getByRole("region", { name: "تشخيص صحة النبات" });
+    await card.locator('input[type="file"]').setInputFiles({
       name: "leaf.png",
       mimeType: "image/png",
       buffer: Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=",
+        "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAIElEQVQ4jWPwqHYlGzGManYdDTDX0UTiOpoxXAeuMAAALA2ckFr53+wAAAAASUVORK5CYII=",
         "base64",
       ),
     });
-    await page.getByRole("button", { name: "تشخيص صحة النبات" }).click();
-    await expect(page.getByText("التوصية الميدانية")).toBeVisible();
-    await expect(page.getByText("درجة الثقة")).toBeVisible();
-    await page.getByRole("button", { name: "صورة جديدة" }).click();
-    await expect(page.getByText("اختر صورة الورقة")).toBeVisible();
+    await card.getByRole("button", { name: "بدء الفحص" }).click();
+    await expect(card.getByTestId("leaf-image-frame")).toHaveAttribute("data-scanning", "true");
+    await expect(card.getByRole("status")).toContainText(/يحلل الورقة|يفحص الأنسجة/);
+    const sheet = card.getByTestId("leaf-result-sheet");
+    await expect(sheet).toBeVisible({ timeout: 10_000 });
+    await expect(sheet).toContainText("اللفحة المبكرة");
+    await expect(sheet).toContainText("مصابة");
+    await expect(sheet).toContainText("طماطم");
+    await expect(sheet.getByRole("meter")).toHaveAttribute("aria-valuenow", "84");
+    await card.getByRole("button", { name: "فحص صورة أخرى" }).click();
+    await expect(card.getByRole("button", { name: "اختر صورة الورقة" })).toBeVisible();
   });
 
   test("personalising the wilaya updates the header and can be persisted", async ({ page }) => {

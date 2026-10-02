@@ -1,208 +1,379 @@
 "use client";
 
-import { motion } from "framer-motion";
-import { Camera, CircleCheck, ImageUp, Microscope, ScanLine, ShieldCheck, Sparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { diagnoseImage, type Diagnosis } from "@/lib/agronomy";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import type { DashboardCopy } from "@/lib/dashboard/copy";
-import { FOCUS_RING, GPU, PrimaryButton } from "@/components/auth/ui";
-import { Card, Chip, Progress } from "./parts";
+import {
+  containedImageRect,
+  isLeafFailure,
+  leafMotionTiming,
+  leafZoomTransform,
+  LeafDiagnosisError,
+  parseLeafDiagnosis,
+  resizedLeafDimensions,
+  validateLeafImage,
+  type ImageSize,
+  type LeafDiagnosis,
+  type LeafFailure,
+  type LeafFinding,
+} from "@/lib/leaf-diagnose";
+import { Card } from "./parts";
+import styles from "./scan-card.module.css";
 
-interface PickedFile {
-  name: string;
-  size: number;
-  url: string;
+type Phase = "idle" | "preparing" | "ready" | "scanning" | "revealing" | "complete" | "error";
+interface PickedImage extends ImageSize { blob: Blob; url: string }
+const SCAN_WORDS = ["يحلل الورقة…", "يفحص الأنسجة…"];
+const ERROR_COPY: Record<LeafFailure, { title: string; hint: string }> = {
+  "invalid-input": { title: "تعذّر قراءة هذه الصورة", hint: "اختر صورة JPEG أو PNG أو WebP واضحة." },
+  "too-large": { title: "الصورة أكبر من 4 ميغابايت", hint: "اختر نسخة أصغر ثم أعد الفحص." },
+  "provider-busy": { title: "خدمة التحليل مشغولة الآن", hint: "صورتك جاهزة. جرّب مجددًا بعد قليل." },
+  malformed: { title: "لم تصل قراءة واضحة", hint: "أعد المحاولة أو اختر صورة أوضح للورقة." },
+  "not-a-plant": { title: "لا يظهر نبات في هذه الصورة", hint: "جرّب صورة قريبة لورقة نبات." },
+  network: { title: "تعذّر الاتصال بخدمة التحليل", hint: "تحقق من اتصالك ثم أعد المحاولة." },
+};
+
+function motionSnapshot() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+function subscribeMotion(notify: () => void) {
+  const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+  query.addEventListener("change", notify);
+  return () => query.removeEventListener("change", notify);
+}
+const serverMotionSnapshot = () => false;
+
+/** Native CSS/SVG motion, as requested; no new icon or animation dependencies. */
+function Icon({ name, size = 18 }: { name: "scan" | "upload" | "shield" | "check" | "leaf" | "retry" | "zoom"; size?: number }) {
+  const paths = {
+    scan: <><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3M3 12h18" /><path d="M9 9c0-3 5-4 7-3 0 4-2 7-5 7" /></>,
+    upload: <><path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5M12 16V3m-5 5 5-5 5 5" /><path d="M5 13H3V5a2 2 0 0 1 2-2h2" /></>,
+    shield: <><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z" /><path d="m8 12 3 3 5-6" /></>,
+    check: <><circle cx="12" cy="12" r="9" /><path d="m8 12 3 3 5-6" /></>,
+    leaf: <><path d="M20 3c-8-1-15 3-15 9a6 6 0 0 0 6 6c6 0 9-7 9-15Z" /><path d="M3 21 16 8m-9 9v-6m4 2h5" /></>,
+    retry: <><path d="M4 9a8 8 0 1 1 0 7M4 4v5h5" /></>,
+    zoom: <><circle cx="10" cy="10" r="6" /><path d="m15 15 6 6M7 10h6m-3-3v6" /></>,
+  };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-/**
- * On-device leaf scan. Real interaction (file picker, drag & drop, preview,
- * progress, reset) with a deterministic demo classifier standing in for the
- * trained model — the UI labels that honestly instead of faking a backend.
- */
-export default function ScanCard({ t, wilayaCode }: { t: DashboardCopy; wilayaCode: string }) {
-  const [file, setFile] = useState<PickedFile | null>(null);
-  const [analysis, setAnalysis] = useState<Diagnosis | null>(null);
-  const [busy, setBusy] = useState(false);
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const abort = () => { window.clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+    const timer = window.setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function prepareImage(input: File): Promise<Omit<PickedImage, "url">> {
+  const invalid = validateLeafImage(input, new Uint8Array(await input.slice(0, 12).arrayBuffer()));
+  if (invalid) throw new LeafDiagnosisError(invalid);
+  let bitmap: ImageBitmap;
+  try { bitmap = await createImageBitmap(input, { imageOrientation: "from-image" }); }
+  catch { throw new LeafDiagnosisError("invalid-input"); }
+  try {
+    const dimensions = resizedLeafDimensions(bitmap);
+    const canvas = document.createElement("canvas");
+    canvas.width = dimensions.width;
+    canvas.height = dimensions.height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new LeafDiagnosisError("invalid-input");
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(
+      (value) => value ? resolve(value) : reject(new LeafDiagnosisError("invalid-input")), "image/jpeg", 0.82,
+    ));
+    const compressedError = validateLeafImage(blob);
+    if (compressedError) throw new LeafDiagnosisError(compressedError);
+    return { blob, ...dimensions };
+  } finally { bitmap.close(); }
+}
+
+function findingBrackets(finding: LeafFinding) {
+  const [top, left, bottom, right] = finding.box;
+  const corner = Math.min(40, (right - left) / 3, (bottom - top) / 3);
+  return `M${left},${top + corner}V${top}H${left + corner} M${right - corner},${top}H${right}V${top + corner} M${right},${bottom - corner}V${bottom}H${right - corner} M${left + corner},${bottom}H${left}V${bottom - corner}`;
+}
+
+/** Chips stay at readable size while the image plane zooms underneath them. */
+function annotation(finding: LeafFinding, index: number, frame: ImageSize,
+  rect: ReturnType<typeof containedImageRect>, zoom: ReturnType<typeof leafZoomTransform>) {
+  const width = Math.min(142, (frame.width - 36) / 2);
+  const left = index % 2 === 0 ? frame.width - width - 12 : 12;
+  const top = index === 1 || index === 2 ? frame.height - 56 : index === 4 ? frame.height / 2 - 22 : 12;
+  const targetX = index % 2 === 0 ? left : left + width;
+  const targetY = top + 22;
+  const [ymin, xmin, ymax, xmax] = finding.box;
+  const centerX = rect.x + zoom.translateX + (xmin + xmax) / 2000 * rect.width * zoom.scale;
+  const edgeX = targetX >= centerX ? xmax : xmin;
+  const sourceX = Math.min(frame.width - 8, Math.max(8, rect.x + zoom.translateX + edgeX / 1000 * rect.width * zoom.scale));
+  const sourceY = Math.min(frame.height - 8, Math.max(8, rect.y + zoom.translateY + (ymin + ymax) / 2000 * rect.height * zoom.scale));
+  const elbowX = (sourceX + targetX) / 2;
+  const direction = Math.sign(elbowX - sourceX) || 1;
+  return {
+    left, top, width,
+    line: `M${sourceX},${sourceY}H${elbowX}L${targetX},${targetY}`,
+    arrow: `M${sourceX + direction * 5},${sourceY - 4}L${sourceX},${sourceY}L${sourceX + direction * 5},${sourceY + 4}`,
+  };
+}
+
+/** The prop contract stays unchanged; diagnosis does not use wilaya/name-based demo priors. */
+export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }) {
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [file, setFile] = useState<PickedImage | null>(null);
+  const [result, setResult] = useState<LeafDiagnosis | null>(null);
+  const [error, setError] = useState<LeafFailure | null>(null);
   const [dragging, setDragging] = useState(false);
-  const timer = useRef<number | null>(null);
-
+  const [statusIndex, setStatusIndex] = useState(0);
+  const [revealed, setRevealed] = useState(0);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [frameSize, setFrameSize] = useState<ImageSize>({ width: 320, height: 240 });
+  const input = useRef<HTMLInputElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
+  const controller = useRef<AbortController | null>(null);
+  const revision = useRef(0);
+  const reducedMotion = useSyncExternalStore(subscribeMotion, motionSnapshot, serverMotionSnapshot);
+  const gridId = useId();
   const url = file?.url;
+
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  useEffect(() => () => { revision.current += 1; controller.current?.abort(); }, []);
   useEffect(() => {
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-      if (timer.current) window.clearTimeout(timer.current);
-    };
+    if (!url || !frame.current) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setFrameSize((old) => old.width === width && old.height === height ? old : { width, height });
+    });
+    observer.observe(frame.current);
+    return () => observer.disconnect();
   }, [url]);
-
-  const pick = (input: File | null | undefined) => {
-    if (!input || !input.type.startsWith("image/")) return;
-    if (file) URL.revokeObjectURL(file.url);
-    setAnalysis(null);
-    setFile({ name: input.name, size: input.size, url: URL.createObjectURL(input) });
-  };
-
-  const analyze = () => {
-    if (!file) return;
-    setBusy(true);
-    if (timer.current) window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
-      setAnalysis(diagnoseImage({ name: file.name, size: file.size }, wilayaCode));
-      setBusy(false);
-    }, 900);
-  };
+  useEffect(() => {
+    if (phase !== "scanning" || reducedMotion) return;
+    const timer = window.setInterval(() => setStatusIndex((old) => (old + 1) % SCAN_WORDS.length), 1700);
+    return () => window.clearInterval(timer);
+  }, [phase, reducedMotion]);
 
   const reset = () => {
-    if (file) URL.revokeObjectURL(file.url);
+    revision.current += 1;
+    controller.current?.abort();
+    controller.current = null;
     setFile(null);
-    setAnalysis(null);
+    setResult(null);
+    setError(null);
+    setRevealed(0);
+    setSelected(null);
+    setDragging(false);
+    setPhase("idle");
   };
 
-  const severityIndex = analysis ? Math.min(3, Math.round(analysis.severity * 3)) : 0;
-  const copy = analysis ? t.diagnoses[analysis.key] : null;
+  const pick = async (picked?: File) => {
+    if (!picked) return;
+    reset();
+    const current = revision.current;
+    setPhase("preparing");
+    try {
+      const image = await prepareImage(picked);
+      if (revision.current !== current) return;
+      setFile({ ...image, url: URL.createObjectURL(image.blob) });
+      setPhase("ready");
+    } catch (failure) {
+      if (revision.current !== current) return;
+      setError(failure instanceof LeafDiagnosisError ? failure.reason : "invalid-input");
+      setPhase("error");
+    }
+  };
+
+  const analyze = async () => {
+    if (!file || controller.current) return;
+    const request = new AbortController();
+    controller.current = request;
+    const current = ++revision.current;
+    setPhase("scanning");
+    setError(null);
+    setResult(null);
+    setSelected(null);
+    setRevealed(0);
+    setStatusIndex(0);
+    const guard = window.setTimeout(() => request.abort(), 30_000);
+    try {
+      const upload = async (): Promise<LeafDiagnosis | LeafFailure> => {
+        try {
+          const body = new FormData();
+          body.append("image", file.blob, "leaf.jpg");
+          const response = await fetch("/api/leaf-diagnose", { method: "POST", body, signal: request.signal });
+          let data: unknown;
+          try { data = await response.json(); } catch { return "malformed"; }
+          if (!response.ok) {
+            const reason = typeof data === "object" && data !== null && "error" in data ? data.error : null;
+            return isLeafFailure(reason) ? reason : "network";
+          }
+          return parseLeafDiagnosis(data);
+        } catch (failure) {
+          return failure instanceof LeafDiagnosisError ? failure.reason : "network";
+        }
+      };
+      // Settle errors as values, so an instant failure cannot bypass the minimum scan.
+      const [diagnosis] = await Promise.all([
+        upload(), pause(leafMotionTiming(reducedMotion).minimumScanMs, request.signal),
+      ]);
+      window.clearTimeout(guard);
+      if (revision.current !== current) return;
+      if (typeof diagnosis === "string" || !diagnosis.isPlant) {
+        setError(typeof diagnosis === "string" ? diagnosis : "not-a-plant");
+        setPhase("error");
+        return;
+      }
+      setResult(diagnosis);
+      setPhase("revealing");
+      await pause(leafMotionTiming(motionSnapshot()).dimFadeMs, request.signal);
+      if (motionSnapshot()) {
+        setRevealed(diagnosis.findings.length);
+      } else {
+        for (let count = 1; count <= diagnosis.findings.length; count += 1) {
+          if (revision.current !== current) return;
+          setRevealed(count);
+          await pause(leafMotionTiming(motionSnapshot()).findingStaggerMs, request.signal);
+          if (motionSnapshot()) { setRevealed(diagnosis.findings.length); break; }
+        }
+      }
+      if (revision.current === current) setPhase("complete");
+    } catch {
+      if (revision.current === current) { setError("network"); setPhase("error"); }
+    } finally {
+      window.clearTimeout(guard);
+      if (revision.current === current) controller.current = null;
+    }
+  };
+
+  const toggleFinding = (index: number) => setSelected((old) => old === index ? null : index);
+  const rect = containedImageRect(file ?? frameSize, frameSize);
+  const zoom = leafZoomTransform(selected === null ? null : result?.findings[selected]?.box ?? null, file ?? frameSize, frameSize);
+  const findings = result?.findings.slice(0, revealed) ?? [];
+  const scanning = phase === "scanning";
+  const healthy = result?.verdict === "healthy";
+  const confidence = Math.round((result?.confidence ?? 0) * 100);
+  const verdictAr = result?.verdict === "healthy" ? "سليمة" : result?.verdict === "diseased" ? "مصابة" : "غير مؤكد";
+  const active = selected ?? (phase === "revealing" ? revealed - 1 : null);
 
   return (
-    <Card
-      title={t.scan.title}
-      subtitle={t.scan.subtitle}
-      icon={<ScanLine size={18} strokeWidth={2.4} aria-hidden />}
-      aside={
-        analysis ? (
-          <Chip tone={analysis.key === "healthy" ? "emerald" : "amber"}>
-            {Math.round(analysis.confidence * 100)}%
-          </Chip>
-        ) : undefined
-      }
-    >
-      {!file ? (
-        <label
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragging(false);
-            pick(e.dataTransfer.files?.[0]);
-          }}
-          className={`flex min-h-[11rem] cursor-pointer flex-col items-center justify-center gap-2.5 rounded-[1.25rem] border-2 border-dashed px-4 py-7 text-center transition-colors ${
-            dragging ? "border-emerald-400 bg-emerald-50" : "border-emerald-300/70 bg-[#f6faf7] hover:border-emerald-400"
-          }`}
-        >
-          <span
-            aria-hidden
-            className="grid h-14 w-14 place-items-center rounded-[1.1rem] bg-gradient-to-br from-emerald-400 via-emerald-500 to-emerald-700 text-white shadow-[0_12px_28px_-12px_rgba(16,185,129,0.9)]"
-          >
-            <ImageUp size={24} strokeWidth={2.3} />
-          </span>
-          <span className="text-[14px] font-black text-emerald-950">{t.scan.pick}</span>
-          <span className="text-[11.5px] font-semibold text-emerald-900/60">{t.scan.pickHint}</span>
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="sr-only"
-            onChange={(e) => {
-              pick(e.target.files?.[0]);
-              e.target.value = "";
-            }}
-          />
-        </label>
-      ) : (
-        <div className="flex flex-col gap-3">
-          <div className="relative overflow-hidden rounded-[1.25rem] ring-1 ring-[rgba(6,78,59,0.08)]">
-            {/* Local object URL preview: plain <img> is correct here, next/image cannot optimise blobs. */}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={file.url} alt={file.name} className="h-48 w-full object-cover" />
-            {busy && (
-              <motion.div
-                aria-hidden
-                className={`absolute inset-0 bg-gradient-to-b from-emerald-500/10 via-emerald-400/25 to-emerald-500/10 ${GPU}`}
-                animate={{ opacity: [0.35, 0.85, 0.35] }}
-                transition={{ duration: 1.4, repeat: Infinity }}
-              />
-            )}
+    <Card title={t.scan.title} subtitle="صورة واحدة، قراءة بصرية لصحة الورقة." icon={<Icon name="scan" />} className={styles.card}>
+      <div className={styles.content} dir="rtl" data-testid="leaf-diagnose-card" data-state={phase} data-reduced-motion={reducedMotion}>
+        <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" hidden tabIndex={-1} aria-label="ملف صورة للفحص"
+          onChange={(event) => { void pick(event.target.files?.[0]); event.target.value = ""; }} />
+
+        {!file ? (
+          <button type="button" className={styles.upload} data-dragging={dragging} disabled={phase === "preparing"}
+            onClick={() => input.current?.click()}
+            onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => { event.preventDefault(); setDragging(false); void pick(event.dataTransfer.files?.[0]); }}>
+            <span className={styles.uploadIcon}><Icon name="upload" size={25} /></span>
+            <span className={styles.uploadTitle}>{phase === "preparing" ? "تجهيز الصورة…" : "اختر صورة الورقة"}</span>
+            <span className={styles.uploadHint}><bdi dir="ltr">JPEG / PNG / WebP</bdi> · حتى 4 ميغابايت</span>
+          </button>
+        ) : (
+          <>
+            <div ref={frame} className={styles.frame} data-scanning={scanning} data-zoomed={selected !== null} data-testid="leaf-image-frame"
+              style={{ "--leaf-zoom-ms": `${leafMotionTiming(reducedMotion).zoomMs}ms` } as CSSProperties}>
+              <div className={styles.imagePlane} data-testid="leaf-image-plane" style={{
+                left: rect.x, top: rect.y, width: rect.width, height: rect.height,
+                transform: `translate(${zoom.translateX}px, ${zoom.translateY}px) scale(${zoom.scale})`,
+              }}>
+                {/* Blob previews cannot be optimized by next/image. */}
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={file.url} alt="صورة الورقة المختارة للفحص" className={styles.photo} width={file.width} height={file.height} />
+                {findings.length > 0 && (
+                  <svg className={styles.boxes} viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+                    {findings.map((finding, index) => {
+                      const [ymin, xmin, ymax, xmax] = finding.box;
+                      return <g key={index} className={styles.finding} data-severity={finding.severity} data-active={active === index} data-dimmed={selected !== null && selected !== index}>
+                        <ellipse className={styles.findingRing} style={{ strokeWidth: 1.2 / zoom.scale }} cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2 + 14} ry={(ymax - ymin) / 2 + 14} />
+                        <ellipse className={styles.findingEllipse} style={{ strokeWidth: 1.3 / zoom.scale }} pathLength="1" cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2} ry={(ymax - ymin) / 2} />
+                        <path className={styles.findingBracket} style={{ strokeWidth: 2.2 / zoom.scale }} pathLength="1" d={findingBrackets(finding)} />
+                      </g>;
+                    })}
+                  </svg>
+                )}
+              </div>
+
+              {scanning && <div className={styles.scanner} aria-hidden="true" data-testid="leaf-scanner">
+                <svg className={styles.mesh} viewBox="0 0 1000 1000" preserveAspectRatio="none">
+                  <defs><pattern id={gridId} width="100" height="100" patternUnits="userSpaceOnUse"><path d="M100 0H0V100" fill="none" stroke="currentColor" strokeWidth="1.4" /></pattern></defs>
+                  <rect width="1000" height="1000" fill={`url(#${gridId})`} />
+                  <g className={styles.contours} fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M-40 300C100 40 230 530 390 260S630 70 790 300 970 420 1080 180" />
+                    <path d="M-40 550C100 290 230 780 390 510S630 320 790 550 970 670 1080 430" />
+                    <path d="M-40 780C100 520 230 1010 390 740S630 550 790 780 970 900 1080 660" />
+                  </g>
+                </svg>
+                <div className={styles.scanSweep} />
+                <span className={styles.scanCorner} data-corner="tl" /><span className={styles.scanCorner} data-corner="tr" />
+                <span className={styles.scanCorner} data-corner="bl" /><span className={styles.scanCorner} data-corner="br" />
+                <span className={styles.scanBadge}><Icon name="scan" size={12} /> فحص بصري</span>
+              </div>}
+
+              {findings.length > 0 && <>
+                <svg className={styles.leaders} viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} aria-label="أسهم مواضع العلامات">
+                  {findings.map((finding, index) => {
+                    const item = annotation(finding, index, frameSize, rect, zoom);
+                    return <g key={index} className={styles.leader} data-severity={finding.severity} data-dimmed={selected !== null && selected !== index}
+                      role="button" tabIndex={0} aria-label={`تكبير موضع: ${finding.labelAr}`} aria-pressed={selected === index}
+                      onClick={() => toggleFinding(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleFinding(index); } }}>
+                      <path className={styles.leaderHit} d={item.line} />
+                      <path className={styles.leaderLine} pathLength="1" d={item.line} /><path className={styles.arrowHead} d={item.arrow} />
+                    </g>;
+                  })}
+                </svg>
+                {findings.map((finding, index) => {
+                  const item = annotation(finding, index, frameSize, rect, zoom);
+                  return <button type="button" key={index} className={styles.label} data-severity={finding.severity} data-active={active === index || selected === index}
+                    data-dimmed={selected !== null && selected !== index} data-testid="leaf-finding-label" aria-pressed={selected === index} aria-label={finding.labelAr} title={finding.labelAr}
+                    style={{ left: item.left, top: item.top, width: item.width }} onClick={() => toggleFinding(index)}>
+                    <span className={styles.labelNumber} aria-hidden="true">{index + 1}</span><span className={styles.labelText}>{finding.labelAr}</span>
+                  </button>;
+                })}
+              </>}
+              {phase === "complete" && healthy && <span className={styles.healthyBadge}><Icon name="check" size={20} /> سليمة بصريًا</span>}
+            </div>
+
+            {findings.length > 0 && <div className={styles.frameTools}>
+              <span>{selected === null ? "اضغط على علامة لتكبيرها" : "تفاصيل الموضع المحدد"}</span>
+              <button type="button" className={styles.showAll} onClick={() => setSelected(null)} disabled={selected === null}><Icon name="zoom" size={14} /> عرض الكل</button>
+            </div>}
+            {phase === "ready" && <div className={styles.readyLine}><Icon name="check" size={14} /> الصورة جاهزة للفحص <span dir="ltr">{file.width} × {file.height}</span></div>}
+          </>
+        )}
+
+        {(scanning || phase === "revealing" || phase === "preparing") && <div className={styles.status} role="status">
+          <span className={styles.statusDot} aria-hidden="true" />
+          <span>{phase === "preparing" ? "تجهيز الصورة…" : scanning ? SCAN_WORDS[statusIndex] : "تحديد العلامات المرئية…"}</span>
+          {phase === "revealing" && result && result.findings.length > 0 && <span className={styles.statusCount} dir="ltr">{revealed} / {result.findings.length}</span>}
+        </div>}
+
+        {phase === "ready" && <button type="button" className={styles.primary} onClick={() => void analyze()}><Icon name="scan" /> بدء الفحص</button>}
+
+        {phase === "complete" && result && <div className={styles.result} data-verdict={result.verdict} data-testid="leaf-result-sheet" role="status">
+          <div className={styles.resultTop}><span className={styles.eyebrow}>نتيجة الفحص</span><span className={styles.verdict}>{healthy && <Icon name="check" size={13} />}{verdictAr}</span></div>
+          <h3 className={styles.resultName}>{healthy ? "ورقة تبدو سليمة" : result.diseaseNameAr || "لم تتضح الإصابة"}</h3>
+          <div className={styles.plantName}><Icon name="leaf" size={14} />{result.plantNameAr || "نبات غير محدد"}</div>
+          <div className={styles.confidenceLabel}><span>درجة الثقة</span><strong dir="ltr">{confidence}%</strong></div>
+          <div className={styles.confidenceTrack} role="meter" aria-label="درجة الثقة البصرية" aria-valuemin={0} aria-valuemax={100} aria-valuenow={confidence}>
+            <span style={{ width: `${confidence}%` }} />
           </div>
+        </div>}
 
-          {!analysis ? (
-            <PrimaryButton
-              onClick={analyze}
-              loading={busy}
-              loadingLabel={t.scan.analyzing}
-              icon={<Sparkles size={17} strokeWidth={2.6} aria-hidden />}
-            >
-              {t.scan.title}
-            </PrimaryButton>
-          ) : (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3 }}
-              className={`${GPU} flex flex-col gap-3`}
-            >
-              <div className="rounded-[1.25rem] border border-emerald-200/70 bg-emerald-50/70 p-3.5">
-                <p className="text-[11.5px] font-black tracking-wide text-emerald-800/70">{t.scan.result}</p>
-                <p className="mt-1 flex items-center gap-1.5 text-[16px] font-black text-emerald-950">
-                  {analysis.key === "healthy" ? (
-                    <CircleCheck size={16} strokeWidth={2.8} aria-hidden className="text-emerald-600" />
-                  ) : (
-                    <Microscope size={16} strokeWidth={2.6} aria-hidden className="text-amber-600" />
-                  )}
-                  {copy?.name}
-                </p>
-                <p className="mt-1.5 text-[11.5px] font-semibold leading-[1.75] text-emerald-900/75">{copy?.summary}</p>
+        {phase === "error" && error && <div className={styles.error} role="alert" data-testid="leaf-error">
+          <span className={styles.errorIcon}><Icon name={error === "not-a-plant" ? "leaf" : "retry"} size={20} /></span>
+          <div className={styles.errorText}><strong>{ERROR_COPY[error].title}</strong><span>{ERROR_COPY[error].hint}</span><small dir="ltr">{error}</small></div>
+          <button type="button" className={styles.retry} onClick={() => {
+            if (file && error !== "not-a-plant" && error !== "invalid-input" && error !== "too-large") void analyze();
+            else { reset(); input.current?.click(); }
+          }}><Icon name="retry" size={14} /> إعادة المحاولة</button>
+        </div>}
 
-                <div className="mt-2.5 flex flex-col gap-1">
-                  <div className="flex items-center justify-between text-[11.5px] font-bold text-emerald-800/85">
-                    <span>{t.scan.confidence}</span>
-                    <span dir="ltr">{Math.round(analysis.confidence * 100)}%</span>
-                  </div>
-                  <Progress value={analysis.confidence * 100} />
-                </div>
-
-                <div className="mt-2.5 flex items-center justify-between gap-2">
-                  <span className="text-[11.5px] font-bold text-emerald-800/85">{t.scan.severity}</span>
-                  <Chip tone={severityIndex >= 2 ? "amber" : "emerald"}>{t.scan.severityLabels[severityIndex]}</Chip>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-[12px] font-black tracking-wide text-emerald-800/70">{t.scan.treatment}</p>
-                <ul className="mt-1.5 flex flex-col gap-1">
-                  {copy?.steps.map((step, i) => (
-                    <li
-                      key={step}
-                      className="flex min-h-[2.75rem] items-start gap-2.5 rounded-[1rem] bg-[#f6faf7] px-3 py-2.5 text-[12px] font-semibold leading-[1.7] text-emerald-900 ring-1 ring-[rgba(6,78,59,0.07)]"
-                    >
-                      <span
-                        aria-hidden
-                        className="mt-[2px] grid h-[1.1rem] w-[1.1rem] shrink-0 place-items-center rounded-full bg-emerald-500 text-[10px] font-black text-white"
-                      >
-                        {i + 1}
-                      </span>
-                      {step}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <button
-                type="button"
-                onClick={reset}
-                className={`mx-auto inline-flex h-11 items-center gap-1.5 rounded-full bg-[#f6faf7] px-4 text-[12.5px] font-extrabold text-emerald-800 ring-1 ring-[rgba(6,78,59,0.07)] transition-colors hover:bg-emerald-50 ${FOCUS_RING}`}
-              >
-                <Camera size={13} strokeWidth={2.6} aria-hidden />
-                {t.scan.retake}
-              </button>
-            </motion.div>
-          )}
-        </div>
-      )}
-
-      <p className="mt-3.5 flex items-start gap-1.5 text-[10.5px] font-semibold leading-5 text-emerald-900/50">
-        <ShieldCheck size={13} strokeWidth={2.6} aria-hidden className="mt-[2px] shrink-0 text-emerald-500" />
-        {t.scan.privacy} {t.scan.engineNote}
-      </p>
+        {file && <button type="button" className={styles.another} onClick={reset}><Icon name="upload" size={15} /> فحص صورة أخرى</button>}
+        <p className={styles.privacy}><Icon name="shield" size={13} /><span>تُرسل الصورة إلى خدمة التحليل لحظة الفحص ولا تُحفظ</span></p>
+        {(phase === "complete" || phase === "error") && <p className={styles.disclaimer}>تقدير بصري لا يغني عن مهندس زراعي</p>}
+      </div>
     </Card>
   );
 }
