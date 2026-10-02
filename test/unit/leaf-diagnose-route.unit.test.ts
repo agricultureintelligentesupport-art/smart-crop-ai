@@ -57,7 +57,7 @@ for (const format of ["jpeg", "png", "webp"] as const) {
   });
 }
 
-test("leaf route reads an existing GEMINI_MODEL override without adding a model or fallback", async (t) => {
+test("leaf route reads an existing GEMINI_MODEL override as the head of the model chain, without a thinking config", async (t) => {
   process.env.GEMINI_MODEL = " fixture-configured-image-model ";
   let requested = "";
   let config: Record<string, unknown> = {};
@@ -161,23 +161,24 @@ for (const status of [429, 503]) {
   });
 }
 
-test("leaf route never retries more than once and maps missing credentials/retired models to busy", async (t) => {
+test("leaf route tries a lone key twice per model, walks the model chain once, and maps missing credentials to busy", async (t) => {
   const provider = t.mock.method(globalThis, "fetch", async () => new Response("busy", { status: 503 }));
   const response = await POST(upload(await picture()));
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "provider-busy" });
-  assert.equal(provider.mock.callCount(), 2);
+  // 1 key x 2 tries x 3 models in the chain (~1 s real pause between each pair of tries).
+  assert.equal(provider.mock.callCount(), 6);
   clearTestEnv();
   assert.equal((await POST(upload(await picture()))).status, 503);
-  assert.equal(provider.mock.callCount(), 2);
+  assert.equal(provider.mock.callCount(), 6);
 });
 
-test("leaf route does not retry non-429/503 failures or leak upstream text", async (t) => {
+test("leaf route skips a 404 model to the next one without retrying it or leaking upstream text", async (t) => {
   const provider = t.mock.method(globalThis, "fetch", async () => new Response("PRIVATE upstream details", { status: 404 }));
   const response = await POST(upload(await picture()));
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "provider-busy" });
-  assert.equal(provider.mock.callCount(), 1);
+  assert.equal(provider.mock.callCount(), 3);
 });
 
 for (const payload of [
@@ -193,7 +194,7 @@ for (const payload of [
   });
 }
 
-test("leaf route's 25-second deadline aborts Gemini without logging image or provider errors", async (t) => {
+test("leaf route's 50-second budget aborts Gemini and logs only attempt lines, never image or provider errors", async (t) => {
   const bytes = await picture();
   let started!: () => void;
   const entered = new Promise<void>((resolve) => { started = resolve; });
@@ -206,11 +207,22 @@ test("leaf route's 25-second deadline aborts Gemini without logging image or pro
   }));
   const pending = POST(upload(bytes));
   await entered;
-  t.mock.timers.tick(25_000);
+  // Attempts, a rotation pause and the budget are chained timers: advance one second at a time.
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  for (let second = 0; second < 60 && !settled; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
   const response = await pending;
   assert.equal(response.status, 504);
   assert.deepEqual(await response.json(), { error: "provider-busy" });
-  assert.equal(logs.mock.callCount(), 0);
+  // The only output is one `[leaf-diagnose] attempt=...` line per attempt (no key, image or provider text).
+  assert.ok(logs.mock.callCount() >= 1);
+  for (const call of logs.mock.calls) {
+    assert.equal(call.arguments.length, 1);
+    assert.match(String(call.arguments[0]), /^\[leaf-diagnose\] attempt=\d+ key=1\/1 model=\S+ status=(?:\d{3}|network|timeout|aborted) ms=\d+$/);
+  }
   // Node may emit its own experimental MockTimers warning; no image/error content escapes.
   for (const call of errors.mock.calls) {
     assert.ok(!JSON.stringify(call.arguments).includes("PRIVATE"));
