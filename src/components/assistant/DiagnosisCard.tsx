@@ -19,18 +19,22 @@ export default function DiagnosisCard({
   diagnosis,
   analysisSource,
   copy,
+  animate = true,
 }: {
   diagnosis: AssistantDiagnosis;
   /** Display only — which image engine produced this result (existing value from the orchestrator response). */
   analysisSource?: AnalysisSource | null;
   copy: AssistantCopy["diagnosis"];
+  /** False for a message RESTORED from history: renders in its final state, no reveal animation. */
+  animate?: boolean;
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(diagnosis.confidence * 100)));
   const bucket = confidenceBucket(diagnosis.confidence);
   const bucketLabel =
     bucket === "high" ? copy.confidenceHigh : bucket === "medium" ? copy.confidenceMedium : copy.confidenceLow;
   const alternates = diagnosis.candidates.slice(1);
-  const reduce = useReducedMotion();
+  const reduceMotionPreference = useReducedMotion();
+  const reduce = reduceMotionPreference || !animate;
 
   return (
     <div className="space-y-3.5 py-1 text-emerald-950">

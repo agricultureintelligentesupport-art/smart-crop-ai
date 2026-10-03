@@ -10,11 +10,12 @@ import {
 import {
   ImagePlus,
   LoaderCircle,
+  Menu,
+  Plus,
   RotateCcw,
   ScanSearch,
   Scissors,
   Send,
-  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -34,8 +36,23 @@ import { EASE_OUT, FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
 import type { AnalysisSource } from "@/lib/assistant/analysis";
-import { CHAT_HISTORY_COPY, type StoredChatMessage } from "@/lib/assistant/history";
-import { clearChatHistory, loadChatHistory, saveChatHistory } from "@/lib/assistant/historyStore";
+import { type StoredChatMessage } from "@/lib/assistant/history";
+import {
+  groupConversationsByRecency,
+  makeConversationId,
+  markRestored,
+  type ConversationMeta,
+} from "@/lib/assistant/conversations";
+import {
+  deleteAllConversations,
+  deleteConversation,
+  loadConversationById,
+  loadConversationList,
+  renameConversation,
+  saveConversation,
+  setActiveConversationId as persistActiveConversationId,
+} from "@/lib/assistant/conversationStore";
+import { HISTORY_COPY } from "@/lib/assistant/historyCopy";
 import type {
   AssistantPreprocessing,
   AssistantResponseBody,
@@ -50,8 +67,14 @@ import { APP_SHELL } from "@/lib/app/copy";
 import { useLang } from "@/lib/use-lang";
 import { AssistantAvatar, EmptyHero, PhytoScanLogo, POP, TypingIndicator, bubbleVariants } from "./ChatParts";
 import DiagnosisCard from "./DiagnosisCard";
+import HistoryDrawer from "./HistoryDrawer";
+import HistorySkeleton from "./HistorySkeleton";
 import Markdown from "./Markdown";
 import "./assistant.css";
+
+/** History UX tuning — storage-layer/presentation only, no effect on what is sent to the model. */
+const SAVE_DEBOUNCE_MS = 800;
+const MIN_BOOT_SKELETON_MS = 300;
 
 /* ------------------------------------------------------------------ */
 /*  Local chat model                                                   */
@@ -77,6 +100,8 @@ interface ChatMessage {
   /** Step 0 detection & cropping report (image requests only). */
   preprocessing?: AssistantPreprocessing | null;
   error?: boolean;
+  /** Loaded from storage, not just produced: render instantly, skip every entrance/reveal/result animation. */
+  isRestored?: boolean;
 }
 
 let idCounter = 0;
@@ -156,8 +181,15 @@ export default function AssistantView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   /** Turns restored from history: shown in the conversation, never sent to the model. */
   const [restoredMessages, setRestoredMessages] = useState<ChatMessage[]>([]);
-  /** True once a successful hydration finished — gates saving (never overwrite an unread store). */
-  const [historyReady, setHistoryReady] = useState(false);
+  /** True once the conversation list could be read — gates saving (never overwrite an unread store). */
+  const [persistReady, setPersistReady] = useState(false);
+  /** UI boot state: a short skeleton while the active conversation restores, then the real screen either way. */
+  const [bootPhase, setBootPhase] = useState<"loading" | "ready">("loading");
+  /** Which saved conversation is open — `null` is a fresh, not-yet-saved chat. */
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  /** Metadata only (id/title/updatedAt) for every saved conversation — the sidebar list. */
+  const [conversationMetas, setConversationMetas] = useState<ConversationMeta[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
@@ -184,8 +216,19 @@ export default function AssistantView() {
 
   /** History hydration happens once per mount, after the session is settled. */
   const hydratedRef = useRef(false);
-  /** The first save after hydration would rewrite what was just read — skip it. */
+  /** The next save effect run only re-writes what was just read/switched to — skip it once. */
   const skipNextSaveRef = useRef(true);
+  /** Debounced save timer (~800 ms of inactivity) — see the save effect below. */
+  const saveTimerRef = useRef<number | null>(null);
+  /** The pending debounced save, runnable immediately (tab hidden/closed must not lose the last turn). */
+  const flushSaveRef = useRef<() => void>(() => {});
+  /** A restore (boot or conversation switch) just happened: scroll instantly, never smoothly, for this paint. */
+  const justRestoredRef = useRef(false);
+  /** Always-fresh metadata list for the debounced save closure, without making it a reactive dependency. */
+  const conversationMetasRef = useRef<ConversationMeta[]>([]);
+  useEffect(() => {
+    conversationMetasRef.current = conversationMetas;
+  }, [conversationMetas]);
 
   // Same session gate as the dashboard: assistant answers are personalised,
   // so an authenticated profile — or the local guest bypass — is required.
@@ -198,17 +241,22 @@ export default function AssistantView() {
     if (!authenticated) router.replace("/auth");
   }, [authenticated, ready, router]);
 
-  // Pin the conversation to the newest message.
+  // Pin the conversation to the newest message — instantly right after a
+  // restore (boot or switching conversations), smoothly for a live reply.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (!el) return;
+    const instant = justRestoredRef.current;
+    justRestoredRef.current = false;
+    el.scrollTo({ top: el.scrollHeight, behavior: instant ? "auto" : "smooth" });
   }, [messages, restoredMessages, busy]);
 
   /* ------------------------------------------------------------------ */
   /*  Chat history (Firestore for verified members, localStorage else)    */
-  /*  Restored turns render above the live ones and are deliberately NOT  */
-  /*  fed into `send`'s history: the request payload stays exactly what   */
-  /*  this session typed, like today.                                     */
+  /*  Multiple conversations, one open at a time. Restored turns render   */
+  /*  above the live ones and are deliberately NOT fed into `send`'s      */
+  /*  history: the request payload stays exactly what this session typed, */
+  /*  like today — switching conversations never changes that.            */
   /* ------------------------------------------------------------------ */
 
   /** Namespaces the localStorage fallback only — Firestore takes its uid from the session. */
@@ -217,37 +265,160 @@ export default function AssistantView() {
   // Load on mount, once the session is resolved (Firebase Auth included).
   // `hydratedRef` makes this a once-per-mount read (double-invoked effects
   // included); a late answer for a screen that is gone is simply ignored by
-  // React, never applied to another mount's state.
+  // React, never applied to another mount's state. On any failure this still
+  // settles into a usable, empty new chat — never an error, never a stuck
+  // skeleton (see `MIN_BOOT_SKELETON_MS` below).
   useEffect(() => {
     if (hydratedRef.current || authLoading || !ready || !authenticated) return;
     hydratedRef.current = true;
-    void loadChatHistory(localHistoryKey).then((stored) => {
-      if (stored.messages.length > 0) {
-        setRestoredMessages(stored.messages.map(restoredChatMessage));
+    const startedAt = Date.now();
+    void (async () => {
+      const index = await loadConversationList(localHistoryKey);
+      setConversationMetas(index.conversations);
+      setPersistReady(index.ok);
+
+      const openId = index.ok && index.activeId && index.conversations.some((item) => item.id === index.activeId)
+        ? index.activeId
+        : null;
+      if (openId) {
+        const loaded = await loadConversationById(localHistoryKey, openId);
+        if (loaded.conversation) {
+          justRestoredRef.current = true;
+          setActiveConversationId(openId);
+          setRestoredMessages(markRestored(loaded.conversation.messages.map(restoredChatMessage)));
+        }
       }
-      // An unreadable store keeps persistence off rather than overwriting it.
-      setHistoryReady(stored.ok);
-    });
+
+      skipNextSaveRef.current = true;
+      const elapsed = Date.now() - startedAt;
+      window.setTimeout(() => setBootPhase("ready"), Math.max(0, MIN_BOOT_SKELETON_MS - elapsed));
+    })();
   }, [authLoading, ready, authenticated, localHistoryKey]);
 
-  // Save after every change (completed turns only; empty means clear). The
-  // first run after hydration only re-writes what was just read — unless the
-  // farmer already typed while the read was in flight.
+  // Debounced save (~800 ms of inactivity; completed turns only — failed/retry
+  // bubbles are stripped by the sanitizer). A conversation is created lazily:
+  // `send` assigns `activeConversationId` on the FIRST message of a new chat,
+  // so nothing is ever saved before it holds something.
   useEffect(() => {
-    if (!historyReady) return;
+    if (!persistReady || !activeConversationId) {
+      flushSaveRef.current = () => {};
+      return;
+    }
     if (skipNextSaveRef.current) {
       skipNextSaveRef.current = false;
-      if (messages.length === 0) return;
+      if (messages.length === 0) {
+        flushSaveRef.current = () => {};
+        return;
+      }
     }
-    void saveChatHistory(localHistoryKey, [...restoredMessages, ...messages]);
-  }, [historyReady, localHistoryKey, restoredMessages, messages]);
+    const runSave = () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      const combined = [...restoredMessages, ...messages];
+      const titleHint = conversationMetasRef.current.find((item) => item.id === activeConversationId)?.title;
+      void saveConversation(localHistoryKey, activeConversationId, titleHint, combined, {
+        activeId: activeConversationId,
+        conversations: conversationMetasRef.current,
+      }).then((result) => {
+        if (result) setConversationMetas(result.conversations);
+      });
+    };
+    flushSaveRef.current = runSave;
+    saveTimerRef.current = window.setTimeout(runSave, SAVE_DEBOUNCE_MS);
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, [persistReady, activeConversationId, restoredMessages, messages, localHistoryKey]);
 
-  const clearChat = useCallback(() => {
-    if (typeof window !== "undefined" && !window.confirm(CHAT_HISTORY_COPY[lang].clearConfirm)) return;
-    setRestoredMessages([]);
+  // The debounce must never cost the farmer their last turn: flush it the
+  // instant the tab is hidden/closed/backgrounded (localStorage writes are
+  // synchronous; a Firestore write at least starts before the page is gone).
+  useEffect(() => {
+    const flush = () => flushSaveRef.current();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
+
+  /** Switches to a saved conversation — loads instantly, no animation (isRestored, see `ChatParts`/render below). */
+  const openConversation = useCallback(
+    async (id: string) => {
+      if (id === activeConversationId) return;
+      const loaded = await loadConversationById(localHistoryKey, id);
+      if (!loaded.conversation) return;
+      skipNextSaveRef.current = true;
+      justRestoredRef.current = true;
+      setMessages([]);
+      setRestoredMessages(markRestored(loaded.conversation.messages.map(restoredChatMessage)));
+      setActiveConversationId(id);
+      void persistActiveConversationId(localHistoryKey, id, { conversations: conversationMetasRef.current });
+    },
+    [activeConversationId, localHistoryKey],
+  );
+
+  /** Starts a fresh, empty conversation — saved only once the first message is actually sent. */
+  const startNewChat = useCallback(() => {
+    if (activeConversationId === null && messages.length === 0 && restoredMessages.length === 0) return;
+    skipNextSaveRef.current = true;
+    justRestoredRef.current = true;
     setMessages([]);
-    void clearChatHistory(localHistoryKey);
-  }, [lang, localHistoryKey]);
+    setRestoredMessages([]);
+    setActiveConversationId(null);
+    void persistActiveConversationId(localHistoryKey, null, { conversations: conversationMetasRef.current });
+  }, [activeConversationId, messages.length, restoredMessages.length, localHistoryKey]);
+
+  const renameConversationById = useCallback(
+    (id: string, title: string) => {
+      void renameConversation(localHistoryKey, id, title, {
+        activeId: activeConversationId,
+        conversations: conversationMetasRef.current,
+      }).then((updated) => {
+        if (updated) setConversationMetas(updated);
+      });
+    },
+    [localHistoryKey, activeConversationId],
+  );
+
+  const deleteConversationById = useCallback(
+    (id: string) => {
+      const wasActive = activeConversationId === id;
+      void deleteConversation(localHistoryKey, id, {
+        activeId: activeConversationId,
+        conversations: conversationMetasRef.current,
+      }).then((result) => {
+        setConversationMetas(result.conversations);
+        if (wasActive) {
+          justRestoredRef.current = true;
+          setMessages([]);
+          setRestoredMessages([]);
+          setActiveConversationId(null);
+          skipNextSaveRef.current = true;
+        }
+      });
+    },
+    [localHistoryKey, activeConversationId],
+  );
+
+  const deleteAllConversationsNow = useCallback(() => {
+    void deleteAllConversations(localHistoryKey, { conversations: conversationMetasRef.current }).then(() => {
+      justRestoredRef.current = true;
+      setConversationMetas([]);
+      setMessages([]);
+      setRestoredMessages([]);
+      setActiveConversationId(null);
+      skipNextSaveRef.current = true;
+    });
+  }, [localHistoryKey]);
+
+  const conversationGroups = useMemo(() => groupConversationsByRecency(conversationMetas), [conversationMetas]);
 
   // Photo requests take visibly longer now (detect → crop → classify): walk
   // the thinking label through the real pipeline phases so the farmer always
@@ -304,6 +475,10 @@ export default function AssistantView() {
     async (messageText: string, image: PendingImage | null) => {
       const text = messageText.trim();
       if ((!text && !image) || busy) return;
+
+      // A brand-new chat only becomes a real, saved conversation once it
+      // actually holds a message — assigned here, once, on the first send.
+      if (activeConversationId === null) setActiveConversationId(makeConversationId());
 
       lastRequestRef.current = { message: text, image };
       const history: AssistantHistoryTurn[] = messages
@@ -371,7 +546,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, messages, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, messages, activeConversationId, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {
@@ -424,12 +599,16 @@ export default function AssistantView() {
     [draft, pendingImage, send],
   );
 
-  const canSend = (draft.trim().length > 0 || pendingImage !== null) && !busy;
+  /** Input stays disabled until the active conversation finished loading (see `HistorySkeleton`). */
+  const composerDisabled = busy || bootPhase === "loading";
+  const canSend = (draft.trim().length > 0 || pendingImage !== null) && !composerDisabled;
   /** Restored turns first, then the live session — one conversation on screen. */
   const conversation = restoredMessages.length > 0 ? [...restoredMessages, ...messages] : messages;
   const emptyChat = conversation.length === 0;
   /** Presentation only: collapses entrance motion for users who ask for less. */
   const reduceMotion = useReducedMotion();
+  const hc = HISTORY_COPY[lang];
+  const booting = bootPhase === "loading";
 
   return (
     <div
@@ -451,12 +630,30 @@ export default function AssistantView() {
           />
         }
         trailing={
-          conversation.length > 0 ? (
-            <AppBarAction label={CHAT_HISTORY_COPY[lang].clear} onClick={clearChat}>
-              <Trash2 size={17} strokeWidth={2.4} aria-hidden />
+          <>
+            <AppBarAction label={hc.newChat} onClick={startNewChat}>
+              <Plus size={18} strokeWidth={2.4} aria-hidden />
             </AppBarAction>
-          ) : undefined
+            <AppBarAction label={hc.menu} onClick={() => setDrawerOpen(true)}>
+              <Menu size={18} strokeWidth={2.4} aria-hidden />
+            </AppBarAction>
+          </>
         }
+      />
+
+      <HistoryDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        lang={lang}
+        copy={hc}
+        groups={conversationGroups}
+        activeId={activeConversationId}
+        savedOnAccount={!guestActive}
+        onSelect={(id) => void openConversation(id)}
+        onNewChat={startNewChat}
+        onRename={renameConversationById}
+        onDeleteOne={deleteConversationById}
+        onDeleteAll={deleteAllConversationsNow}
       />
 
       {/* Conversation */}
@@ -465,20 +662,26 @@ export default function AssistantView() {
         className="scroll-area scroll-pad-top relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain"
         aria-live="polite"
       >
+        {booting ? (
+          <HistorySkeleton label={hc.loading} />
+        ) : (
         <div className={`${SHELL_COLUMN} flex flex-col gap-4 px-4 pb-12 pt-3`}>
           {emptyChat && <EmptyHero greeting={t.hero.greeting} intro={t.hero.intro} />}
 
           <AnimatePresence initial={false}>
             {conversation.map((msg) => {
               const isUser = msg.author === "user";
+              // A message loaded from history renders in its final state immediately —
+              // no entrance motion, no typewriter reveal, no repeated result animation.
+              const skipAnimation = Boolean(msg.isRestored) || reduceMotion;
               return (
                 <motion.div
                   key={msg.id}
                   variants={bubbleVariants}
-                  initial="hidden"
+                  initial={msg.isRestored ? false : "hidden"}
                   animate="show"
                   exit="exit"
-                  transition={reduceMotion ? { duration: 0 } : SPRING}
+                  transition={skipAnimation ? { duration: 0 } : SPRING}
                   className={`${GPU} flex items-end gap-2.5 ${
                     isUser
                       ? "justify-end origin-bottom-right rtl:origin-bottom-left"
@@ -503,7 +706,7 @@ export default function AssistantView() {
 
                     {msg.imageUrl && (
                       <motion.div
-                        initial={reduceMotion ? false : { opacity: 0, scale: 0.96 }}
+                        initial={skipAnimation ? false : { opacity: 0, scale: 0.96 }}
                         animate={{ opacity: 1, scale: 1 }}
                         transition={{ delay: 0.08, duration: 0.4, ease: EASE_OUT }}
                         className="chat-image mb-2.5 overflow-hidden rounded-2xl"
@@ -540,12 +743,13 @@ export default function AssistantView() {
                             diagnosis={msg.diagnosis}
                             analysisSource={msg.analysisSource}
                             copy={t.diagnosis}
+                            animate={!msg.isRestored}
                           />
                         </div>
                       )}
 
                       {!isUser ? (
-                        <Markdown text={msg.text} />
+                        <Markdown text={msg.text} animate={!msg.isRestored} />
                       ) : (
                         msg.text && (
                           <p className="whitespace-pre-wrap text-[14px] font-bold leading-6 [text-shadow:0_1px_0_rgba(0,0,0,0.08)]">
@@ -595,6 +799,7 @@ export default function AssistantView() {
             )}
           </AnimatePresence>
         </div>
+        )}
       </main>
 
       {/* Composer */}
@@ -684,9 +889,9 @@ export default function AssistantView() {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label={t.composer.attach}
-              disabled={busy}
-              whileHover={busy ? undefined : { scale: 1.04 }}
-              whileTap={busy ? undefined : { scale: 0.92 }}
+              disabled={composerDisabled}
+              whileHover={composerDisabled ? undefined : { scale: 1.04 }}
+              whileTap={composerDisabled ? undefined : { scale: 0.92 }}
               transition={POP}
               className={`chat-attach ${GPU} ${FOCUS_RING} grid h-11 w-11 shrink-0 place-items-center rounded-full disabled:opacity-50 ${
                 pendingImage ? "chat-attach-filled" : ""
@@ -700,9 +905,9 @@ export default function AssistantView() {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onComposerKeyDown}
-              placeholder={t.composer.placeholder}
+              placeholder={booting ? hc.loading : t.composer.placeholder}
               rows={1}
-              disabled={busy}
+              disabled={composerDisabled}
               className="max-h-32 min-h-[44px] flex-1 resize-none bg-transparent px-2.5 py-2.5 text-[14px] font-bold leading-6 text-emerald-950 outline-none transition-opacity placeholder:text-emerald-900/40 disabled:opacity-60"
             />
 

@@ -65,11 +65,12 @@ export const GUEST_LOCAL_KEY = "guest";
 /** Only the newest turns survive a save. */
 export const MAX_MESSAGES = 100;
 /** Longest stored body per message (characters, not bytes). */
-export const MAX_TEXT_CHARS = 1200;
-/** Ceiling for one message after its extras are dropped. */
-export const MAX_MESSAGE_BYTES = 8 * 1024;
-/** Ceiling for the whole payload — ~12% of Firestore's 1 MiB document limit. */
-export const MAX_PAYLOAD_BYTES = 128 * 1024;
+export const MAX_TEXT_CHARS = 4000;
+/** Ceiling for one message after its extras are dropped (fits a ~4000-char Arabic turn). */
+export const MAX_MESSAGE_BYTES = 20 * 1024;
+/** Ceiling for the whole payload — comfortably below Firestore's 1 MiB document limit
+ *  (leaves headroom for the small `{version, updatedAt, title, data}` wrapper). */
+export const MAX_PAYLOAD_BYTES = 900 * 1024;
 /** Text stored in place of an attached photo. Images themselves are never persisted. */
 export const IMAGE_PLACEHOLDER = "صورة";
 
