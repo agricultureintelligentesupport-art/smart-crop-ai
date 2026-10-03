@@ -1,4 +1,10 @@
 /* Local module: no dashboard, assistant, global, or shared-component selectors. */
+
+/* ── Outer card ──────────────────────────────────────────────────────────────
+   A "plant clinic" tray for one leaf photo: layered mint surfaces, a luminous
+   gradient hairline, a faded leaf-vein mesh, a soft top light and a slow
+   breathing glow. Only the card, its header and its upload frame are styled
+   here; the frame, markers, zoom, result and error rules below are unchanged. */
 .card {
   position: relative;
   isolation: isolate;
@@ -6,93 +12,285 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px;
-  border-radius: 1.375rem;
-  border: 1px solid rgb(16 185 129 / 26%);
+  gap: 16px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 1.6rem;
   background:
-    radial-gradient(120% 78% at 100% 0%, rgb(16 185 129 / 11%), transparent 58%),
-    radial-gradient(90% 68% at 0% 100%, rgb(52 211 153 / 8%), transparent 62%),
-    linear-gradient(168deg, #ffffff 0%, #f9fdfb 54%, #f1f9f4 100%);
+    radial-gradient(128% 76% at 50% -14%, rgb(209 250 229 / 82%), transparent 62%),
+    radial-gradient(104% 62% at 50% 112%, rgb(167 243 208 / 38%), transparent 66%),
+    linear-gradient(172deg, #ffffff 0%, #f8fdfa 44%, #eef8f2 100%) padding-box,
+    linear-gradient(142deg, rgb(16 185 129 / 60%) 0%, rgb(167 243 208 / 36%) 36%, rgb(4 120 87 / 46%) 100%) border-box;
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 92%),
+    inset 0 1px 0 rgb(255 255 255 / 96%),
+    inset 0 -1px 0 rgb(255 255 255 / 55%),
     0 1px 2px rgb(6 78 59 / 5%),
-    0 8px 20px -8px rgb(6 78 59 / 10%),
-    0 20px 42px -22px rgb(6 78 59 / 24%);
+    0 12px 24px -16px rgb(6 78 59 / 18%),
+    0 30px 58px -30px rgb(4 108 78 / 34%);
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateY(12px);
   transition:
-    opacity 360ms cubic-bezier(0.22, 0.8, 0.26, 1),
-    transform 360ms cubic-bezier(0.22, 0.8, 0.26, 1);
+    opacity 420ms cubic-bezier(0.22, 0.8, 0.26, 1),
+    transform 420ms cubic-bezier(0.22, 0.8, 0.26, 1),
+    box-shadow 300ms ease;
+}
+/* Leaf-vein mesh, brightest behind the header, dissolving into the surface. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%2316a34a' stroke-width='1.1' stroke-linecap='round'%3E%3Cpath d='M-18 222C34 154 92 98 250 -10'/%3E%3Cpath d='M0 192c30-6 52 0 70 18'/%3E%3Cpath d='M32 158c26-10 46-8 64 6'/%3E%3Cpath d='M68 122c24-14 44-16 64-6'/%3E%3Cpath d='M106 86c22-16 42-20 62-12'/%3E%3Cpath d='M148 46c20-16 38-20 58-14'/%3E%3C/g%3E%3Cg fill='%2316a34a'%3E%3Ccircle cx='70' cy='210' r='1.6'/%3E%3Ccircle cx='96' cy='164' r='1.6'/%3E%3Ccircle cx='132' cy='116' r='1.6'/%3E%3Ccircle cx='170' cy='74' r='1.6'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 240px 240px;
+  opacity: 0.62;
+  -webkit-mask-image: radial-gradient(124% 98% at 50% -8%, #000 0%, rgb(0 0 0 / 46%) 44%, transparent 80%);
+  mask-image: radial-gradient(124% 98% at 50% -8%, #000 0%, rgb(0 0 0 / 46%) 44%, transparent 80%);
+}
+/* Top light + slow breathing glow (the only card-level motion). */
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(56% 30% at 50% 0%, rgb(110 231 183 / 36%), transparent 76%),
+    linear-gradient(180deg, rgb(255 255 255 / 82%) 0%, rgb(255 255 255 / 0%) 12%);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 55%);
+  animation: leaf-surface-breathe 8s ease-in-out infinite;
 }
 .card[data-in-view="true"] {
   opacity: 1;
   transform: none;
 }
 .header {
+  position: relative;
+  z-index: 1;
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid rgb(255 255 255 / 78%);
+  border-radius: 1.15rem;
+  background: linear-gradient(155deg, rgb(255 255 255 / 94%) 0%, rgb(236 253 245 / 76%) 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 95%),
+    inset 0 -12px 20px -18px rgb(6 78 59 / 55%),
+    0 8px 18px -16px rgb(6 78 59 / 60%);
+  -webkit-backdrop-filter: blur(9px) saturate(1.18);
+  backdrop-filter: blur(9px) saturate(1.18);
 }
 .iconTile {
+  position: relative;
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 46px;
+  height: 46px;
   flex-shrink: 0;
   place-items: center;
-  border-radius: 0.85rem;
-  border: 1px solid rgb(16 185 129 / 28%);
-  background: linear-gradient(145deg, #ecfdf5 0%, #d1fae5 52%, #a7f3d0 100%);
-  color: #047857;
+  border-radius: 0.95rem;
+  border: 1px solid rgb(255 255 255 / 45%);
+  background:
+    radial-gradient(120% 118% at 24% 12%, rgb(255 255 255 / 46%), transparent 48%),
+    linear-gradient(150deg, #34d399 0%, #059669 44%, #047857 100%);
+  color: #ffffff;
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 88%),
-    0 4px 12px -4px rgb(16 185 129 / 24%);
-  animation: leaf-icon-breathe 5.6s ease-in-out infinite;
+    inset 0 1px 0 rgb(255 255 255 / 55%),
+    inset 0 -8px 14px -10px rgb(4 120 87 / 85%),
+    0 10px 20px -12px rgb(16 185 129 / 92%);
 }
+.iconTile::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='46' height='46' viewBox='0 0 46 46'%3E%3Cg fill='none' stroke='%23ecfdf5' stroke-width='1' stroke-linecap='round'%3E%3Cpath d='M-4 44C10 30 24 18 50 -6'/%3E%3Cpath d='M4 36c8-2 14 0 19 6'/%3E%3Cpath d='M14 26c8-3 14-2 19 2'/%3E%3Cpath d='M24 16c8-4 14-5 20-2'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 46px 46px;
+  opacity: 0.3;
+}
+/* Soft halo that breathes with the tile. */
+.iconTile::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 1.2rem;
+  border: 1px solid rgb(16 185 129 / 38%);
+  pointer-events: none;
+  animation: leaf-halo 6.4s ease-in-out infinite;
+}
+/* Row-wrapped: the title and the status chip sit together (grouped at the
+   card's start next to the icon tile), the subtitle owns the second line. */
 .headerText {
   display: flex;
   min-width: 0;
   flex: 1;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  column-gap: 9px;
+  row-gap: 4px;
 }
 .title {
+  flex: 0 1 auto;
   margin: 0;
-  color: #064e3b;
-  font-size: 15px;
+  min-width: 0;
+  color: #063f2d;
+  font-size: 15.5px;
   font-weight: 900;
-  line-height: 1.35;
-  letter-spacing: -0.01em;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
 }
 .subtitle {
-  margin: 0;
-  color: rgb(6 78 59 / 64%);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.5;
+  flex-basis: 100%;
+  margin: 3px 0 0;
+  color: #2f6a55;
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.6;
 }
-.content { min-width: 0; color: #183c2b; }
+.chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 10px 0 11px;
+  border: 1px solid rgb(16 185 129 / 28%);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffffff 0%, #ecfdf5 100%);
+  color: #04664a;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 95%),
+    0 4px 10px -8px rgb(6 78 59 / 55%);
+}
+.chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 15%);
+  animation: leaf-chip-live 3.4s ease-in-out infinite;
+}
+.content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  color: #183c2b;
+}
 .content button { font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .content button:focus-visible { outline: 3px solid #14845e; outline-offset: 4px; }
 .content button:disabled { cursor: default; }
 
-/* Preserve the existing dashed, pale-green upload area and raised green icon. */
+/* Upload tray: a soft mint plate with a dashed scan ring and a slow shimmer on
+   the frame edge. Same element, same copy, same handlers as before. */
 .upload {
-  display: flex; width: 100%; min-height: 11rem; flex-direction: column;
-  align-items: center; justify-content: center; gap: 10px; padding: 28px 16px;
-  border: 2px dashed #95d8b7; border-radius: 20px; background: #f6faf7;
-  text-align: center; transition: background 160ms, border-color 160ms, transform 140ms ease;
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 11.5rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  padding: 30px 18px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 1.35rem;
+  background:
+    radial-gradient(96% 68% at 50% -4%, rgb(236 253 245 / 96%), transparent 72%),
+    radial-gradient(120% 90% at 50% 118%, rgb(209 250 229 / 70%), transparent 70%),
+    linear-gradient(180deg, #fbfefc 0%, #f1faf4 100%);
+  box-shadow:
+    inset 0 0 0 1px rgb(16 185 129 / 22%),
+    inset 0 16px 32px -28px rgb(6 78 59 / 60%),
+    inset 0 -18px 34px -30px rgb(4 120 87 / 55%),
+    0 1px 2px rgb(6 78 59 / 5%);
+  text-align: center;
+  transition: background 220ms ease, box-shadow 220ms ease, transform 140ms ease;
 }
-.upload:hover, .upload[data-dragging="true"] { border-color: #34b987; background: #eef9f2; }
-.upload:active:not(:disabled) { transform: scale(0.99); }
+.upload::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border-radius: 1.05rem;
+  border: 1.5px dashed rgb(16 185 129 / 34%);
+  background: linear-gradient(180deg, rgb(255 255 255 / 45%), rgb(255 255 255 / 0%) 60%);
+  pointer-events: none;
+  transition: border-color 220ms ease, background 220ms ease;
+}
+/* Shimmer rides the frame edge only (masked ring), never over the copy. */
+.upload::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  pointer-events: none;
+  background: linear-gradient(105deg, rgb(255 255 255 / 0%) 28%, rgb(110 231 183 / 0%) 38%, rgb(52 211 153 / 85%) 50%, rgb(110 231 183 / 0%) 62%, rgb(255 255 255 / 0%) 72%);
+  background-size: 280% 100%;
+  background-position: 150% 0;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: leaf-frame-shimmer 6.5s ease-in-out 3 both;
+}
+.upload:hover, .upload[data-dragging="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgb(16 185 129 / 40%),
+    inset 0 16px 32px -28px rgb(6 78 59 / 60%),
+    inset 0 -18px 34px -30px rgb(4 120 87 / 55%),
+    0 8px 20px -16px rgb(16 185 129 / 60%);
+}
+.upload:hover::before, .upload[data-dragging="true"]::before { border-color: rgb(16 185 129 / 58%); }
+.upload:active:not(:disabled) { transform: scale(0.985); }
 .uploadIcon {
-  display: grid; width: 56px; height: 56px; place-items: center; border-radius: 18px;
-  color: white; background: linear-gradient(140deg, #34d399, #10b981 48%, #047857);
-  box-shadow: 0 12px 28px -12px rgb(16 185 129 / 85%);
+  position: relative;
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border-radius: 1.25rem;
+  color: #ffffff;
+  background:
+    radial-gradient(120% 120% at 26% 10%, rgb(255 255 255 / 42%), transparent 46%),
+    linear-gradient(145deg, #34d399 0%, #10b981 44%, #047857 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 52%),
+    0 6px 14px -6px rgb(4 120 87 / 55%),
+    0 16px 34px -16px rgb(16 185 129 / 78%);
 }
-.uploadTitle { font-size: 14px; font-weight: 900; color: #064e3b; }
-.uploadHint { font-size: 11.5px; font-weight: 650; color: #41624f; }
+.uploadIcon::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border-radius: 1.7rem;
+  pointer-events: none;
+  background: radial-gradient(closest-side, rgb(52 211 153 / 40%), rgb(52 211 153 / 0%) 78%);
+  animation: leaf-upload-halo 8s ease-in-out infinite;
+}
+.uploadTitle {
+  color: #063f2d;
+  font-size: 14.5px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+.uploadHint {
+  color: #3f6350;
+  font-size: 11.5px;
+  font-weight: 650;
+}
 
 .frame {
   position: relative; width: 100%; aspect-ratio: 4 / 3; min-height: 208px; max-height: 340px;
@@ -241,19 +439,25 @@
 .privacy svg { flex-shrink: 0; margin-top: 3px; color: #39855c; }
 .disclaimer { margin: 5px 0 0; padding-inline-start: 18px; color: #657462; font-size: 10.5px; font-weight: 550; line-height: 1.7; }
 
-@keyframes leaf-icon-breathe {
-  0%, 100% {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 88%),
-      0 4px 12px -4px rgb(16 185 129 / 24%),
-      0 0 0 0 rgb(16 185 129 / 0%);
-  }
-  50% {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 96%),
-      0 6px 16px -3px rgb(16 185 129 / 38%),
-      0 0 0 4px rgb(16 185 129 / 11%);
-  }
+@keyframes leaf-surface-breathe {
+  0%, 100% { opacity: .72; }
+  50% { opacity: 1; }
+}
+@keyframes leaf-halo {
+  0%, 100% { opacity: 0; transform: scale(.96); }
+  50% { opacity: .9; transform: scale(1.03); }
+}
+@keyframes leaf-chip-live {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .82; transform: scale(1.22); }
+}
+@keyframes leaf-frame-shimmer {
+  0% { background-position: 150% 0; }
+  60%, 100% { background-position: -70% 0; }
+}
+@keyframes leaf-upload-halo {
+  0%, 100% { opacity: .5; transform: scale(.94); }
+  50% { opacity: 1; transform: scale(1.06); }
 }
 @keyframes leaf-sweep { from { transform: translateY(-38%); } to { transform: translateY(38%); } }
 @keyframes leaf-contours { from { transform: translateY(-10px); } to { transform: translateY(16px); } }
@@ -264,9 +468,17 @@
 @keyframes leaf-sheet-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes leaf-ring { from { opacity: .7; transform: scale(1); } to { opacity: 0; transform: scale(1.12); } }
 
+@supports not ((-webkit-backdrop-filter: blur(4px)) or (backdrop-filter: blur(4px))) {
+  .header { background: linear-gradient(155deg, #fbfffd 0%, #f2faf5 100%); }
+}
+@supports not ((-webkit-mask-composite: xor) or (mask-composite: exclude)) {
+  .upload::after { display: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .card, .card[data-in-view="true"] { opacity: 1; transform: none; transition: none !important; }
-  .iconTile { animation: none !important; }
+  .card::before, .card::after, .iconTile, .iconTile::after, .chip::before, .uploadIcon::before { animation: none !important; }
+  .card::after { opacity: .85; }
   .upload:active:not(:disabled) { transform: none; }
   .content *, .content *::before, .content *::after { animation: none !important; transition: none !important; }
   .scanSweep { transform: translateY(0); }
@@ -274,12 +486,23 @@
   .finding[data-active="true"] .findingRing { opacity: .55; }
 }
 @media (prefers-reduced-transparency: reduce) {
+  .header {
+    background: linear-gradient(155deg, #fbfffd 0%, #f2faf5 100%);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .chip { background: #ffffff; }
   .scanBadge { background: #092c22; }
   .finding[data-dimmed="true"], .leader[data-dimmed="true"], .label[data-dimmed="true"] { opacity: .55; }
 }
 @media (prefers-contrast: more) {
-  .card { background: #ffffff; border-color: #064e3b; }
-  .subtitle { color: #064e3b; }
+  .card { border: 1px solid #064e3b; background: #ffffff; box-shadow: none; }
+  .card::before, .card::after { display: none; }
+  .header { border-color: #064e3b; background: #ffffff; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .upload { box-shadow: inset 0 0 0 2px #064e3b; }
+  .upload::before { border-color: #064e3b; }
+  .chip { border-color: #064e3b; background: #ffffff; }
+  .subtitle { color: #063f2d; }
   .privacy, .disclaimer, .readyLine, .frameTools > span { color: #254232; }
   .label { border-width: 2px; }
   .leaderLine { stroke-width: 2.5; }

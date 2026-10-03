@@ -287,6 +287,7 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
         </span>
         <div className={styles.headerText}>
           <h2 className={styles.title}>{t.scan.title}</h2>
+          <span className={styles.chip}>جاهز للفحص</span>
           <p className={styles.subtitle}>صورة واحدة، قراءة بصرية لصحة الورقة.</p>
         </div>
       </header>
