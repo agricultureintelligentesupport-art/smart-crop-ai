@@ -14,6 +14,7 @@ import {
   ScanSearch,
   Scissors,
   Send,
+  Trash2,
   TriangleAlert,
   X,
 } from "lucide-react";
@@ -26,13 +27,15 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
-import AppBar, { AppBarBrand } from "@/components/app/AppBar";
+import AppBar, { AppBarAction, AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
 import { EASE_OUT, FOCUS_RING, GPU, SPRING } from "@/components/auth/ui";
 import { useAuth } from "@/context/AuthContext";
 import { ASSISTANT } from "@/lib/assistant/copy";
 import type { AnalysisSource } from "@/lib/assistant/analysis";
+import { CHAT_HISTORY_COPY, type StoredChatMessage } from "@/lib/assistant/history";
+import { clearChatHistory, loadChatHistory, saveChatHistory } from "@/lib/assistant/historyStore";
 import type {
   AssistantPreprocessing,
   AssistantResponseBody,
@@ -120,6 +123,23 @@ async function prepareImage(file: File): Promise<PendingImage> {
   return { previewUrl: jpegUrl, data: jpegUrl.split(",", 2)[1] ?? "", mimeType: "image/jpeg" };
 }
 
+/**
+ * A stored turn rendered back on screen. Photos are never persisted, so a turn
+ * that carried one shows the stored «صورة» placeholder (or its own text) instead
+ * of a preview — everything else is exactly the bubble it was.
+ */
+function restoredChatMessage(message: StoredChatMessage): ChatMessage {
+  return {
+    id: message.id,
+    author: message.author,
+    text: message.text || message.image || "",
+    diagnosis: message.diagnosis ?? null,
+    source: message.source,
+    analysisSource: message.analysisSource ?? null,
+    preprocessing: message.preprocessing ?? null,
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  View                                                               */
 /* ------------------------------------------------------------------ */
@@ -130,10 +150,14 @@ export default function AssistantView() {
   const t = ASSISTANT[lang];
   const shell = APP_SHELL[lang];
   const { profile, ready } = useProfile();
-  const { user: authUser, profile: authProfile } = useAuth();
+  const { user: authUser, profile: authProfile, loading: authLoading } = useAuth();
   const { isGuest } = useGuest();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  /** Turns restored from history: shown in the conversation, never sent to the model. */
+  const [restoredMessages, setRestoredMessages] = useState<ChatMessage[]>([]);
+  /** True once a successful hydration finished — gates saving (never overwrite an unread store). */
+  const [historyReady, setHistoryReady] = useState(false);
   const [draft, setDraft] = useState("");
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
@@ -158,6 +182,11 @@ export default function AssistantView() {
   /** Snapshot of the last request so the retry chip can resend it. */
   const lastRequestRef = useRef<{ message: string; image: PendingImage | null } | null>(null);
 
+  /** History hydration happens once per mount, after the session is settled. */
+  const hydratedRef = useRef(false);
+  /** The first save after hydration would rewrite what was just read — skip it. */
+  const skipNextSaveRef = useRef(true);
+
   // Same session gate as the dashboard: assistant answers are personalised,
   // so an authenticated profile — or the local guest bypass — is required.
   // A real member session always wins over a stale guest flag.
@@ -173,7 +202,52 @@ export default function AssistantView() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages, busy]);
+  }, [messages, restoredMessages, busy]);
+
+  /* ------------------------------------------------------------------ */
+  /*  Chat history (Firestore for verified members, localStorage else)    */
+  /*  Restored turns render above the live ones and are deliberately NOT  */
+  /*  fed into `send`'s history: the request payload stays exactly what   */
+  /*  this session typed, like today.                                     */
+  /* ------------------------------------------------------------------ */
+
+  /** Namespaces the localStorage fallback only — Firestore takes its uid from the session. */
+  const localHistoryKey = profile?.uid ?? authUser?.uid ?? null;
+
+  // Load on mount, once the session is resolved (Firebase Auth included).
+  // `hydratedRef` makes this a once-per-mount read (double-invoked effects
+  // included); a late answer for a screen that is gone is simply ignored by
+  // React, never applied to another mount's state.
+  useEffect(() => {
+    if (hydratedRef.current || authLoading || !ready || !authenticated) return;
+    hydratedRef.current = true;
+    void loadChatHistory(localHistoryKey).then((stored) => {
+      if (stored.messages.length > 0) {
+        setRestoredMessages(stored.messages.map(restoredChatMessage));
+      }
+      // An unreadable store keeps persistence off rather than overwriting it.
+      setHistoryReady(stored.ok);
+    });
+  }, [authLoading, ready, authenticated, localHistoryKey]);
+
+  // Save after every change (completed turns only; empty means clear). The
+  // first run after hydration only re-writes what was just read — unless the
+  // farmer already typed while the read was in flight.
+  useEffect(() => {
+    if (!historyReady) return;
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      if (messages.length === 0) return;
+    }
+    void saveChatHistory(localHistoryKey, [...restoredMessages, ...messages]);
+  }, [historyReady, localHistoryKey, restoredMessages, messages]);
+
+  const clearChat = useCallback(() => {
+    if (typeof window !== "undefined" && !window.confirm(CHAT_HISTORY_COPY[lang].clearConfirm)) return;
+    setRestoredMessages([]);
+    setMessages([]);
+    void clearChatHistory(localHistoryKey);
+  }, [lang, localHistoryKey]);
 
   // Photo requests take visibly longer now (detect → crop → classify): walk
   // the thinking label through the real pipeline phases so the farmer always
@@ -351,7 +425,9 @@ export default function AssistantView() {
   );
 
   const canSend = (draft.trim().length > 0 || pendingImage !== null) && !busy;
-  const emptyChat = messages.length === 0;
+  /** Restored turns first, then the live session — one conversation on screen. */
+  const conversation = restoredMessages.length > 0 ? [...restoredMessages, ...messages] : messages;
+  const emptyChat = conversation.length === 0;
   /** Presentation only: collapses entrance motion for users who ask for less. */
   const reduceMotion = useReducedMotion();
 
@@ -374,6 +450,13 @@ export default function AssistantView() {
             subtitle={t.header.subtitle}
           />
         }
+        trailing={
+          conversation.length > 0 ? (
+            <AppBarAction label={CHAT_HISTORY_COPY[lang].clear} onClick={clearChat}>
+              <Trash2 size={17} strokeWidth={2.4} aria-hidden />
+            </AppBarAction>
+          ) : undefined
+        }
       />
 
       {/* Conversation */}
@@ -386,7 +469,7 @@ export default function AssistantView() {
           {emptyChat && <EmptyHero greeting={t.hero.greeting} intro={t.hero.intro} />}
 
           <AnimatePresence initial={false}>
-            {messages.map((msg) => {
+            {conversation.map((msg) => {
               const isUser = msg.author === "user";
               return (
                 <motion.div
