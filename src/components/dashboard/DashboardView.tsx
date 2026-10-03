@@ -333,6 +333,7 @@ export default function DashboardView() {
           <section id="section-field" aria-label={t.sections.field} className="flex scroll-mt-[4.5rem] flex-col">
             <SectionHeader title={t.sections.field} />
             <div className="grid gap-3 lg:grid-cols-2">
+              <ScanCard t={t} wilayaCode={wilayaCode} />
               {/* The single plot card: the saved boundary, its area and the
                   last analysis date, with the one action into the flow. */}
               <MyPlotCard
@@ -355,7 +356,6 @@ export default function DashboardView() {
                 loading={fieldData.loadingPlots}
                 onDraw={() => setMapOpen(true)}
               />
-              <ScanCard t={t} wilayaCode={wilayaCode} />
             </div>
           </section>
 

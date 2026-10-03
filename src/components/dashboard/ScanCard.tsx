@@ -16,7 +16,6 @@ import {
   type LeafFailure,
   type LeafFinding,
 } from "@/lib/leaf-diagnose";
-import { Card } from "./parts";
 import styles from "./scan-card.module.css";
 
 type Phase = "idle" | "preparing" | "ready" | "scanning" | "revealing" | "complete" | "error";
@@ -127,6 +126,8 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
   const [revealed, setRevealed] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [frameSize, setFrameSize] = useState<ImageSize>({ width: 320, height: 240 });
+  const [inView, setInView] = useState(false);
+  const cardRef = useRef<HTMLElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const controller = useRef<AbortController | null>(null);
@@ -135,6 +136,25 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
   const gridId = useId();
   const url = file?.url;
 
+  useEffect(() => {
+    const node = cardRef.current;
+    if (!node) return;
+    if (reducedMotion || typeof IntersectionObserver === "undefined") {
+      const id = window.requestAnimationFrame(() => setInView(true));
+      return () => window.cancelAnimationFrame(id);
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.08 },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [reducedMotion]);
   useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
   useEffect(() => () => { revision.current += 1; controller.current?.abort(); }, []);
   useEffect(() => {
@@ -255,7 +275,21 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
   const active = selected ?? (phase === "revealing" ? revealed - 1 : null);
 
   return (
-    <Card title={t.scan.title} subtitle="صورة واحدة، قراءة بصرية لصحة الورقة." icon={<Icon name="scan" />} className={styles.card}>
+    <section
+      ref={cardRef}
+      aria-label={t.scan.title}
+      className={styles.card}
+      data-in-view={inView || reducedMotion}
+    >
+      <header className={styles.header}>
+        <span aria-hidden="true" className={styles.iconTile}>
+          <Icon name="scan" />
+        </span>
+        <div className={styles.headerText}>
+          <h2 className={styles.title}>{t.scan.title}</h2>
+          <p className={styles.subtitle}>صورة واحدة، قراءة بصرية لصحة الورقة.</p>
+        </div>
+      </header>
       <div className={styles.content} dir="rtl" data-testid="leaf-diagnose-card" data-state={phase} data-reduced-motion={reducedMotion}>
         <input ref={input} type="file" accept="image/jpeg,image/png,image/webp" hidden tabIndex={-1} aria-label="ملف صورة للفحص"
           onChange={(event) => { void pick(event.target.files?.[0]); event.target.value = ""; }} />
@@ -374,6 +408,6 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
         <p className={styles.privacy}><Icon name="shield" size={13} /><span>تُرسل الصورة إلى خدمة التحليل لحظة الفحص ولا تُحفظ</span></p>
         {(phase === "complete" || phase === "error") && <p className={styles.disclaimer}>تقدير بصري لا يغني عن مهندس زراعي</p>}
       </div>
-    </Card>
+    </section>
   );
 }
