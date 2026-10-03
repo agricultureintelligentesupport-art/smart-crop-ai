@@ -107,12 +107,12 @@ function annotation(finding: LeafFinding, index: number, frame: ImageSize,
   const edgeX = targetX >= centerX ? xmax : xmin;
   const sourceX = Math.min(frame.width - 8, Math.max(8, rect.x + zoom.translateX + edgeX / 1000 * rect.width * zoom.scale));
   const sourceY = Math.min(frame.height - 8, Math.max(8, rect.y + zoom.translateY + (ymin + ymax) / 2000 * rect.height * zoom.scale));
-  const elbowX = (sourceX + targetX) / 2;
-  const direction = Math.sign(elbowX - sourceX) || 1;
+  const midpointX = (sourceX + targetX) / 2;
   return {
     left, top, width,
-    line: `M${sourceX},${sourceY}H${elbowX}L${targetX},${targetY}`,
-    arrow: `M${sourceX + direction * 5},${sourceY - 4}L${sourceX},${sourceY}L${sourceX + direction * 5},${sourceY + 4}`,
+    line: `M${targetX},${targetY}Q${midpointX},${sourceY} ${sourceX},${sourceY}`,
+    dotX: sourceX,
+    dotY: sourceY,
   };
 }
 
@@ -286,9 +286,9 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
                     {findings.map((finding, index) => {
                       const [ymin, xmin, ymax, xmax] = finding.box;
                       return <g key={index} className={styles.finding} data-severity={finding.severity} data-active={active === index} data-dimmed={selected !== null && selected !== index}>
-                        <ellipse className={styles.findingRing} style={{ strokeWidth: 1.2 / zoom.scale }} cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2 + 14} ry={(ymax - ymin) / 2 + 14} />
-                        <ellipse className={styles.findingEllipse} style={{ strokeWidth: 1.3 / zoom.scale }} pathLength="1" cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2} ry={(ymax - ymin) / 2} />
-                        <path className={styles.findingBracket} style={{ strokeWidth: 2.2 / zoom.scale }} pathLength="1" d={findingBrackets(finding)} />
+                        <ellipse className={styles.findingRing} style={{ strokeWidth: 1.5 / zoom.scale }} cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2 + 14} ry={(ymax - ymin) / 2 + 14} />
+                        <ellipse className={styles.findingEllipse} style={{ strokeWidth: 1.5 / zoom.scale }} pathLength="1" cx={(xmin + xmax) / 2} cy={(ymin + ymax) / 2} rx={(xmax - xmin) / 2} ry={(ymax - ymin) / 2} />
+                        <path className={styles.findingBracket} style={{ strokeWidth: 1.5 / zoom.scale }} pathLength="1" d={findingBrackets(finding)} />
                       </g>;
                     })}
                   </svg>
@@ -297,7 +297,7 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
 
               {scanning && <div className={styles.scanner} aria-hidden="true" data-testid="leaf-scanner">
                 <svg className={styles.mesh} viewBox="0 0 1000 1000" preserveAspectRatio="none">
-                  <defs><pattern id={gridId} width="100" height="100" patternUnits="userSpaceOnUse"><path d="M100 0H0V100" fill="none" stroke="currentColor" strokeWidth="1.4" /></pattern></defs>
+                  <defs><pattern id={gridId} width="64" height="64" patternUnits="userSpaceOnUse"><path d="M64 0H0V64" fill="none" stroke="currentColor" strokeWidth="1" /></pattern></defs>
                   <rect width="1000" height="1000" fill={`url(#${gridId})`} />
                   <g className={styles.contours} fill="none" stroke="currentColor" strokeWidth="1.8">
                     <path d="M-40 300C100 40 230 530 390 260S630 70 790 300 970 420 1080 180" />
@@ -319,7 +319,8 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
                       role="button" tabIndex={0} aria-label={`تكبير موضع: ${finding.labelAr}`} aria-pressed={selected === index}
                       onClick={() => toggleFinding(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleFinding(index); } }}>
                       <path className={styles.leaderHit} d={item.line} />
-                      <path className={styles.leaderLine} pathLength="1" d={item.line} /><path className={styles.arrowHead} d={item.arrow} />
+                      <path className={styles.leaderLine} pathLength="1" d={item.line} />
+                      <circle className={styles.leaderDot} cx={item.dotX} cy={item.dotY} r="2.25" />
                     </g>;
                   })}
                 </svg>
@@ -327,7 +328,7 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
                   const item = annotation(finding, index, frameSize, rect, zoom);
                   return <button type="button" key={index} className={styles.label} data-severity={finding.severity} data-active={active === index || selected === index}
                     data-dimmed={selected !== null && selected !== index} data-testid="leaf-finding-label" aria-pressed={selected === index} aria-label={finding.labelAr} title={finding.labelAr}
-                    style={{ left: item.left, top: item.top, width: item.width }} onClick={() => toggleFinding(index)}>
+                    style={{ left: item.left, top: item.top, width: item.width, "--leaf-chip-delay": `${440 + index * 70}ms` } as CSSProperties} onClick={() => toggleFinding(index)}>
                     <span className={styles.labelNumber} aria-hidden="true">{index + 1}</span><span className={styles.labelText}>{finding.labelAr}</span>
                   </button>;
                 })}
@@ -345,7 +346,7 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
 
         {(scanning || phase === "revealing" || phase === "preparing") && <div className={styles.status} role="status">
           <span className={styles.statusDot} aria-hidden="true" />
-          <span>{phase === "preparing" ? "تجهيز الصورة…" : scanning ? SCAN_WORDS[statusIndex] : "تحديد العلامات المرئية…"}</span>
+          <span key={`${phase}-${scanning ? statusIndex : "static"}`} className={styles.statusText}>{phase === "preparing" ? "تجهيز الصورة…" : scanning ? SCAN_WORDS[statusIndex] : "تحديد العلامات المرئية…"}</span>
           {phase === "revealing" && result && result.findings.length > 0 && <span className={styles.statusCount} dir="ltr">{revealed} / {result.findings.length}</span>}
         </div>}
 
