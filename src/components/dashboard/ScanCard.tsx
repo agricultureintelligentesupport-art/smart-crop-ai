@@ -281,6 +281,41 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
       className={styles.card}
       data-in-view={inView || reducedMotion}
     >
+      {/* Decorative botanical layers — behind content, pointer-events: none */}
+      <div className={styles.botanicalDecor} aria-hidden="true">
+        <svg className={styles.leafSil1} viewBox="0 0 200 240" aria-hidden="true">
+          <path d="M100 10C130 20 180 60 175 120C170 180 120 230 80 230C40 230 10 180 15 120C20 60 70 20 100 10Z" fill="currentColor"/>
+          <path d="M100 10C100 60 95 140 80 230" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.35"/>
+          <path d="M100 40C120 50 150 70 160 90" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.2"/>
+          <path d="M95 80C70 90 40 110 30 130" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.2"/>
+          <path d="M90 120C110 130 140 150 155 170" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.2"/>
+          <path d="M85 160C65 170 40 190 30 210" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.2"/>
+        </svg>
+        <svg className={styles.leafSil2} viewBox="0 0 180 220" aria-hidden="true">
+          <path d="M90 5C120 15 165 50 160 110C155 170 110 215 75 215C40 215 15 170 15 110C15 50 60 15 90 5Z" fill="currentColor"/>
+          <path d="M90 5C90 55 85 130 75 215" fill="none" stroke="currentColor" strokeWidth="1.8" opacity="0.3"/>
+          <path d="M90 35C110 45 140 65 150 85" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.18"/>
+          <path d="M88 75C68 85 40 105 28 125" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.18"/>
+          <path d="M85 115C105 125 130 145 145 165" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.18"/>
+        </svg>
+        <svg className={styles.leafSil3} viewBox="0 0 140 180" aria-hidden="true">
+          <path d="M70 5C95 15 130 40 125 90C120 140 85 175 55 175C25 175 10 140 10 90C10 40 45 15 70 5Z" fill="currentColor"/>
+          <path d="M70 5C70 45 65 110 55 175" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.25"/>
+          <path d="M70 30C85 40 110 55 118 70" fill="none" stroke="currentColor" strokeWidth="0.8" opacity="0.16"/>
+          <path d="M68 60C55 68 35 80 25 95" fill="none" stroke="currentColor" strokeWidth="0.8" opacity="0.16"/>
+          <path d="M65 95C80 105 100 120 110 135" fill="none" stroke="currentColor" strokeWidth="0.8" opacity="0.16"/>
+        </svg>
+        <div className={styles.pollenLayer}>
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+          <span className={styles.pollenDot} />
+        </div>
+      </div>
       <header className={styles.header}>
         <span aria-hidden="true" className={styles.iconTile}>
           <Icon name="scan" />
