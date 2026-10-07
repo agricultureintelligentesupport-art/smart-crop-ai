@@ -57,15 +57,18 @@
  *     Never fails: a concise Arabic diagnosis card built from the analysis,
  *     or a greeting-aware basic-mode reply for a text-only question.
  *
- *   DEMO MOCK (opt-in — `DEMO_MOCK=1`, OFF by default)
- *     With the flag on, `getDemoMockResponse` (@/lib/assistant/demo-mock)
- *     answers the SCRIPTED demo prompts (greeting, self-introduction,
- *     "explain more", French, first photo, second photo) from a canned script
- *     after a simulated 600 ms round-trip, and it does so BEFORE any provider
- *     key is read — so a demo/pitch recording cannot burn or hit a quota,
- *     whatever the provider state is. Any turn outside the script returns
- *     null and the whole pipeline below runs untouched, which is also the
- *     behaviour whenever the flag is unset.
+ *   DEMO MOCK (ON by default — `DEMO_MOCK=0` restores the pipeline)
+ *     `getDemoMockResponse` (@/lib/assistant/demo-mock) answers the SCRIPTED
+ *     demo prompts (greeting, self-introduction, "explain more", French,
+ *     first photo, second photo) from a canned script after a simulated
+ *     600 ms round-trip, and it does so BEFORE any provider key is read — so a
+ *     demo/pitch recording cannot burn or hit a quota, whatever the provider
+ *     state is, and cannot fall back to the old basic-mode reply just because
+ *     a deployment lacks `.env.local`. Any turn outside the script returns
+ *     null and the whole pipeline below runs untouched. Set `DEMO_MOCK=0`
+ *     (alias `PHYTOSCAN_DEMO_MOCK=0`) in the environment to switch every
+ *     scripted prompt back to the real orchestrator — the automated test suite
+ *     pins exactly that.
  *
  *   STEP 0 (pre-step, photo requests only) — leaf Detection & Cropping.
  *     The free Hugging Face router also runs an open-source object detector:
@@ -2335,15 +2338,19 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     return bad("Provide a message and/or an image.");
   }
 
-  /* ---- DEMO MOCK (opt-in, `DEMO_MOCK=1`; OFF by default) ------------ */
-  // First thing the pipeline does, BEFORE any provider key is read: when the
-  // demo flag is on, a scripted turn is answered straight from
-  // `@/lib/assistant/demo-mock` after a simulated 600 ms round-trip, so the
-  // demo recording can never burn a quota, hit a rate limit or wait on a cold
-  // model. A turn that is not part of the script returns null and every stage
-  // below runs exactly as before — the flag being off (the default) makes
-  // this block a no-op, which is what production and the test suite see.
+  /* ---- DEMO MOCK (ON by default; `DEMO_MOCK=0` restores the pipeline) - */
+  // First thing the pipeline does, BEFORE any provider key is read: a scripted
+  // turn is answered straight from `@/lib/assistant/demo-mock` after a
+  // simulated 600 ms round-trip, so the demo recording can never burn a quota,
+  // hit a rate limit, wait on a cold model — or silently fall back to the old
+  // basic-mode reply because a flag was missing on the server. A turn that is
+  // not part of the script returns null and every stage below runs exactly as
+  // before; `DEMO_MOCK=0` (or `PHYTOSCAN_DEMO_MOCK=0`) makes this block a
+  // no-op, which is what production and the test suite pin.
   if (isDemoMockEnabled()) {
+    // The request contract is the app's own ({ message, image, history }) —
+    // the script evaluates the history plus the current turn, so the second
+    // photo of the demo is recognised as the second one.
     const demoReply = await getDemoMockResponse(
       buildDemoMockMessages(message, image?.data, history),
     );
@@ -2358,7 +2365,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         reply: demoReply,
         diagnosis: null,
         source: demoSource,
-        warnings: ["Demo mock reply (DEMO_MOCK enabled) — no provider call was made."],
+        warnings: [
+          "Demo mock reply — no provider call was made (set DEMO_MOCK=0 to restore real diagnoses).",
+        ],
       } satisfies AssistantResponseBody);
     }
   }

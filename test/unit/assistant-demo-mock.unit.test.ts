@@ -5,10 +5,11 @@
  * Two things must stay true:
  *   1. the scripted answers are served exactly as written, in script order,
  *      with a simulated ~600 ms round-trip, and
- *   2. the mock is INERT unless `DEMO_MOCK` is explicitly enabled — an unset
- *      flag (production, the rest of the suite) must leave the real pipeline
- *      in charge, and any turn outside the script must fall through to it
- *      even while the flag is on.
+ *   2. the mock is ON BY DEFAULT — a deployment with no configuration at all
+ *      (the Vercel recording environment, which has no `.env.local`) must
+ *      answer `مرحبا` with the script, never with the old basic-mode reply —
+ *      while an explicit `DEMO_MOCK=0` restores the real pipeline, and any
+ *      turn outside the script always falls through to it.
  */
 
 import assert from "node:assert/strict";
@@ -55,19 +56,22 @@ const user = (content: string, image?: string) => ({
 /*  The opt-in switch                                                  */
 /* ------------------------------------------------------------------ */
 
-test("the mock is OFF unless DEMO_MOCK is explicitly enabled", () => {
+test("the mock is ON by default — only an explicit DEMO_MOCK=0 disables it", () => {
   scrubEnv();
-  assert.equal(isDemoMockEnabled({}), false);
-  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "" }), false);
-  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "0" }), false);
-  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "off" }), false);
-  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "no" }), false);
-  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "maybe" }), false);
+  // Nothing configured at all: the deployed-recording case.
+  assert.equal(isDemoMockEnabled({}), true);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "" }), true);
   assert.equal(isDemoMockEnabled({ DEMO_MOCK: " 1 " }), true);
   assert.equal(isDemoMockEnabled({ DEMO_MOCK: "TRUE" }), true);
   assert.equal(isDemoMockEnabled({ DEMO_MOCK: "on" }), true);
-  // Documented alias.
-  assert.equal(isDemoMockEnabled({ PHYTOSCAN_DEMO_MOCK: "1" }), true);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "maybe" }), true);
+  // The documented kill switch (alias included).
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "0" }), false);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "false" }), false);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "off" }), false);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "no" }), false);
+  assert.equal(isDemoMockEnabled({ DEMO_MOCK: "disabled" }), false);
+  assert.equal(isDemoMockEnabled({ PHYTOSCAN_DEMO_MOCK: "0" }), false);
 });
 
 /* ------------------------------------------------------------------ */
@@ -175,8 +179,30 @@ function request(body: Record<string, unknown>) {
 
 const IMAGE = { data: "aW1hZ2U=", mimeType: "image/jpeg" };
 
-test("route: with the flag OFF a scripted turn still goes to the real pipeline", async () => {
+test("route: on a server with NO configuration a greeting is answered by the script", async () => {
+  // The reported regression: a deployment without DEMO_MOCK (Vercel has no
+  // `.env.local`) used to walk the real pipeline and return the old
+  // "محصولي الذكي … الوضع الأساسي" reply instead of the PhytoScan script.
   scrubEnv();
+  mock.method(globalThis, "fetch", async () => {
+    throw new Error("Unexpected upstream request");
+  });
+
+  for (const greeting of ["مرحبا", "اهلا", "أهلاً", "سلام"]) {
+    const response = await POST(request({ message: greeting }));
+    assert.equal(response.status, 200, `expected 200 for "${greeting}"`);
+    const payload = await response.json();
+    assert.equal(payload.reply.includes("مرحباً بك! 👋"), true, `script missed for "${greeting}"`);
+    // Neither the old basic-mode greeting nor its "unavailable" wording.
+    assert.equal(payload.reply.includes("محصولي الذكي"), false);
+    assert.equal(payload.reply.includes("الوضع الأساسي"), false);
+    assert.equal(payload.source, "llm");
+  }
+});
+
+test("route: DEMO_MOCK=0 restores the real pipeline for scripted turns", async () => {
+  scrubEnv();
+  process.env.DEMO_MOCK = "0";
   // No provider key configured: the documented MISSING_KEYS signal — proof the
   // mock did not answer.
   const response = await POST(request({ message: "مرحبا" }));

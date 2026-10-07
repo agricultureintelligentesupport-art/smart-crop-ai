@@ -17,16 +17,21 @@
  *   completely untouched, exactly as before this file existed.
  *
  * HOW TO TURN IT ON / OFF  (nothing else in the project changes)
- *   ON  · `DEMO_MOCK=1`   (also accepts true / on / yes / enabled;
- *                          `PHYTOSCAN_DEMO_MOCK` is honoured as an alias)
- *   OFF · unset or `DEMO_MOCK=0` — the DEFAULT, which is what every normal
- *         deployment (Vercel / production / the unit test suite) sees, so the
- *         real provider pipeline stays in charge unless the demo asks
- *         otherwise.
- *   Set it in `.env.local` for a local/preview recording session, and remove
- *   it (or set 0) before shipping. Every mocked turn is logged loudly on the
- *   server as `[Demo Mock]` and the response carries a `warnings` note, so a
- *   mock answer is never mistakable for a real model answer.
+ *   ON  · THE DEFAULT — no configuration at all. An unset/blank `DEMO_MOCK`
+ *         means the demo is ON, which is what makes a deployed recording
+ *         environment (Vercel has no `.env.local`) answer with the script
+ *         instead of silently falling back to the old basic-mode reply.
+ *   OFF · `DEMO_MOCK=0` (also false / off / no / disabled;
+ *         `PHYTOSCAN_DEMO_MOCK` is honoured as an alias). Use it for
+ *         production and for the automated test suite, which pin it
+ *         explicitly so the real pipeline keeps being tested.
+ *   While the demo is ON, no provider is ever called: photos included, every
+ *   scripted prompt gets its canned answer. Set `DEMO_MOCK=0` in the hosting
+ *   provider's environment variables once the recording is done — that single
+ *   variable restores the real Gemini / Hugging Face pipeline everywhere.
+ *   Every mocked turn is logged loudly on the server as `[Demo Mock]` and the
+ *   response carries a `warnings` note, so a mock answer is never mistakable
+ *   for a real model answer.
  *
  * Kept dependency-free so it is safe to import from the server bundle.
  */
@@ -58,22 +63,28 @@ const DEMO_MOCK_DELAY_MS = 600;
  */
 const FIRST_IMAGE_REPLY_MARKER = "احتراق حواف الأوراق (Leaf Scorch)";
 
-/** Explicit opt-in values for `DEMO_MOCK`. */
-const TRUTHY = new Set(["1", "true", "on", "yes", "y", "enabled"]);
+/** Explicit opt-OUT values: `DEMO_MOCK=0` (or any of these) restores the real
+ *  pipeline; an unset/unknown value leaves the demo script in charge. */
+const DISABLING = new Set(["0", "false", "off", "no", "n", "disabled"]);
 
 /**
  * Is the demo mock enabled for this process?
  *
- * OPT-IN by design: an unset/blank/unknown value keeps the file inert, so the
- * production orchestrator and the test suite behave exactly as before. Reads
- * `process.env` on every call (never cached at module load) so a flag added to
- * `.env.local` is picked up by the next request without a rebuild.
+ * ON BY DEFAULT: only an explicit disabling token turns it off, so a freshly
+ * deployed recording environment (Vercel, preview, local dev with no
+ * `.env.local`) serves the scripted demo answers with zero configuration —
+ * requiring an env var there was how a recording session silently ended up
+ * with the old "basic mode" fallback reply instead of the script.
+ *
+ * Reads `process.env` on every call (never cached at module load) so a flag
+ * added to `.env.local` or to the hosting provider's variables is picked up by
+ * the next request without a rebuild.
  */
 export function isDemoMockEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   const raw = (env.DEMO_MOCK ?? env.PHYTOSCAN_DEMO_MOCK ?? "").trim().toLowerCase();
-  return TRUTHY.has(raw);
+  return !DISABLING.has(raw);
 }
 
 /**

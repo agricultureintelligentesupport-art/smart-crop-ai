@@ -42,7 +42,10 @@ const GEMINI_FALLBACK_ORDER = [
  * model-chain overrides.
  */
 const SCRUBBED_ENV_PATTERN =
-  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
+  /^(DEMO_MOCK|PHYTOSCAN_DEMO_MOCK|GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
+// NOTE: the DEMO_MOCK family is scrubbed AND pinned to "0" below: the demo
+// mock is ON by default (that is what a recording deployment needs), while
+// this suite exists to exercise the REAL orchestrator on every turn.
 // NOTE: the CODECRAFT_* variables stay in the scrub list on purpose — a
 // developer's shell may still export them from the pre-streamlining setup,
 // and the guard tests below rely on them being absent unless set explicitly.
@@ -56,6 +59,9 @@ beforeEach(() => {
   for (const name of Object.keys(process.env)) {
     if (SCRUBBED_ENV_PATTERN.test(name)) delete process.env[name];
   }
+  // The scripted demo mock (ON by default) is explicitly disabled here so
+  // every assertion below observes the real orchestrator.
+  process.env.DEMO_MOCK = "0";
   // The health verdict is cached per process for 6 h. Each test starts from a
   // known-clean verdict so an earlier test's dead-id set cannot leak forward;
   // the health-check tests below `reset()` to force a real ListModels call.
