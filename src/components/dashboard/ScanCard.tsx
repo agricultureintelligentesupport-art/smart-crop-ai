@@ -16,6 +16,7 @@ import {
   type LeafFailure,
   type LeafFinding,
 } from "@/lib/leaf-diagnose";
+import { demoScanToDiagnosis } from "@/lib/leaf-scan-demo";
 import styles from "./scan-card.module.css";
 
 type Phase = "idle" | "preparing" | "ready" | "scanning" | "revealing" | "complete" | "error";
@@ -219,6 +220,22 @@ export default function ScanCard({ t }: { t: DashboardCopy; wilayaCode: string }
         try {
           const body = new FormData();
           body.append("image", file.blob, "leaf.jpg");
+          // Demo quick-scan FIRST (see /api/scan): it answers only while the
+          // demo mock is enabled, with a scripted diagnosis the card renders
+          // exactly like a real one. While the flag is off — i.e. production —
+          // it answers 404 instantly and the real pipeline below runs
+          // unchanged; a malformed envelope is likewise ignored.
+          try {
+            const demo = await fetch("/api/scan", { method: "POST", body, signal: request.signal });
+            if (demo.ok) {
+              const envelope: unknown = await demo.json().catch(() => null);
+              const scripted = demoScanToDiagnosis(envelope);
+              if (scripted) return scripted;
+            }
+          } catch (demoFailure) {
+            // Abort (component unmount / 30 s guard) must still propagate.
+            if (request.signal.aborted) throw demoFailure;
+          }
           const response = await fetch("/api/leaf-diagnose", { method: "POST", body, signal: request.signal });
           let data: unknown;
           try { data = await response.json(); } catch { return "malformed"; }
