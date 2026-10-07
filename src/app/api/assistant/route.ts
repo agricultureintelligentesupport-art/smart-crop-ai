@@ -54,6 +54,18 @@
  *     tried. NO image is attached here: Gemini formats ANALYSIS_DATA, it never
  *     re-analyses the photo.
  *
+ *   MANUAL MODEL SELECTOR — the request body may carry a `model` field with the
+ *   user's pick from the chat's picker (`phyto 3.8` → `gemini-3.8-flash`,
+ *   `phyto 3.5` → `gemini-3.5-flash`, `phyto 2.5` → `gemini-2.5-flash`; see
+ *   `@/lib/assistant/model-choice`). A recognised choice is pinned as the HEAD
+ *   of the Gemini chain for BOTH the image analysis and the text stage, and
+ *   `GEMINI_API_KEY_4` is moved to the front of the key draw so the explicit
+ *   choice spends the freshest quota first. The 8 s per-attempt window and the
+ *   single 60 s deadline are unchanged. An unknown/absent value is ignored, and
+ *   a selected model that cannot answer (retired id, key without access) falls
+ *   through the normal chain and REPORTS the substitution in `warnings[]` —
+ *   never a silent different answer.
+ *
  *   BUILT-IN FORMATTER (Gemini unavailable)
  *     Never fails: a concise Arabic diagnosis card built from the analysis, or
  *     a greeting-aware basic-mode reply for a text-only question.
@@ -134,6 +146,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import {
+  GEMINI_MODEL_DEFAULT,
   GeminiModelHealthMonitor,
   formatGeminiHealthReport,
   resolveGeminiModels as resolveGeminiChain,
@@ -165,12 +178,19 @@ import {
   isAbortOrTimeoutError,
   isHuggingFaceEnabled,
   isPriorityGeminiKeyMissing,
+  prioritizeGeminiKeyPool,
   resolveGeminiKeyPool,
   shuffleGeminiKeyPool,
   resolveHuggingFaceToken,
   shortMessage,
   type GeminiKeyEntry,
 } from "@/lib/assistant/providers";
+import {
+  PHYTO_MODEL_CHOICES,
+  phytoModelLabel,
+  resolveRequestedModel,
+  type PhytoModelChoice,
+} from "@/lib/assistant/model-choice";
 import { confidenceBucket, diseaseFamilyForArabic, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
   AssistantContext,
@@ -225,19 +245,35 @@ const HF_ENDPOINT = (model: string) =>
 
 /**
  * The ordered Gemini chain — used for BOTH the Step 1 image analysis and the
- * Step 3 text fallback — is resolved per request from the shared
+ * text stage — is resolved per request from the shared
  * `@/lib/assistant/gemini-models` module, so the route, the
  * `tools/check-gemini-models.mjs` CLI and the health check below can never
  * drift apart. That drift is the failure mode that let `gemini-3.6` (a model
  * id Google never shipped) sit in production until every request 404'd and
  * every photo silently degraded to MobileNetV2.
  *
- * The default is `gemini-3.8-flash`; `GEMINI_MODEL` pins a different primary
- * and ids the health check proved unavailable are dropped from the chain, so a
- * retired id costs no round-trip.
+ * `pin` is the model the USER chose in the chat's model selector (already
+ * mapped from the friendly name by `resolveRequestedModel`): it becomes the
+ * HEAD of the chain, so the request goes straight to that model. The built-in
+ * fallbacks stay behind it — a selected model that is retired, refused for this
+ * key, or absent from the key's catalog must still answer the user instead of
+ * failing, and the substitution is reported in `warnings[]`. Without a
+ * selection the `GEMINI_MODEL` pin (or the `gemini-3.8-flash` default) leads.
+ * Ids the health check proved unavailable are dropped, so a retired id costs no
+ * round-trip.
  */
-function resolveGeminiModels(): GeminiModel[] {
-  return resolveGeminiChain(process.env.GEMINI_MODEL, geminiModelHealth.unavailableModels);
+function resolveGeminiModels(pin?: string): GeminiModel[] {
+  const chain = resolveGeminiChain(process.env.GEMINI_MODEL, geminiModelHealth.unavailableModels);
+  if (!pin || chain[0]?.id === pin) return chain;
+  // MOVE the pick to the head instead of substituting it for the head: the
+  // built-in fallbacks (the default `gemini-3.8-flash` included — it is not in
+  // `GEMINI_FALLBACK_MODELS`) stay behind it, so choosing the cheapest model
+  // never costs the request its safety net.
+  const head: GeminiModel = chain.find((model) => model.id === pin) ?? {
+    id: pin,
+    thinking: GEMINI_MODEL_DEFAULT.thinking,
+  };
+  return [head, ...chain.filter((model) => model.id !== pin)];
 }
 
 
@@ -268,8 +304,12 @@ const GEMINI_MAX_OUTPUT_TOKENS = 1024;
  * the transport needs, and every log/warning/health response identifies a
  * credential by its `name`, never by its value.
  */
-function resolveGeminiApiKeys(): GeminiKeyEntry[] {
-  return shuffleGeminiKeyPool(resolveGeminiKeyPool());
+function resolveGeminiApiKeys(prioritizePriorityKey = false): GeminiKeyEntry[] {
+  const drawn = shuffleGeminiKeyPool(resolveGeminiKeyPool());
+  // A manually selected model is the case the priority key exists for: it gets
+  // the most predictable quota head-room, so the chosen model is the one that
+  // actually answers. Everything else keeps the random rotation.
+  return prioritizePriorityKey ? prioritizeGeminiKeyPool(drawn) : drawn;
 }
 
 /**
@@ -283,6 +323,11 @@ let geminiKeyConfigLogged = false;
 function logGeminiKeyConfiguration(pool: readonly GeminiKeyEntry[], hfEnabled: boolean): void {
   if (geminiKeyConfigLogged) return;
   geminiKeyConfigLogged = true;
+
+  console.log(
+    `[Model Selector] offering ${PHYTO_MODEL_CHOICES.map((choice) => `${choice.label} → ${choice.model}`).join(" | ")} ` +
+      "(a request's `model` field pins the chain head; unknown values are ignored).",
+  );
 
   console.log(
     `[Hugging Face] ENABLE_HUGGINGFACE=${hfEnabled} — ` +
@@ -679,6 +724,10 @@ async function analyzeImageWithGemini(
   geminiApiKeys: readonly GeminiKeyEntry[],
   lang: "ar" | "fr",
   deadline: RequestDeadline,
+  /** The user's model-selector choice, pinned as the chain head. */
+  pin?: string,
+  /** Client-visible notes (e.g. the selected model could not be honoured). */
+  warnings: string[] = [],
 ): Promise<AnalysisResult> {
   const userContent =
     lang === "fr"
@@ -697,6 +746,7 @@ async function analyzeImageWithGemini(
       },
       geminiApiKeys,
       deadline,
+      pin,
     );
 
   let result: GeminiResult;
@@ -720,6 +770,16 @@ async function analyzeImageWithGemini(
 
   // (c) — the payload must be a complete AnalysisData object.
   const data = parseAnalysisJson(result.text);
+
+  // The chain walked past the user's pick (retired id, or the key's catalog
+  // does not offer it): say so, exactly like the text stage does.
+  if (pin && result.model !== pin) {
+    const substitution =
+      `Selected model ${phytoModelLabel(pin)} (${pin}) was unavailable — analysed with ` +
+      `${phytoModelLabel(result.model)} (${result.model}).`;
+    pushWarning(warnings, substitution);
+    console.warn(`[Step 1: Selected Model Fallback] ${substitution}`);
+  }
 
   console.log(
     `[Step 1: Gemini Analysis Success] model=${result.model} ` +
@@ -785,14 +845,16 @@ async function runImageAnalysisStage(options: {
   lang: "ar" | "fr";
   warnings: string[];
   deadline: RequestDeadline;
+  /** The user's model-selector choice, pinned as the chain head. */
+  pin?: string;
 }): Promise<AnalysisResult | null> {
-  const { geminiImage, geminiApiKeys, huggingfaceKey, hfEnabled, lang, warnings, deadline } =
+  const { geminiImage, geminiApiKeys, huggingfaceKey, hfEnabled, lang, warnings, deadline, pin } =
     options;
 
   // ---- PRIMARY: Gemini -------------------------------------------------
   if (geminiApiKeys.length > 0) {
     try {
-      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang, deadline);
+      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang, deadline, pin, warnings);
     } catch (error) {
       // The global deadline is the request's hard stop, not a vision failure:
       // do not silently degrade a timing-out request into MobileNetV2.
@@ -1410,6 +1472,11 @@ async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
   keyPool: readonly GeminiKeyEntry[],
   deadline: RequestDeadline,
+  /**
+   * The model the user picked in the selector (a Gemini id), pinned as the head
+   * of the chain. `undefined` = no manual choice.
+   */
+  pin?: string,
 ): Promise<GeminiResult> {
   // Once per process (TTL-bounded): proves the configured model ids still
   // exist BEFORE they are used, so a Google deprecation surfaces as one loud
@@ -1417,9 +1484,10 @@ async function runGeminiWithKeyPool(
   // seeds the first key's catalog.
   await ensureGeminiModelHealth(keyPool, deadline);
 
-  // Resolve the chain once per request so a `GEMINI_MODEL` change is picked up
-  // without a restart (same convention as the key pool).
-  const models = resolveGeminiModels();
+  // Resolve the chain once per request so a `GEMINI_MODEL` change (or a fresh
+  // model-selector choice) is picked up without a restart — same convention as
+  // the key pool. A `pin` puts the USER'S model first.
+  const models = resolveGeminiModels(pin);
   const failures: string[] = [];
   const warnings: string[] = [];
 
@@ -1476,6 +1544,18 @@ async function runGeminiWithKeyPool(
           const text = await generateWithGeminiModel(model, prompt, entry.key, deadline);
           // The mandated success line — key NAME and model id only.
           console.log(`Gemini OK: ${entry.name} / ${model.id}`);
+
+          // A manual choice that could not be honoured must never be silent:
+          // the user asked for one model and another answered, so the reply
+          // carries the substitution — by NAME, never a credential.
+          if (pin && model.id !== pin) {
+            const substitution =
+              `Selected model ${phytoModelLabel(pin)} (${pin}) was unavailable — answered with ` +
+              `${phytoModelLabel(model.id)} (${model.id}).`;
+            warnings.push(shortMessage(substitution, 400));
+            console.warn(`[Gemini: Selected Model Fallback] ${substitution}`);
+          }
+
           return { model: model.id, text, warnings };
         } catch (error) {
           if (isDeadlineFailure(error)) throw error;
@@ -2412,14 +2492,18 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Server-only secrets — never exposed to the client bundle. Read on every
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
-  //   GEMINI_API_KEY_4      → FIRST key of the rotation (usually a different
-  //                           Google project, hence its own quota).
+  //   GEMINI_API_KEY_4      → the priority key: FIRST in the draw when the
+  //                           user picked a model explicitly (usually a
+  //                           different Google project, hence its own quota).
   //   GEMINI_API_KEY        → next in rotation; comma-separated values pool.
   //   GEMINI_API_KEY_N      → numbered variants (`_1`, `_2`, …) in numeric
   //                           order after the base variable.
   //   GEMINI_API_KEYS       → LEGACY comma pool, appended last.
   //                           Deps 1–4 feed `resolveGeminiKeyPool()`, which
-  //                           trims, dedupes and orders them; per model every
+  //                           trims, dedupes and orders them; the draw is then
+  //                           shuffled per request, and `GEMINI_API_KEY_4` is
+  //                           moved to the head when the request carries a
+  //                           manual model choice. Per model every
   //                           key is tried, a 429 parks that (key, model) pair
   //                           for 10 minutes, a 400 API_KEY_INVALID / 403
   //                           parks the key for 60 minutes, and 503/network
@@ -2434,12 +2518,25 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // pipeline is Gemini-only. Flip the constant (or set ENABLE_HUGGINGFACE=1)
   // to restore the previous Hugging Face stages — the code is untouched.
   const hfEnabled = isHuggingFaceEnabled();
+
+  // The chat's model selector: an unknown/absent value is ignored (the request
+  // runs on the default chain), a recognised one pins the chain head — the
+  // request goes STRAIGHT to that model, and `GEMINI_API_KEY_4` leads the key
+  // draw so the freshest quota answers the explicit choice.
+  const modelChoice: PhytoModelChoice | null = resolveRequestedModel(body.model);
   // Rotation order is a random draw per request: every configured key is in
   // the draw, no key repeats inside one cycle.
-  const geminiApiKeys = resolveGeminiApiKeys();
+  const geminiApiKeys = resolveGeminiApiKeys(modelChoice !== null);
   const huggingfaceKey = hfEnabled ? resolveHuggingFaceToken() : null;
   // The log line prints the STABLE inventory order (names only), not the draw.
   logGeminiKeyConfiguration(resolveGeminiKeyPool(), hfEnabled);
+  if (modelChoice) {
+    const prioritized = geminiApiKeys[0]?.name === GEMINI_PRIORITY_KEY_NAME;
+    console.log(
+      `[Model Selector] requested ${modelChoice.label} → ${modelChoice.model} ` +
+        `(${geminiApiKeys.length} key(s) in rotation${prioritized ? `, ${GEMINI_PRIORITY_KEY_NAME} first` : ""}).`,
+    );
+  }
 
   if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
@@ -2490,6 +2587,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         lang,
         warnings,
         deadline,
+        pin: modelChoice?.model,
       });
   }
 
@@ -2587,6 +2685,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         },
         geminiApiKeys,
         deadline,
+        modelChoice?.model,
       );
       reply = assertUsableTextReply(geminiResult.text, analysis?.data ?? null);
       textSource = "gemini_fallback";

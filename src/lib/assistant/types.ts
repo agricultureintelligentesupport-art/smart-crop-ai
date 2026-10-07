@@ -76,6 +76,14 @@ export interface AssistantRequestBody {
   image?: AssistantImagePayload;
   context?: AssistantContext;
   history?: AssistantHistoryTurn[];
+  /**
+   * Manual model choice from the chat's model selector — a catalog id
+   * (`"phyto-3.8"` | `"phyto-3.5"` | `"phyto-2.5"`), the friendly name
+   * (`"phyto 3.5"`) or the raw Gemini id. See
+   * `@/lib/assistant/model-choice`; unknown values are ignored and the request
+   * runs with the default chain.
+   */
+  model?: string;
 }
 
 /** One raw candidate from the vision classifier. */

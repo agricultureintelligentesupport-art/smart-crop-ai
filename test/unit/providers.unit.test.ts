@@ -22,6 +22,7 @@ import {
   DeadlineExceededError,
   ENABLE_HUGGINGFACE,
   isHuggingFaceEnabled,
+  prioritizeGeminiKeyPool,
   shuffleGeminiKeyPool,
   GEMINI_CATALOG_TTL_MS,
   GEMINI_INVALID_TTL_MS,
@@ -374,6 +375,50 @@ test("the Gemini pool is drawn in a random order: a permutation, never a repeat"
   // A one-key pool and an empty pool are returned unchanged.
   assert.deepEqual(shuffleGeminiKeyPool([pool[0]]).map((e) => e.key), ["a"]);
   assert.deepEqual(shuffleGeminiKeyPool([]), []);
+});
+
+test("the priority key is moved to the head of a drawn pool — losing nothing", () => {
+  const pool = [
+    { name: "GEMINI_API_KEY", key: "a" },
+    { name: "GEMINI_API_KEY_2", key: "b" },
+    { name: "GEMINI_API_KEY_4", key: "c" },
+  ];
+
+  const prioritized = prioritizeGeminiKeyPool(pool);
+  assert.deepEqual(
+    prioritized.map((entry) => entry.name),
+    ["GEMINI_API_KEY_4", "GEMINI_API_KEY", "GEMINI_API_KEY_2"],
+  );
+  // Same entries, one permutation: no key is dropped, duplicated or reordered
+  // beyond the promotion.
+  assert.deepEqual([...prioritized].sort((a, b) => a.key.localeCompare(b.key)), [
+    { name: "GEMINI_API_KEY", key: "a" },
+    { name: "GEMINI_API_KEY_2", key: "b" },
+    { name: "GEMINI_API_KEY_4", key: "c" },
+  ]);
+  assert.deepEqual(
+    pool.map((entry) => entry.name),
+    ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_4"],
+    "the caller's pool is never mutated",
+  );
+
+  // Already at the head: nothing to promote. A fresh array still comes back
+  // (the helper is pure) but the order is untouched.
+  assert.deepEqual(
+    prioritizeGeminiKeyPool(prioritized).map((entry) => entry.key),
+    ["c", "a", "b"],
+  );
+  assert.notEqual(prioritizeGeminiKeyPool(pool), pool);
+  // Absent priority key, a one-key pool and an empty pool are no-ops.
+  const without = pool.slice(0, 2);
+  assert.deepEqual(
+    prioritizeGeminiKeyPool(without).map((entry) => entry.key),
+    without.map((entry) => entry.key),
+  );
+  assert.equal(prioritizeGeminiKeyPool([]).length, 0);
+  assert.equal(GEMINI_PRIORITY_KEY_NAME, "GEMINI_API_KEY_4");
+  // An explicit name lets a caller promote another configured key.
+  assert.equal(prioritizeGeminiKeyPool(pool, "GEMINI_API_KEY_2")[0].name, "GEMINI_API_KEY_2");
 });
 
 test("the health secret is compared in constant time and fails closed on mismatch", () => {

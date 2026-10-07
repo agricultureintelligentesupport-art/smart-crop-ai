@@ -176,6 +176,26 @@
     background: linear-gradient(180deg, rgba(232, 243, 236, 0) 0%, rgba(232, 243, 236, 0.85) 100%);
   }
 
+  /*
+   * Model picker pill — sits above the composer row. Tonal, not a form field:
+   * it must read as a preference toggle, not as something to fill in.
+   */
+  .chat-model-pill {
+    background: rgba(16, 185, 129, 0.09);
+    border: 1px solid rgba(16, 185, 129, 0.22);
+    max-width: 100%;
+  }
+
+  .chat-model-pill:hover:not(:has(select:disabled)) {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: rgba(16, 185, 129, 0.36);
+  }
+
+  .chat-model-pill:focus-within {
+    border-color: rgba(16, 185, 129, 0.55);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+  }
+
   /* Send button — resting (idle) vs armed (can send) */
   .chat-send {
     background: rgba(6, 78, 59, 0.08);

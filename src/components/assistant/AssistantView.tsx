@@ -24,9 +24,11 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
+import ModelSelector from "@/components/assistant/ModelSelector";
 import AppBar, { AppBarAction, AppBarBrand } from "@/components/app/AppBar";
 import TabBar from "@/components/app/TabBar";
 import { SHELL_COLUMN } from "@/components/app/shell";
@@ -51,6 +53,12 @@ import {
   setActiveConversationId as persistActiveConversationId,
 } from "@/lib/assistant/conversationStore";
 import { HISTORY_COPY } from "@/lib/assistant/historyCopy";
+import {
+  DEFAULT_PHYTO_MODEL_ID,
+  PHYTO_MODEL_STORAGE_KEY,
+  phytoModelFor,
+  type PhytoModelChoice,
+} from "@/lib/assistant/model-choice";
 import type {
   AssistantPreprocessing,
   AssistantResponseBody,
@@ -161,6 +169,61 @@ function restoredChatMessage(message: StoredChatMessage): ChatMessage {
     analysisSource: message.analysisSource ?? null,
     preprocessing: message.preprocessing ?? null,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Manual model choice — localStorage-backed external store           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The chosen model lives in `localStorage` so it survives a reload, and the
+ * component reads it through `useSyncExternalStore` — the same hydration-safe
+ * pattern as the dashboard's hash store. The server snapshot is `null` (there
+ * is no storage during SSR) and the browser re-renders with the stored pick
+ * right after hydration; no state is ever mirrored from an effect.
+ *
+ * The snapshot is `null` until the user ACTUALLY picks a model — the pill
+ * displays the default before that, but the default is not a manual choice, so
+ * the request carries no `model` field and the server keeps the plain
+ * random key rotation. Sending the default id from an untouched picker would
+ * silently pin `GEMINI_API_KEY_4` first for everyone.
+ *
+ * Our own writes notify the subscribers explicitly: the `storage` event only
+ * fires in OTHER tabs, and this store must stay the single source of truth in
+ * the tab that changed the value.
+ */
+const modelChoiceListeners = new Set<() => void>();
+
+function subscribeModelChoice(onChange: () => void): () => void {
+  modelChoiceListeners.add(onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    modelChoiceListeners.delete(onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/**
+ * The stored catalog id, or `null` when the user has never chosen a model (or
+ * the stored value is no longer in the catalog — a stale entry must not wedge
+ * the picker on an unknown id).
+ */
+function readModelChoice(): string | null {
+  try {
+    return phytoModelFor(window.localStorage.getItem(PHYTO_MODEL_STORAGE_KEY))?.id ?? null;
+  } catch {
+    // Private mode / storage disabled: no persisted choice, no problem.
+    return null;
+  }
+}
+
+function writeModelChoice(id: string): void {
+  try {
+    window.localStorage.setItem(PHYTO_MODEL_STORAGE_KEY, id);
+  } catch {
+    // Persisting is a nicety; the selection still applies to this session.
+  }
+  for (const onChange of modelChoiceListeners) onChange();
 }
 
 /* ------------------------------------------------------------------ */
@@ -453,6 +516,18 @@ export default function AssistantView() {
     ],
   );
 
+  /**
+   * Manual model choice — `null` until the user picks one. Read from the store,
+   * written back on change, and validated against the shared catalog on the way
+   * in, so a stale or hand-edited entry can never wedge the picker on an
+   * unknown id. The pill always SHOWS a model; the request only carries one
+   * once this is non-null.
+   */
+  const chosenModelId = useSyncExternalStore(subscribeModelChoice, readModelChoice, () => null);
+  const onModelChange = useCallback((choice: PhytoModelChoice) => {
+    writeModelChoice(choice.id);
+  }, []);
+
   const send = useCallback(
     async (messageText: string, image: PendingImage | null) => {
       const text = messageText.trim();
@@ -491,6 +566,13 @@ export default function AssistantView() {
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
             history,
+            // The manual model choice travels as its stable catalog id; the
+            // route maps it to the Gemini id, moves it to the head of the
+            // Gemini chain and promotes `GEMINI_API_KEY_4` for that request.
+            // Only a real choice is sent: with no stored pick the field is
+            // absent, so the server keeps its plain random key rotation.
+            // `retryLast` re-uses this same callback, hence the same choice.
+            ...(chosenModelId ? { model: chosenModelId } : {}),
           }),
         });
         if (!res.ok) {
@@ -525,7 +607,15 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, messages, activeConversationId, t.chat.error, t.chat.unavailable],
+    [
+      busy,
+      buildContext,
+      messages,
+      chosenModelId,
+      activeConversationId,
+      t.chat.error,
+      t.chat.unavailable,
+    ],
   );
 
   const retryLast = useCallback(() => {
@@ -833,6 +923,19 @@ export default function AssistantView() {
               </motion.p>
             )}
           </AnimatePresence>
+
+          {/* Manual model selector — above the input row so the choice is
+              visible before sending, and it applies to the NEXT message (the
+              in-flight one keeps the model it was sent with). */}
+          <div className="flex items-center gap-2 px-1 pb-1.5 pt-0.5">
+            <ModelSelector
+              value={chosenModelId ?? DEFAULT_PHYTO_MODEL_ID}
+              onChange={onModelChange}
+              copy={t.model}
+              lang={lang}
+              disabled={composerDisabled}
+            />
+          </div>
 
           <div className="flex items-end gap-1.5">
             <input

@@ -246,6 +246,40 @@ NEW API keys — which is exactly why a model id is only used once the key's own
 fails if a retired id reappears (2.5-flash is asserted for its 2.5-era
 `thinkingBudget` payload instead).
 
+### The manual model selector (chat)
+
+The composer carries a model pill; the picker offers three friendly names, and
+the choice travels to the server as the stable catalog id in the request body:
+
+| Picker label | Request `model` | Gemini id | Character |
+| --- | --- | --- | --- |
+| `phyto 3.8` | `phyto-3.8` | `gemini-3.8-flash` | **default** — balanced |
+| `phyto 3.5` | `phyto-3.5` | `gemini-3.5-flash` | fast |
+| `phyto 2.5` | `phyto-2.5` | `gemini-2.5-flash` | economy |
+
+`POST /api/assistant` accepts the catalog id (`phyto-3.5`), the label
+(`phyto 3.5`) or the raw Gemini id; anything else is **ignored** rather than
+rejected, so a stale stored preference can never fail a request. The catalog
+itself lives in `src/lib/assistant/model-choice.ts` and is imported by both the
+picker and the route — the two cannot drift.
+
+- **The pick is moved to the HEAD of the chain, not substituted for it.** The
+  default id and every built-in fallback stay behind the selection, so choosing
+  the cheapest model never costs the request its safety net; if the pick is
+  retired, refused for this key, or missing from the key's 1-hour catalog, the
+  next seat answers and the substitution is reported to the client in
+  `warnings[]` (never silently).
+- **`GEMINI_API_KEY_4` leads that request's key draw** (the other keys keep
+  their random order) — the manually selected model is optimized to spend the
+  predictable project first. Without a selection the pure random rotation is
+  untouched: the pill always *shows* a model, but the browser sends the `model`
+  field only once the user has actually chosen one, so a request from an
+  untouched picker carries no choice and is treated exactly as before.
+- The per-attempt window stays exactly **8 s** and the whole request stays
+  inside the single **60 s** deadline (503 `DEADLINE_EXCEEDED`).
+- The browser remembers the choice in `localStorage["phytoscan.model"]`,
+  validated against the catalog on read.
+
 ### Verifying the chain
 
 ```bash

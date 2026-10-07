@@ -110,6 +110,15 @@ function request(withImage = false) {
   });
 }
 
+/** A text request that carries the chat's manual model choice. */
+function modelRequest(model: unknown) {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "How should I irrigate tomatoes?", model }),
+  });
+}
+
 function textRequest(message: string) {
   return new NextRequest("http://localhost/api/assistant", {
     method: "POST",
@@ -3050,4 +3059,163 @@ test("rotation: every key of the pool is used exactly once per request cycle (42
     const keysForModel = attempted.filter((call) => call.model === model).map((call) => call.key);
     assert.deepEqual(keysForModel.slice().sort(), ["cycle-a", "cycle-b", "cycle-c"], model);
   }
+});
+
+
+/* ------------------------------------------------------------------ */
+/*  Manual model selector                                              */
+/* ------------------------------------------------------------------ */
+
+test("model selector: the chosen model is the FIRST Gemini call (text request)", async () => {
+  configureKeys();
+  const models: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    // Quietly answer the per-key ListModels catalog probes.
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    models.push(requestedGeminiModel(String(url)) ?? "");
+    return geminiReply(GROUNDED_REPLY);
+  });
+
+  const response = await POST(modelRequest("phyto-3.5"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.reply, GROUNDED_REPLY);
+  assert.deepEqual(models, ["gemini-3.5-flash"], "the request goes STRAIGHT to the chosen model");
+});
+
+test("model selector: every offered choice pins its own Gemini id", async () => {
+  configureKeys();
+  for (const [choice, expected] of [
+    ["phyto 3.8", "gemini-3.8-flash"],
+    ["phyto-3.5", "gemini-3.5-flash"],
+    ["phyto 2.5", "gemini-2.5-flash"],
+    ["gemini-3.5-flash", "gemini-3.5-flash"],
+  ] as const) {
+    const models: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+      models.push(requestedGeminiModel(String(url)) ?? "");
+      return geminiReply(GROUNDED_REPLY);
+    });
+    const response = await POST(modelRequest(choice));
+    assert.equal(response.status, 200);
+    assert.equal(models[0], expected, `choice ${JSON.stringify(choice)}`);
+    mock.restoreAll();
+    mock.method(Math, "random", () => 1 - Number.EPSILON);
+  }
+});
+
+test("model selector: an unknown value is ignored — the default chain leads", async () => {
+  configureKeys();
+  const models: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    models.push(requestedGeminiModel(String(url)) ?? "");
+    return geminiReply(GROUNDED_REPLY);
+  });
+
+  const response = await POST(modelRequest("phyto 9.9"));
+  assert.equal(response.status, 200);
+  assert.deepEqual(models, [GEMINI_FALLBACK_ORDER[0]]);
+});
+
+test("model selector: an absent model field keeps the previous behaviour exactly", async () => {
+  configureKeys();
+  const models: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    models.push(requestedGeminiModel(String(url)) ?? "");
+    return geminiReply(GROUNDED_REPLY);
+  });
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  assert.deepEqual(models, [GEMINI_FALLBACK_ORDER[0]]);
+});
+
+test("model selector: a photo request pins the chosen model for the image analysis too", async () => {
+  configureKeys();
+  const calls: { url: string; model: string }[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    calls.push({ url: String(url), model: requestedGeminiModel(String(url)) ?? "" });
+    const wantsJson = /"responseMimeType"\s*:\s*"application\/json"/.test(String(init.body ?? ""));
+    return wantsJson ? geminiAnalysis() : geminiReply(GROUNDED_REPLY);
+  });
+
+  const response = await POST(
+    new NextRequest("http://localhost/api/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "شخّص هذه الورقة",
+        image: { data: LEAF_JPEG_B64, mimeType: "image/jpeg" },
+        model: "phyto-2.5",
+      }),
+    }),
+  );
+  assert.equal(response.status, 200);
+  // Both stages — the JSON image analysis and the text stage — hit the pick.
+  assert.deepEqual(calls.map((call) => call.model), ["gemini-2.5-flash", "gemini-2.5-flash"]);
+});
+
+test("model selector: a chosen model that 404s falls to the chain AND says so", async () => {
+  configureKeys();
+  const models: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    const model = requestedGeminiModel(String(url)) ?? "";
+    models.push(model);
+    // The chosen id is gone; the next chain seat answers.
+    return model === "gemini-2.5-flash" ? geminiModelNotFound(model) : geminiReply(GROUNDED_REPLY);
+  });
+
+  const response = await POST(modelRequest("phyto-2.5"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.reply, GROUNDED_REPLY);
+  assert.equal(models[0], "gemini-2.5-flash");
+  assert.ok(models.length > 1, "the chain must continue past the retired pick");
+  // The pick is MOVED to the head, never swapped FOR the head: the built-in
+  // chain — `gemini-3.8-flash` included, which is not a fallback entry — must
+  // still be behind a cheap selection. Choosing `phyto 2.5` may not cost the
+  // request its default safety net.
+  assert.equal(models[1], GEMINI_FALLBACK_ORDER[0]);
+  assert.equal(GEMINI_FALLBACK_ORDER[0], "gemini-3.8-flash");
+  // The substitution is never silent, and it names models — never credentials.
+  assert.match(
+    warningText(payload),
+    /Selected model phyto 2\.5 \(gemini-2\.5-flash\) was unavailable — answered with phyto 3\.8 \(gemini-3\.8-flash\)/,
+  );
+  assert.doesNotMatch(JSON.stringify(payload), new RegExp(GEMINI_KEY));
+});
+
+test("model selector: GEMINI_API_KEY_4 leads the key draw for an explicit choice", async () => {
+  configureKeys();
+  process.env.GEMINI_API_KEY_4 = "priority-key";
+  process.env.GEMINI_API_KEY_2 = "second-key";
+  // A draw of 0 is the opposite of the suite's identity draw: it produces
+  // [GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_4], so the FIRST call can
+  // only be the priority key if the selector really reordered the pool.
+  mock.method(Math, "random", () => 0);
+  const keysFor = async (body: unknown) => {
+    const seen: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+      seen.push(requestedGeminiKey(String(url)) ?? "");
+      return geminiReply(GROUNDED_REPLY);
+    });
+    const response = await POST(modelRequest(body));
+    assert.equal(response.status, 200);
+    mock.restoreAll();
+    mock.method(Math, "random", () => 0);
+    return seen;
+  };
+
+  assert.equal((await keysFor("phyto-3.5"))[0], "priority-key");
+
+  // Without a choice the pure random draw stands: the base variable leads.
+  process.env.GEMINI_API_KEY = "base-key";
+  assert.equal((await keysFor(undefined))[0], "base-key");
+  mock.restoreAll();
+  mock.method(Math, "random", () => 1 - Number.EPSILON);
 });

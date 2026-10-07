@@ -12,7 +12,9 @@
  *     `GEMINI_API_KEY` and its numbered variants (`GEMINI_API_KEY_N`), then
  *     SHUFFLED per request (see {@link shuffleGeminiKeyPool}): a random draw
  *     without replacement, so no key is tried twice in one request cycle and
- *     no request always starts on the same credential. The Hugging Face token
+ *     no request always starts on the same credential. When the user picked a
+ *     model explicitly, {@link prioritizeGeminiKeyPool} moves the priority key
+ *     to the head of that draw first. The Hugging Face token
  *     is read from ONE variable name, `HUGGINGFACE_API_KEY` (trimmed), with no
  *     alias and no hardcoded fallback.
  *   • FEATURE FLAG — {@link ENABLE_HUGGINGFACE} (shipped `false`) bypasses
@@ -454,6 +456,28 @@ export function shuffleGeminiKeyPool(
     [drawn[i], drawn[j]] = [drawn[j], drawn[i]];
   }
   return drawn;
+}
+
+/**
+ * Move one credential to the FRONT of a drawn pool — the "optimized for
+ * `GEMINI_API_KEY_4`" step of a manually selected model.
+ *
+ * An explicit model choice spends the freshest, most predictable credential
+ * first (a different Google project usually means its own daily quota), while
+ * the rest of the pool keeps its random order: the priority key is tried once
+ * per cycle at most, and only one key is pinned — no key is lost, none repeats.
+ *
+ * Returns a NEW array (the caller's draw is never mutated). When the named key
+ * is not configured, or is already at the head, the ORDER is returned
+ * unchanged — a missing `GEMINI_API_KEY_4` costs nothing.
+ */
+export function prioritizeGeminiKeyPool(
+  pool: readonly GeminiKeyEntry[],
+  name: string = GEMINI_PRIORITY_KEY_NAME,
+): GeminiKeyEntry[] {
+  const index = pool.findIndex((entry) => entry.name === name);
+  if (index <= 0) return [...pool];
+  return [pool[index], ...pool.filter((_, position) => position !== index)];
 }
 
 /** True when the preferred first key is absent, blank or whitespace-only. */

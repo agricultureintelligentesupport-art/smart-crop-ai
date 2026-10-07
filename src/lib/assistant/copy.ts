@@ -39,6 +39,19 @@ export interface AssistantCopy {
     unavailable: string;
     visionOnlyNote: string;
   };
+  /**
+   * Manual model selector. The option LABELS come from
+   * `@/lib/assistant/model-choice` (`phyto 3.8` …) so the picker and the API
+   * agree; everything here is the surrounding chrome.
+   */
+  model: {
+    label: string;
+    aria: string;
+    /** Tooltip prefix: "Selected: phyto 3.5 — fast". */
+    selected: string;
+    /** One-line characterisation per `PhytoModelChoice.note`. */
+    notes: Record<"balanced" | "fast" | "economy", string>;
+  };
   diagnosis: {
     title: string;
     confidence: string;
@@ -93,6 +106,16 @@ const AR: AssistantCopy = {
     unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
   },
+  model: {
+    label: "النموذج",
+    aria: "اختر نموذج الذكاء الاصطناعي المستخدم في الإجابة",
+    selected: "النموذج المختار",
+    notes: {
+      balanced: "متوازن — الأدق للإجابة والتشخيص",
+      fast: "سريع — إجابات أسرع",
+      economy: "اقتصادي — استهلاك أقل للحصّة",
+    },
+  },
   diagnosis: {
     title: "نتيجة تشخيص الصورة",
     confidence: "نسبة الثقة",
@@ -144,6 +167,16 @@ const FR: AssistantCopy = {
     retry: "Réessayer",
     unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
     visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
+  },
+  model: {
+    label: "Modèle",
+    aria: "Choisir le modèle d'IA utilisé pour la réponse",
+    selected: "Modèle sélectionné",
+    notes: {
+      balanced: "Équilibré — le plus précis",
+      fast: "Rapide — réponses plus vives",
+      economy: "Économique — moins de quota",
+    },
   },
   diagnosis: {
     title: "Résultat du diagnostic visuel",

@@ -27,10 +27,21 @@
 >    platform limit (`maxDuration = 65` where the plan allows it) so the route's
 >    own response wins the race with Vercel's 60 s kill.
 >
+> 5. **Manual model selector (third pass)** — the chat's composer carries a
+>    model pill (`phyto 3.8` → `gemini-3.8-flash`, default; `phyto 3.5` →
+>    `gemini-3.5-flash`; `phyto 2.5` → `gemini-2.5-flash`) whose catalog id
+>    travels in the `POST /api/assistant` body as `model`. The route MOVES the
+>    pick to the head of the normal chain (the default id and every built-in
+>    fallback stay behind it), promotes `GEMINI_API_KEY_4` to the front of that
+>    request's shuffled draw, and reports an unhonoured pick in `warnings[]`.
+>    The 8 s per-attempt window and the 60 s deadline are unchanged. Catalog:
+>    `src/lib/assistant/model-choice.ts`.
+>
 > Everything below describes the state after the FIRST pass; where the two
 > disagree (rotation order, 45 s, Step 0/leaf cropping, required variables), this
-> banner wins. Verified after the second pass: `npx tsc --noEmit` clean,
-> `npm run lint` 0 errors, `npm run test:unit` **799/799**.
+> banner wins. Verified after the third pass: `npx tsc --noEmit` clean,
+> `npm run lint` 0 errors, `npm run test:unit` **812/812**. (Second pass:
+> 799/799.)
 
 **Scope** — the Hugging Face + Gemini pipeline behind `POST /api/assistant`, its
 sibling key consumers (`/api/leaf-diagnose`, the daily-task generator,
