@@ -22,6 +22,7 @@
  */
 
 import { resolveGeminiModels as resolveGeminiChain } from "@/lib/assistant/gemini-models";
+import { resolveGeminiKeyPool } from "@/lib/assistant/providers";
 import type { DailyContext } from "./context";
 import type { DailyTask, TaskCategory, TaskPriority } from "./types";
 
@@ -56,25 +57,13 @@ export function resolveGeminiModels(): string[] {
 }
 
 /**
- * Every `GEMINI_API_KEY*` variable participates (`GEMINI_API_KEY`,
- * `GEMINI_API_KEYS` comma pool, `GEMINI_API_KEY_N` variants) — trimmed,
- * deduplicated, rotation-ordered. Read per call so key changes need no
- * restart.
+ * The SAME rotation order the chat uses, from the one place that owns it:
+ * `GEMINI_API_KEY_4` first, then `GEMINI_API_KEY` and the numbered variants in
+ * numeric order, then the legacy comma-separated `GEMINI_API_KEYS` pool.
+ * Trimmed, deduplicated, read per call so key changes need no restart.
  */
 export function resolveGeminiApiKeys(): string[] {
-  const keys: string[] = [];
-  const seen = new Set<string>();
-  for (const [name, raw] of Object.entries(process.env)) {
-    if (!name.startsWith("GEMINI_API_KEY") || typeof raw !== "string") continue;
-    for (const part of raw.split(",")) {
-      const key = part.trim();
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        keys.push(key);
-      }
-    }
-  }
-  return keys;
+  return resolveGeminiKeyPool().map((entry) => entry.key);
 }
 
 export function resolveOpenAi(): { key: string; model: string } | null {

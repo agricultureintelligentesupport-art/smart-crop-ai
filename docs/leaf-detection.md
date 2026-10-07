@@ -62,7 +62,7 @@ Pure, dependency-free, fully unit-tested geometry:
 
 | Case | Behaviour |
 | --- | --- |
-| No `HUGGINGFACE_API_KEY`/`HF_TOKEN` | Step 0 reports `status: "skipped"` (no request, no delay) and stays silent so it does not duplicate the Step 1 fallback's own skip warning. |
+| No `HUGGINGFACE_API_KEY` (the only name read — no `HF_TOKEN` alias) | Step 0 reports `status: "skipped"` (no request, no delay) and stays silent so it does not duplicate the Step 1 fallback's own skip warning. |
 | Undecodable/too-small image | `status: "unavailable"`, warning pushed, original classified. |
 | Detector 503/530 (loading), 4xx/5xx, network, timeout | Walk the model chain; when all ids fail → `status: "unavailable"` + warning, original classified. |
 | Payload is not object-detection-shaped | Treated as "this id can't serve detection" → next id in the chain. |

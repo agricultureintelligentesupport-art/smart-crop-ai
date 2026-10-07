@@ -53,6 +53,7 @@
  * classify a dead key — it is matched in memory and never stored or emitted.
  */
 import { resolveGeminiModels, type GeminiModel } from "@/lib/assistant/gemini-models";
+import { resolveGeminiKeyPool } from "@/lib/assistant/providers";
 import type { LeafFailure } from "@/lib/leaf-diagnose";
 
 /**
@@ -84,31 +85,16 @@ const ERROR_BODY_PEEK_LIMIT = 16 * 1024;
 type Env = Readonly<Record<string, string | undefined>>;
 
 /**
- * The chat's Gemini key pool, resolved read-only from the environment.
- *
- * Mirrors the chat's resolver: every variable starting with `GEMINI_API_KEY`
- * participates; each value may itself be a comma-separated pool. The base
- * variable comes first, numbered variants follow in numeric order
- * (`GEMINI_API_KEY` → `_2` → `_3` → … `_10`), anything else (e.g.
- * `GEMINI_API_KEYS`) after them. Blank entries are dropped and duplicates removed.
+ * The chat's Gemini key pool, resolved read-only from the environment — the
+ * SAME `resolveGeminiKeyPool()` the assistant route rotates, so the two
+ * pipelines can never disagree about which credential to spend first:
+ * `GEMINI_API_KEY_4` FIRST (a different Google project usually means its own
+ * quota), then `GEMINI_API_KEY`, then the numbered variants in numeric order,
+ * then the legacy comma-separated `GEMINI_API_KEYS` pool. Blank entries are
+ * dropped, duplicates removed and each value trimmed.
  */
 export function resolveLeafGeminiKeys(env: Env = process.env): string[] {
-  const prefix = "GEMINI_API_KEY";
-  const configured = Object.entries(env)
-    .filter(([name, value]) => name.startsWith(prefix) && typeof value === "string")
-    .sort(([first], [second]) => {
-      const order = (name: string): [number, string] => {
-        if (name === prefix) return [0, name];
-        const suffix = name.slice(`${prefix}_`.length);
-        return [/^\d+$/.test(suffix) ? Number(suffix) : Number.POSITIVE_INFINITY, name];
-      };
-      const [firstRank, firstName] = order(first);
-      const [secondRank, secondName] = order(second);
-      return firstRank - secondRank || firstName.localeCompare(secondName);
-    })
-    .flatMap(([, value]) => value?.split(",") ?? []);
-
-  return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
+  return resolveGeminiKeyPool(env).map((entry) => entry.key);
 }
 
 /**

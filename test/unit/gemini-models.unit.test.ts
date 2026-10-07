@@ -23,12 +23,25 @@ import {
   type GeminiModel,
 } from "../../src/lib/assistant/gemini-models";
 
-/** Ids that must never reappear in the chain, and why. */
-const RETIRED_IDS = [
-  "gemini-2.0-flash",
-  "gemini-2.0-flash-exp",
-  "gemini-2.0-flash-lite",
+/**
+ * Ids that must never reappear in the chain.
+ *
+ * NOTE: `gemini-2.5-flash` was in this list while the chain skipped the 2.5
+ * generation. The hardened, mandated chain (2026-10) deliberately includes it
+ * as the fourth seat — it still serves existing keys until its 2026-10-20
+ * shutdown — so it is no longer "retired"; what matters is that it keeps its
+ * 2.5-era thinking payload and that a per-key catalog can skip it when Google
+ * withholds the id from that project.
+ */
+const RETIRED_IDS = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.0-flash-lite"] as const;
+
+/** The mandated chain, in order. */
+const MANDATED_CHAIN = [
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
   "gemini-2.5-flash",
+  "gemini-flash-latest",
 ] as const;
 
 /* ------------------------------------------------------------------ */
@@ -50,10 +63,13 @@ test("every default and fallback id is a real, live model", () => {
   }
   // The exact string that shipped by accident — a real id, wrong name.
   assert.ok(!ids.includes("gemini-3.6"), "the real id is gemini-3.6-flash");
-  // Every id must carry an explicit family, not a bare generation number.
+  // Every id must carry an explicit family (or be Google's rolling `-latest`
+  // alias), never a bare generation number.
   for (const id of ids) {
-    assert.match(id, /^gemini-\d+(\.\d+)?-flash(-lite)?$/, `unexpected id shape: ${id}`);
+    assert.match(id, /^gemini-(?:\d+(\.\d+)?-flash(?:-lite)?|flash-latest)$/, `unexpected id shape: ${id}`);
   }
+  // The exact mandated order, so a future "reordering" is a visible diff.
+  assert.deepEqual(ids, [...MANDATED_CHAIN]);
 });
 
 test("the chain mixes a rolling id with long-lived ones", () => {
@@ -65,22 +81,21 @@ test("the chain mixes a rolling id with long-lived ones", () => {
   assert.ok(longLived.length >= 2, `expected long-lived fallbacks, got ${ids.join(", ")}`);
 });
 
-test("every chain id takes thinkingLevel, never the legacy numeric budget", () => {
+test("every chain id carries the thinking payload its generation accepts", () => {
   for (const model of [GEMINI_MODEL_DEFAULT, ...GEMINI_FALLBACK_MODELS]) {
-    assert.deepEqual(model.thinking, { thinkingLevel: "low" }, `${model.id}`);
+    const expected =
+      model.id === "gemini-2.5-flash" ? { thinkingBudget: 0 } : { thinkingLevel: "low" };
+    assert.deepEqual(model.thinking, expected, `${model.id}`);
   }
 });
 
 test("resolveGeminiModels returns the default chain with no override", () => {
-  assert.deepEqual(
-    resolveGeminiModels().map((m) => m.id),
-    ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"],
-  );
+  assert.deepEqual(resolveGeminiModels().map((m) => m.id), [...MANDATED_CHAIN]);
 });
 
 test("an override replaces the primary and is never duplicated", () => {
   const chain = resolveGeminiModels("  gemini-3.7-flash  ").map((m) => m.id);
-  assert.deepEqual(chain, ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]);
+  assert.deepEqual(chain, ["gemini-3.7-flash", ...MANDATED_CHAIN.slice(1)]);
   // Pinning a built-in fallback must not repeat it.
   const deduped = resolveGeminiModels("gemini-3.5-flash").map((m) => m.id);
   assert.equal(deduped.filter((id) => id === "gemini-3.5-flash").length, 1);
@@ -92,14 +107,14 @@ test("a blank override is ignored, not treated as a model id", () => {
 
 test("proved-dead ids are dropped from the chain", () => {
   const chain = resolveGeminiModels(undefined, new Set(["gemini-3.8-flash"])).map((m) => m.id);
-  assert.deepEqual(chain, ["gemini-3.5-flash", "gemini-3.5-flash-lite"]);
+  assert.deepEqual(chain, [...MANDATED_CHAIN.slice(1)]);
 });
 
 test("the chain never resolves to empty, even if every id is marked dead", () => {
-  const allDead = new Set(["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]);
+  const allDead = new Set<string>(MANDATED_CHAIN);
   const chain = resolveGeminiModels(undefined, allDead).map((m) => m.id);
   // A stale negative cache must not disable the stage outright.
-  assert.equal(chain.length, 3);
+  assert.deepEqual(chain, [...MANDATED_CHAIN]);
 });
 
 /* ------------------------------------------------------------------ */
@@ -245,7 +260,7 @@ test("monitor records dead ids and the chain drops them, but never empties", asy
   assert.ok(monitor.unavailableModels.has("gemini-3.8-flash"));
   assert.equal(monitor.unavailableModels.has("gemini-3.5-flash"), false);
   const chain = resolveGeminiModels(undefined, monitor.unavailableModels);
-  assert.deepEqual(chain.map((model) => model.id), ["gemini-3.5-flash", "gemini-3.5-flash-lite"]);
+  assert.deepEqual(chain.map((model) => model.id), [...MANDATED_CHAIN.slice(1)]);
 });
 
 test("a ListModels outage does not poison the chain", async () => {

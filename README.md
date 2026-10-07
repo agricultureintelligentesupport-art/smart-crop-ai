@@ -184,15 +184,22 @@ photo (base64)
   │
   ├─ Step 2 · TEXT GENERATION (PRIMARY) — the Hugging Face Inference Providers
   │    router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507, Bearer
-  │    HUGGINGFACE_API_KEY / HF_TOKEN) narrates the AnalysisData into a clear,
+  │    HUGGINGFACE_API_KEY — ONE variable name, no HF_TOKEN alias) narrates
+  │    the AnalysisData into a clear,
   │    user-facing explanation with a practical recommendation. Fails on a
   │    transport error/timeout, an empty or nonsensical reply, or a reply that
   │    does not correspond to the AnalysisData.
   │
   └─ Step 3 · TEXT FALLBACK (Google Gemini, FORMAT-ONLY) — reached ONLY after
-       Step 2 failed. Same model chain and key pool (GEMINI_API_KEY +
-       GEMINI_API_KEYS + numbered GEMINI_API_KEY_N, rotated on 429 /
-       RESOURCE_EXHAUSTED / quota; one shared 18 s AbortController). It gets
+       Step 2 failed. Same 5-id model chain, key pool order GEMINI_API_KEY_4 →
+       GEMINI_API_KEY → the numbered variants in numeric order (legacy
+       GEMINI_API_KEYS last). Per model, every key is tried; a 429 parks that
+       (key, model) pair for 10 minutes, a 400 API_KEY_INVALID / 403 parks the
+       key for 60 minutes, and a 503/network error retries the same key once
+       before rotating. One 8 s AbortController per attempt inside ONE 45 s
+       deadline for the whole request; exceeding it answers HTTP 503
+       { code: "DEADLINE_EXCEEDED" } with the Arabic
+       "الخدمة مشغولة حالياً، حاول بعد قليل". It gets
        the AnalysisData and NO image, so it formats the data and never
        re-analyses the photo — including the edge case where the analysis came
        from MobileNetV2. If both text models are down, the built-in formatter
@@ -212,6 +219,8 @@ missed in another.
 | Primary | `gemini-3.8-flash` | Current stable Flash with vision support |
 | Fallback 1 | `gemini-3.5-flash` | Supported until at least 2027-05-19 |
 | Fallback 2 | `gemini-3.5-flash-lite` | Supported until at least 2027-07-21 |
+| Fallback 3 | `gemini-2.5-flash` | Last 2.5-generation seat; retiring 2026-10-20 |
+| Fallback 4 | `gemini-flash-latest` | Google's rolling alias — survives the point releases that retire 3.x ids |
 
 The mix is deliberate. Google designates the 3.6/3.7/3.8 Flash ids as
 *short-availability* models that rotate, and the `latest` aliases move with
@@ -219,10 +228,14 @@ them, so a chain built only from those can 404 in full at once — which is
 exactly how this orchestrator ended up answering every photo from MobileNetV2.
 At least one long-lived id is always in the chain.
 
-Ids excluded on purpose: `gemini-2.0-flash*` (shut down 2026-06-01),
-`gemini-2.5-flash` (refused for new API keys) and `gemini-3.6` — a bare
-`gemini-3.6` was never a real id; the real one is `gemini-3.6-flash`.
-`test/unit/gemini-models.unit.test.ts` fails if any of them reappear.
+Ids excluded on purpose: `gemini-2.0-flash*` (shut down 2026-06-01) and
+`gemini-3.6` — a bare `gemini-3.6` was never a real id; the real one is
+`gemini-3.6-flash`. `gemini-2.5-flash` is IN the chain as fallback 3 (it still
+serves existing keys until its 2026-10-20 shutdown) but Google refuses it to
+NEW API keys — which is exactly why a model id is only used once the key's own
+1-hour `GET /v1beta/models` catalog lists it. `test/unit/gemini-models.unit.test.ts`
+fails if a retired id reappears (2.5-flash is asserted for its 2.5-era
+`thinkingBudget` payload instead).
 
 ### Verifying the chain
 
@@ -240,8 +253,8 @@ dropped from the request chain, so a retired id costs no round-trip and never
 reaches a photo as a silent MobileNetV2 downgrade.
 
 ```bash
-[Gemini Health] ✅ chain gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite — 3/3 configured model ids are live.
-[Gemini Health] ❌ 1 of 3 configured model ids are NOT available: gemini-3.8-flash.
+[Gemini Health] ✅ chain gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite → gemini-2.5-flash → gemini-flash-latest — 5/5 configured model ids are live.
+[Gemini Health] ❌ 1 of 5 configured model ids are NOT available: gemini-3.8-flash.
 [Gemini Health]   set GEMINI_MODEL=gemini-3.7-flash (or update GEMINI_FALLBACK_MODELS in src/lib/assistant/gemini-models.ts).
 ```
 
@@ -266,9 +279,39 @@ and analytics; the user only ever sees the final `reply`. The same
 information is logged server-side, with a final `[Orchestrator]` line
 summarising the whole route.
 
-Gemini key pool: `GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered
-`GEMINI_API_KEY_N` — rotated on 429 / RESOURCE_EXHAUSTED / quota. The
-CodeCraft gateway and its `CODECRAFT_*` environment variables are gone;
+Gemini key pool, in rotation order: `GEMINI_API_KEY_4` FIRST, then
+`GEMINI_API_KEY`, then the numbered variants in numeric order (`_1`, `_2`,
+`_3`, `_5`, …), then the legacy comma-separated `GEMINI_API_KEYS` pool last.
+For the current model every key is tried; a 429 / `RESOURCE_EXHAUSTED` / daily
+quota parks that **(key name, model)** pair for 10 minutes, a 400
+`API_KEY_INVALID` or 403 parks the whole key for 60 minutes, and a 503 or
+network error retries the same key once before moving on. Success is logged by
+name only, e.g. `Gemini OK: GEMINI_API_KEY_4 / gemini-3.5-flash`.
+
+Every upstream attempt is bounded by an 8 s `AbortController` inside ONE 45 s
+request deadline. When the deadline fires the route stops and answers HTTP 503
+`{ code: "DEADLINE_EXCEEDED" }` with the Arabic
+"الخدمة مشغولة حالياً، حاول بعد قليل" — the platform's 60 s limit is never
+reachable.
+
+Two protected operational probes report the same credentials and rotation the
+pipeline uses — by NAME, never by value (both spend one real 1-token request):
+
+```bash
+curl "https://<host>/api/health/hf?key=$HEALTH_SECRET"
+# → { ok, status, latencyMs, tokenPresent, tokenPrefixOk }
+
+curl "https://<host>/api/health/gemini?key=$HEALTH_SECRET"
+# → [ { name, ok, status, latencyMs, quotaExhausted, firstInRotation, model }, … ]
+```
+
+They fail closed: without `HEALTH_SECRET` on the server they answer 503
+`MISSING_HEALTH_SECRET`, and a missing/wrong `?key=` answers 401. Set
+`HEALTH_SECRET` (e.g. `openssl rand -hex 32`) in Vercel → Project → Settings →
+Environment Variables. The required server variables are `GEMINI_API_KEY_4`,
+`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY` and `HEALTH_SECRET`.
+
+The CodeCraft gateway and its `CODECRAFT_*` environment variables are gone;
 leftover values are ignored.
 
 Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).

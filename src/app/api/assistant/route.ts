@@ -36,22 +36,34 @@
  *   STEP 2 — TEXT GENERATION (PRIMARY: Hugging Face)
  *     The open Qwen chain through the official Inference Providers router
  *     (`https://router.huggingface.co/v1/chat/completions`, Bearer
- *     `HUGGINGFACE_API_KEY` / `HF_TOKEN`), led by
+ *     `process.env.HUGGINGFACE_API_KEY` — ONE variable name, trimmed, no alias
+ *     and no hardcoded fallback), led by
  *     `Qwen/Qwen3-4B-Instruct-2507`. Its ONLY job is to narrate ANALYSIS_DATA
  *     into a clear, user-facing explanation with a practical recommendation.
  *     A failure is: (a) an API/network error or timeout; (b) an empty,
  *     malformed or nonsensical reply; (c) a reply that does not correspond
  *     to ANALYSIS_DATA.
+ *     HTTP 401/402/429/5xx are PROVIDER failures: the status and a SHORT
+ *     (redacted) message are logged, then the next model/provider in the chain
+ *     is tried — and Gemini gets its turn once the chain gives out. A 402
+ *     (credits exhausted) additionally parks the WHOLE Hugging Face chain in
+ *     memory for 10 minutes, because no model id can fix an empty account.
  *
  *   STEP 3 — TEXT FALLBACK (Google Gemini, FORMAT-ONLY)
- *     Runs ONLY after Step 2 failed. The same Gemini model chain and key pool
- *     (`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered `GEMINI_API_KEY_N`,
- *     rotated on 429 / RESOURCE_EXHAUSTED / quota; one shared 18 s
- *     `AbortController` for the whole chain) turn the SAME `AnalysisData` into
- *     the same kind of explanation. NO image is attached here: Gemini must
- *     format the data, not re-analyse the photo. This branch also covers the
- *     edge case where the analysis came from MobileNetV2 and Step 2 then
- *     failed.
+ *     Runs ONLY after Step 2 failed. The mandated Gemini chain
+ *     (`gemini-3.8-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite` →
+ *     `gemini-2.5-flash` → `gemini-flash-latest`) is walked MODEL-first,
+ *     KEY-second: for the current model every configured key is tried in
+ *     rotation order (`GEMINI_API_KEY_4` FIRST, then the remaining
+ *     `GEMINI_API_KEY*` variables in numeric order), because a different key
+ *     usually belongs to a different Google project with its own daily quota.
+ *     A 429 / RESOURCE_EXHAUSTED parks that (key, model) pair for 10 minutes; a
+ *     400 `API_KEY_INVALID` or 403 parks the key itself for 60 minutes; a 503
+ *     or a network error retries the same key once, then moves on. When every
+ *     key is exhausted for a model, the next model is tried. This branch also
+ *     covers the edge case where the analysis came from MobileNetV2 and Step 2
+ *     then failed. NO image is attached here: Gemini must format the data, not
+ *     re-analyse the photo.
  *
  *   BUILT-IN FORMATTER (both text models down)
  *     Never fails: a concise Arabic diagnosis card built from the analysis,
@@ -77,18 +89,32 @@
  *   response purely for logging and analytics; the user only ever sees the
  *   final `reply`.
  *
- * Gemini credentials — every environment variable starting with
- * `GEMINI_API_KEY` (`GEMINI_API_KEY`, the `GEMINI_API_KEYS` comma-separated
- * pool, and numbered `GEMINI_API_KEY_N` variants; combined, trimmed,
- * deduplicated, rotation-ordered) — and the Hugging Face secret
- * (`HUGGINGFACE_API_KEY`, with Hugging Face's conventional `HF_TOKEN` accepted
- * as an alias) are read from `process.env` on the server only. They are never
- * shipped to the browser and never echoed back in a response body.
+ * Credentials — the Gemini pool is every environment variable matching
+ * `/^GEMINI_API_KEY(_\d+)?$/` (plus the legacy `GEMINI_API_KEYS` comma pool,
+ * appended last): trimmed, comma-pools flattened, deduplicated, and ordered by
+ * `@/lib/assistant/providers` with `GEMINI_API_KEY_4` first. The Hugging Face
+ * secret is read from ONE variable, `HUGGINGFACE_API_KEY`, trimmed, with no
+ * alias and no hardcoded fallback. Both are read from `process.env` on the
+ * server only, never shipped to the browser, and every message that can reach
+ * a log line or a response body goes through `redactSecrets()` first.
+ *
+ * Timeouts — EVERY upstream attempt is bounded by an 8 s per-attempt window and
+ * the WHOLE request by one 45 s `AbortController` deadline
+ * (`@/lib/assistant/providers`), so the function stays well inside Vercel's
+ * 60 s limit. When that global deadline fires the route stops calling
+ * upstreams and answers HTTP 503 with the Arabic "service is busy" message
+ * instead of leaving the user with a hanging request.
  *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
  * when NO provider key is configured at all (the explicit
- * server-misconfiguration signal). No HTTP 500 ever.
+ * server-misconfiguration signal); 503 + code DEADLINE_EXCEEDED when the 45 s
+ * budget runs out. No HTTP 500 ever.
+ *
+ * Health — `GET /api/health/gemini` and `GET /api/health/hf` (both protected
+ * by `?key=<HEALTH_SECRET>`) probe the same credential pool and model chain
+ * this route uses, so "is the deployment configured correctly?" is answerable
+ * without reading logs.
  *
  * Error reporting: each stage logs to the server console —
  * `[Step 1: Gemini Analysis Success]` / `[Step 1: MobileNetV2 Fallback
@@ -127,6 +153,24 @@ import {
   type CropRect,
   type LeafDetection,
 } from "@/lib/assistant/leaf-detect";
+import {
+  DeadlineExceededError,
+  GEMINI_LEGACY_POOL_NAME,
+  GEMINI_PRIORITY_KEY_NAME,
+  HF_CREDITS_SKIP_MS,
+  MIN_STAGE_BUDGET_MS,
+  PER_ATTEMPT_TIMEOUT_MS,
+  RequestDeadline,
+  fetchWithAttemptTimeout,
+  geminiKeyState,
+  hfCreditCircuit,
+  isAbortOrTimeoutError,
+  isPriorityGeminiKeyMissing,
+  resolveGeminiKeyPool,
+  resolveHuggingFaceToken,
+  shortMessage,
+  type GeminiKeyEntry,
+} from "@/lib/assistant/providers";
 import { confidenceBucket, diseaseFamilyForArabic, parsePlantLabel } from "@/lib/assistant/plantvillage";
 import type {
   AssistantContext,
@@ -219,11 +263,12 @@ function resolveLeafDetectModels(): LeafDetectModel[] {
   }));
 }
 
-/**
- * Detection is a pre-step, not the main act: a tighter deadline than the
- * classifier so a sleepy detector can never eat the request budget.
+/*
+ * Detection is a pre-step, not the main act: it gets exactly the shared 8 s
+ * per-attempt window ({@link PER_ATTEMPT_TIMEOUT_MS}) so a sleepy detector can
+ * never eat the request budget — and the shared 45 s deadline bounds the stage
+ * on top of it. The window is passed explicitly at the call sites.
  */
-const LEAF_DETECT_TIMEOUT_MS = 9_000;
 
 /** Re-encoded crop constraints — mirror the client's own downscale. */
 const LEAF_CROP_MAX_EDGE_PX = 1024;
@@ -247,22 +292,26 @@ interface LeafDetectOutcome {
 async function detectLeafStrict(
   source: Buffer,
   apiKey: string,
+  deadline: RequestDeadline,
 ): Promise<LeafDetectOutcome> {
   let lastDetail = "no detection model was attempted";
 
   for (const model of resolveLeafDetectModels()) {
     try {
-      const res = await fetch(HF_ENDPOINT(model.id), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "image/jpeg",
-          // Ask the HF router to wait for a cold model instead of 503ing.
-          "X-Wait-For-Model": "true",
+      const res = await timedFetch(
+        HF_ENDPOINT(model.id),
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "image/jpeg",
+            // Ask the HF router to wait for a cold model instead of 503ing.
+            "X-Wait-For-Model": "true",
+          },
+          body: new Uint8Array(source),
         },
-        body: new Uint8Array(source),
-        signal: AbortSignal.timeout(LEAF_DETECT_TIMEOUT_MS),
-      });
+        deadline,
+      );
 
       if (res.status === 503 || res.status === 530) {
         lastDetail = `${model.id}: model loading (HTTP ${res.status})`;
@@ -302,7 +351,10 @@ async function detectLeafStrict(
       const detections = parsed.filter((det) => model.acceptLabel(det.label));
       return { model: model.id, detections };
     } catch (error) {
-      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      if (isDeadlineFailure(error)) throw error;
+      const detail = isAbortOrTimeoutError(error)
+        ? `timeout after ${PER_ATTEMPT_TIMEOUT_MS} ms`
+        : shortMessage(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
       lastDetail = `${model.id}: ${detail}`;
       console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
     }
@@ -336,6 +388,7 @@ async function runLeafDetectionStage(
   image: AssistantImagePayload,
   huggingfaceKey: string | null,
   warnings: string[],
+  deadline: RequestDeadline,
 ): Promise<{ preprocessing: AssistantPreprocessing; image: AssistantImagePayload }> {
   const original: AssistantImagePayload = { data: image.data, mimeType: image.mimeType };
 
@@ -360,7 +413,7 @@ async function runLeafDetectionStage(
       throw new Error(`image is not decodable or too small to crop (${width}×${height})`);
     }
 
-    const { model, detections } = await detectLeafStrict(source, huggingfaceKey);
+    const { model, detections } = await detectLeafStrict(source, huggingfaceKey, deadline);
     const decision = selectLeafCrop(detections, width, height, {
       minScore: LEAF_DETECT_DEFAULTS.minScore,
     });
@@ -399,9 +452,12 @@ async function runLeafDetectionStage(
       image: { data: cropped.toString("base64"), mimeType: "image/jpeg" },
     };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    // The global deadline is not a Step 0 degradation: it is the request's
+    // hard stop, and the handler turns it into HTTP 503.
+    if (isDeadlineFailure(error)) throw error;
+    const detail = shortMessage(error instanceof Error ? error.message : String(error));
     console.warn(`[Step 0: Detect Unavailable] ${detail} — the full frame goes to Step 1`);
-    warnings.push(`Step 0 leaf detection unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 0 leaf detection unavailable — ${detail}`);
     return {
       preprocessing: {
         status: "unavailable",
@@ -435,20 +491,6 @@ function resolveGeminiModels(): GeminiModel[] {
 
 
 /**
- * Hard timeout for the WHOLE Gemini model chain: 18 s. A full Arabic
- * ~200-word answer (system prompt + profile context + vision verdict in, up
- * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
- * Flash model; the previous 9 s window aborted those healthy generations
- * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
- * still leaves the built-in formatter comfortably
- * inside {@link maxDuration}. Enforced with an explicit `AbortController`
- * (not `AbortSignal.timeout`) so the abort reason and the timer are both
- * inspectable/clearable per request; a fast 404 on an earlier id hands the
- * remaining budget to the next id.
- */
-const GEMINI_TIMEOUT_MS = 18_000;
-
-/**
  * Output cap for a Gemini call. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
  * the per-generation thinking payload (`thinkingLevel: "low"` on 3.x,
@@ -458,32 +500,51 @@ const GEMINI_TIMEOUT_MS = 18_000;
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
 /**
- * Resolve every configured Gemini credential at request time. Every
- * environment variable whose name starts with `GEMINI_API_KEY` participates,
- * so deployments can add `GEMINI_API_KEY_3`, `GEMINI_API_KEY_4`, and so on
- * without another code change. Each value may itself be a comma-separated
- * pool. Numeric variants are sorted naturally after the base variable so
- * rotation remains deterministic (`GEMINI_API_KEY` → `_2` → `_3` …).
- * Whitespace-only entries are ignored and duplicate credentials are removed.
+ * Resolve the Gemini rotation pool at request time (never at module load, so a
+ * key added in Vercel is picked up without a redeploy). The order is owned by
+ * `resolveGeminiKeyPool()` in `@/lib/assistant/providers`:
+ *
+ *   1. `GEMINI_API_KEY_4` — preferred FIRST (a different Google project usually
+ *      means its own daily quota, i.e. fresh budget),
+ *   2. `GEMINI_API_KEY` (base) and the remaining `GEMINI_API_KEY_N` variants in
+ *      numeric order,
+ *   3. the legacy comma-separated `GEMINI_API_KEYS` pool, last.
+ *
+ * Only variable NAMES travel onward: the pool returned here is the only thing
+ * the transport needs, and every log/warning/health response identifies a
+ * credential by its `name`, never by its value.
  */
-function resolveGeminiApiKeys(): string[] {
-  const prefix = "GEMINI_API_KEY";
-  const configured = Object.entries(process.env)
-    .filter(([name, value]) => name.startsWith(prefix) && typeof value === "string")
-    .sort(([first], [second]) => {
-      const order = (name: string): [number, string] => {
-        if (name === prefix) return [0, name];
-        const suffix = name.slice(`${prefix}_`.length);
-        return [/^\d+$/.test(suffix) ? Number(suffix) : Number.POSITIVE_INFINITY, name];
-      };
+function resolveGeminiApiKeys(): GeminiKeyEntry[] {
+  return resolveGeminiKeyPool();
+}
 
-      const [firstRank, firstName] = order(first);
-      const [secondRank, secondName] = order(second);
-      return firstRank - secondRank || firstName.localeCompare(secondName);
-    })
-    .flatMap(([, value]) => value?.split(",") ?? []);
+/**
+ * Announce, once per process, the two configuration facts an operator must be
+ * able to grep for — the preferred key's NAME when it is absent (task rule:
+ * log the name as missing and continue) and the legacy pool's NAME when it is
+ * still feeding the rotation. Names only; never a value.
+ */
+let geminiKeyConfigLogged = false;
+function logGeminiKeyConfiguration(pool: readonly GeminiKeyEntry[]): void {
+  if (geminiKeyConfigLogged) return;
+  geminiKeyConfigLogged = true;
 
-  return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
+  if (isPriorityGeminiKeyMissing()) {
+    console.warn(
+      `[Gemini Keys] ${GEMINI_PRIORITY_KEY_NAME} is missing — continuing with the remaining keys in numeric order ` +
+        `(rotation: ${pool.map((entry) => entry.name).join(" → ") || "none"}).`,
+    );
+  } else {
+    console.log(
+      `[Gemini Keys] rotation order: ${pool.map((entry) => entry.name).join(" → ")}`,
+    );
+  }
+  if (pool.some((entry) => entry.name.startsWith(GEMINI_LEGACY_POOL_NAME))) {
+    console.warn(
+      `[Gemini Keys] ${GEMINI_LEGACY_POOL_NAME} is a LEGACY comma-separated pool — its keys are appended after the numbered variables. ` +
+        "Prefer GEMINI_API_KEY_4 / GEMINI_API_KEY_N.",
+    );
+  }
 }
 
 /* ---- Hugging Face — Step 1 (fallback vision) + Step 2 (text) ------ */
@@ -540,8 +601,6 @@ const MAX_REPLY_TOKENS = 700;
 const MAX_IMAGE_B64_CHARS = 6 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 4000;
 
-const UPSTREAM_TIMEOUT_MS = 25_000;
-
 /**
  * Resolve the ordered vision model list for this request. The default is the
  * single known-good MobileNetV2 PlantVillage id; `HF_VISION_MODEL` (one Hub
@@ -557,8 +616,19 @@ function resolveVisionModels(): string[] {
 /*  Small helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-function timedFetch(url: string, init: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+/**
+ * Every upstream round-trip in this file goes through
+ * {@link fetchWithAttemptTimeout}: an 8 s per-attempt window AND the request's
+ * shared 45 s deadline. Both are explicit `AbortController` timers (not
+ * `AbortSignal.timeout`), so the abort reason is inspectable, the platform
+ * cannot leave a zombie round-trip behind, and the two windows compose.
+ */
+function timedFetch(
+  url: string,
+  init: RequestInit,
+  deadline: RequestDeadline,
+): Promise<Response> {
+  return fetchWithAttemptTimeout(url, init, deadline, PER_ATTEMPT_TIMEOUT_MS);
 }
 
 function bad(message: string, status = 400): NextResponse {
@@ -566,29 +636,49 @@ function bad(message: string, status = 400): NextResponse {
 }
 
 /**
- * Environment variables consulted, in order, for the Hugging Face user access
- * token that authenticates Step 0 (detector) / Step 1 (fallback vision)
- * and Step 2 (router LLM — the PRIMARY text model).
- * `HUGGINGFACE_API_KEY` is this project's documented name;
- * `HF_TOKEN` is the name Hugging Face's own SDKs/CLI read, so a deployment
- * configured the "Hugging Face way" still gets the primary LLM instead of a
- * silent skip.
+ * The 45 s budget ran out mid-request: stop and answer 503 with the Arabic
+ * "service is busy" message. Called from every stage boundary so a deadline
+ * abort can never be reported as an upstream failure, and so no stage starts
+ * with less budget than {@link MIN_STAGE_BUDGET_MS} left.
  */
-const HF_TOKEN_ENV_VARS = ["HUGGINGFACE_API_KEY", "HF_TOKEN"] as const;
+function serviceBusyResponse(): NextResponse {
+  const message = "الخدمة مشغولة حالياً، حاول بعد قليل";
+  console.warn(
+    "[Assistant] global 45 s deadline exceeded — answering 503 DEADLINE_EXCEEDED (no upstream left running)",
+  );
+  return NextResponse.json(
+    { error: message, code: "DEADLINE_EXCEEDED", reply: message },
+    { status: 503 },
+  );
+}
 
 /**
- * The first usable Hugging Face token found in the environment, whitespace
- * trimmed — or `null` when none is configured (unset or blank). Purely
- * synchronous: a missing token lets the handler skip the vision step and the
- * primary LLM instantly, with no request, no exception and no waiting.
+ * True when the failure is the GLOBAL deadline (as opposed to an 8 s
+ * per-attempt timeout). Only the former means "stop and answer 503": a single
+ * slow attempt must still fall through to the next provider.
  */
-function resolveHuggingFaceToken(): string | null {
-  for (const name of HF_TOKEN_ENV_VARS) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
-  }
-  return null;
+function isDeadlineFailure(error: unknown): boolean {
+  return error instanceof DeadlineExceededError;
 }
+
+/**
+ * Every `warnings[]` entry is echoed to the client, so each one is redacted and
+ * length-capped before it leaves the server. Secrets never ride along on a
+ * diagnostic message, and a 4 KB error envelope never bloats a response.
+ */
+function pushWarning(warnings: string[], message: string, max = 400): void {
+  warnings.push(shortMessage(message, max));
+}
+
+/**
+ * The Hugging Face user access token that authenticates Step 0 (detector),
+ * Step 1 (fallback vision) and Step 2 (router LLM — the PRIMARY text model) is
+ * resolved by `resolveHuggingFaceToken()` from
+ * `@/lib/assistant/providers`: EXACTLY `process.env.HUGGINGFACE_API_KEY`,
+ * whitespace/newlines trimmed, with no alias and no hardcoded fallback. A
+ * missing/blank value lets the handler skip the vision step and the primary
+ * LLM synchronously — no request, no exception, no waiting.
+ */
 
 /* ------------------------------------------------------------------ */
 /*  Step 1 — Hugging Face PlantVillage vision diagnosis (STRICT)       */
@@ -644,8 +734,10 @@ interface MobileNetClassification {
  * - Sends the raw image bytes (the Step 0 crop when available) to the model.
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message.
- * - Per-model timeout: UPSTREAM_TIMEOUT_MS (25 s) — long enough for a cold
- *   serverless start under `X-Wait-For-Model: true`.
+ * - Per-model timeout: {@link PER_ATTEMPT_TIMEOUT_MS} (8 s) inside the
+ *   `X-Wait-For-Model: true` handshake, bounded again by the request's 45 s
+ *   deadline; a cold start that cannot answer in that window fails the stage
+ *   and routes the request to STEP 4.
  * - Throws an Error prefixed with "HF Error:" on any failure so the caller can
  *   degrade to the STEP 4 final fallback.
  */
@@ -653,6 +745,7 @@ async function classifyPlantImageStrict(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
+  deadline: RequestDeadline,
 ): Promise<MobileNetClassification> {
   const body = Buffer.from(imageBase64, "base64");
 
@@ -662,19 +755,22 @@ async function classifyPlantImageStrict(
   const models = resolveVisionModels();
 
   for (const model of models) {
-    const timeoutMs = UPSTREAM_TIMEOUT_MS;
+    const timeoutMs = PER_ATTEMPT_TIMEOUT_MS;
     try {
-      const res = await fetch(HF_ENDPOINT(model), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": mimeType || "application/octet-stream",
-          // Ask the HF router to wait for the model instead of instantly 503ing.
-          "X-Wait-For-Model": "true",
+      const res = await timedFetch(
+        HF_ENDPOINT(model),
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": mimeType || "application/octet-stream",
+            // Ask the HF router to wait for the model instead of instantly 503ing.
+            "X-Wait-For-Model": "true",
+          },
+          body,
         },
-        body,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+        deadline,
+      );
 
       // --- Model loading (503 / 530) -------------------------------------------------
       if (res.status === 503 || res.status === 530) {
@@ -740,11 +836,12 @@ async function classifyPlantImageStrict(
       );
       return { rawLabel: top.label, score: top.score, model, candidates };
     } catch (error) {
+      if (isDeadlineFailure(error)) throw error;
       const detail =
         error instanceof Error
-          ? `${error.name}: ${error.message}`
-          : String(error);
-      if (/timeout|abort|TimeoutError|AbortError/i.test(detail) || detail.includes("timed out")) {
+          ? shortMessage(`${error.name}: ${error.message}`)
+          : shortMessage(String(error));
+      if (isAbortOrTimeoutError(error)) {
         console.warn(`[Step 1: HF Timeout] ${model} timed out after ${timeoutMs}ms`);
       } else {
         console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
@@ -814,8 +911,9 @@ function isStructuredOutputRejection(error: unknown): boolean {
 
 async function analyzeImageWithGemini(
   image: AssistantImagePayload,
-  geminiApiKeys: readonly string[],
+  geminiApiKeys: readonly GeminiKeyEntry[],
   lang: "ar" | "fr",
+  deadline: RequestDeadline,
 ): Promise<AnalysisResult> {
   const userContent =
     lang === "fr"
@@ -833,6 +931,7 @@ async function analyzeImageWithGemini(
         extraConfig,
       },
       geminiApiKeys,
+      deadline,
     );
 
   let result: GeminiResult;
@@ -915,34 +1014,39 @@ function analysisFromMobileNet(
 async function runImageAnalysisStage(options: {
   geminiImage: AssistantImagePayload;
   mobilenetImage: AssistantImagePayload;
-  geminiApiKeys: readonly string[];
+  geminiApiKeys: readonly GeminiKeyEntry[];
   huggingfaceKey: string | null;
   lang: "ar" | "fr";
   warnings: string[];
+  deadline: RequestDeadline;
 }): Promise<AnalysisResult | null> {
-  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings } = options;
+  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings, deadline } =
+    options;
 
   // ---- PRIMARY: Gemini -------------------------------------------------
   if (geminiApiKeys.length > 0) {
     try {
-      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang);
+      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang, deadline);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      // The global deadline is the request's hard stop, not a vision failure:
+      // do not silently degrade a timing-out request into MobileNetV2.
+      if (isDeadlineFailure(error)) throw error;
+      const detail = shortMessage(error instanceof Error ? error.message : String(error));
       console.warn(`[Step 1: Gemini Analysis Failed → MobileNetV2] ${detail}`);
-      warnings.push(`Step 1 Gemini image analysis failed — ${detail}`.slice(0, 400));
+      pushWarning(warnings, `Step 1 Gemini image analysis failed — ${detail}`);
     }
   } else {
     const detail = "No GEMINI_API_KEY is configured — the primary image model is unavailable.";
     console.warn(`[Step 1: Gemini Skipped] ${detail} → MobileNetV2 fallback`);
-    warnings.push(`Step 1 Gemini image analysis unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 1 Gemini image analysis unavailable — ${detail}`);
   }
 
   // ---- FALLBACK: MobileNetV2 (only reachable after the primary failed) --
   if (!huggingfaceKey) {
     const detail =
-      "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — the fallback image model is unavailable.";
+      "HUGGINGFACE_API_KEY is not configured — the fallback image model is unavailable.";
     console.warn(`[Step 1: MobileNetV2 Skipped] ${detail}`);
-    warnings.push(`Step 1 MobileNetV2 unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 1 MobileNetV2 unavailable — ${detail}`);
     return null;
   }
 
@@ -951,6 +1055,7 @@ async function runImageAnalysisStage(options: {
       mobilenetImage.data,
       mobilenetImage.mimeType,
       huggingfaceKey,
+      deadline,
     );
     const result = analysisFromMobileNet(
       classification.rawLabel,
@@ -965,10 +1070,11 @@ async function runImageAnalysisStage(options: {
     );
     return result;
   } catch (error) {
+    if (isDeadlineFailure(error)) throw error;
     const msg = error instanceof Error ? error.message : String(error);
-    const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
+    const detail = shortMessage(msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg);
     console.warn(`[Step 1: MobileNetV2 Unavailable] ${detail} → STEP 4 (final fallback)`);
-    warnings.push(`Step 1 MobileNetV2 unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 1 MobileNetV2 unavailable — ${detail}`);
     return null;
   }
 }
@@ -1256,6 +1362,87 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
 }
 
 /**
+ * Google's rate-limit / quota signatures that must park a (key, model) pair
+ * rather than fail the stage — the HTTP status covers the usual case, the
+ * message patterns catch quota rejections surfaced in the body (a daily-quota
+ * rejection can arrive as 429 with `RESOURCE_EXHAUSTED`, and some project
+ * limits answer 400 with a quota message).
+ */
+const GEMINI_QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
+  /RESOURCE_EXHAUSTED/i,
+  /\bquota(?:s)?(?:\s+limit|\s+exceeded|\s+per\s+day|\s+for\s+the\s+day)?\b/i,
+  /\bper[_ ]?day\b/i,
+  /rate[ _-]?limit/i,
+  /exceeded your current quota/i,
+];
+
+/**
+ * Google's "this credential is not usable" signatures: a 400 with
+ * `API_KEY_INVALID` (the key was revoked, mistyped or never enabled for the
+ * Generative Language API) or a 403 (permission denied / API not enabled /
+ * billing refused). Both park the KEY for 60 minutes.
+ */
+const GEMINI_INVALID_KEY_PATTERNS: readonly RegExp[] = [
+  /API[_ ]?KEY[_ ]?INVALID/i,
+  /API key not valid/i,
+  /invalid API key/i,
+  /API key expired/i,
+  /request had invalid authentication credentials/i,
+  /PERMISSION_DENIED/i,
+  /API (?:has not been used|is not enabled)/i,
+  /billing/i,
+];
+
+/**
+ * What a Gemini failure MEANS for the rotation loop — the whole reason the
+ * loop can decide "same key again", "next key", "next model" or "give up"
+ * without re-parsing error text in three places.
+ */
+type GeminiFailureKind = "quota" | "invalid_key" | "transient" | "model" | "other";
+
+/** Classify one {@link GeminiError}; see {@link runGeminiWithKeyPool}. */
+function classifyGeminiFailure(error: GeminiError): GeminiFailureKind {
+  const message = error.message;
+
+  if (isGeminiModelAvailabilityError(error)) return "model";
+  if (error.status === 429) return "quota";
+  if (GEMINI_QUOTA_ERROR_PATTERNS.some((pattern) => pattern.test(message))) return "quota";
+  if (error.status === 403) return "invalid_key";
+  if (error.status === 400 && GEMINI_INVALID_KEY_PATTERNS.some((pattern) => pattern.test(message))) {
+    return "invalid_key";
+  }
+  if (error.status === 401) return "invalid_key";
+  // 5xx and the per-attempt timeout/network wrapper (`status` undefined but a
+  // "timeout after …" message) are transient: retry once, then rotate.
+  if (error.status !== undefined && error.status >= 500) return "transient";
+  if (error.status === undefined && /timeout|network|fetch failed|ECONN|socket/i.test(message)) {
+    return "transient";
+  }
+  return "other";
+}
+
+/**
+ * Human-readable detail for a non-2xx Gemini response, already reduced to the
+ * status plus a SHORT redacted message — the same string is logged and
+ * surfaced in `warnings[]`, so it must never carry the request URL (which
+ * contains the key) or an unbounded error envelope.
+ */
+function describeGeminiHttpError(status: number, bodyText: string): string {
+  const fallback = `HTTP ${status}${bodyText ? ` — ${shortMessage(bodyText)}` : ""}`;
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { message?: string; status?: string } };
+    const message = parsed?.error?.message;
+    const state = parsed?.error?.status;
+    if (message) {
+      return `HTTP ${status} — ${shortMessage(message)}${state ? ` [${state}]` : ""}`;
+    }
+  } catch {
+    // keep the raw (redacted) detail
+  }
+  return fallback;
+}
+
+/**
  * One `models.generateContent` round-trip against a single Gemini id.
  *
  * The same transport serves BOTH Gemini roles in the orchestrator, which is
@@ -1274,18 +1461,17 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
 async function generateWithGeminiModel(
   model: GeminiModel,
   prompt: GeminiPrompt,
-  signal: AbortSignal,
   apiKey: string,
+  deadline: RequestDeadline,
 ): Promise<string> {
   const { systemInstruction, userContent, image, history, extraConfig } = prompt;
   let response: Response;
   try {
-    response = await fetch(
+    response = await timedFetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemInstruction }] },
           contents: [
@@ -1320,36 +1506,35 @@ async function generateWithGeminiModel(
           },
         }),
       },
+      deadline,
     );
   } catch (error) {
-    if (signal.aborted) {
-      throw new GeminiError(
-        `timeout after ${GEMINI_TIMEOUT_MS} ms (AbortController fired)`,
-      );
+    // A global-deadline abort is terminal for the whole request (the caller
+    // answers 503); an 8 s per-attempt timeout is an ordinary transient
+    // failure the rotation loop retries once on the same key.
+    if (isDeadlineFailure(error)) throw error;
+    if (isAbortOrTimeoutError(error)) {
+      throw new GeminiError(`timeout after ${PER_ATTEMPT_TIMEOUT_MS} ms (per-attempt window)`);
     }
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const detail = shortMessage(
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    );
     throw new GeminiError(detail);
   }
 
   if (!response.ok) {
     let bodyText = "";
     try {
-      // Preserve the body for the existing warning parser while logging
-      // Google's exact, untruncated response on the server.
-      const errorResponse = response.clone();
-      console.error('[Gemini Error]', response.status, await response.text());
-      bodyText = await errorResponse.text();
+      bodyText = await response.text();
     } catch {
       bodyText = response.statusText;
     }
-    let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
-    try {
-      const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
-      if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
-    } catch {
-      // keep the raw detail
-    }
+    // Task rule: log ONLY the status and a SHORT, redacted message. The
+    // envelope is PARSED first, so Google's unbounded `details[]` payload (and,
+    // defensively, anything shaped like a credential) never reaches the logs;
+    // a non-JSON body is truncated by `shortMessage` instead.
+    const detail = describeGeminiHttpError(response.status, bodyText || response.statusText);
+    console.error(`[Gemini Error] ${detail}`);
     throw new GeminiError(detail, response.status);
   }
 
@@ -1392,12 +1577,18 @@ export const geminiModelHealth = new GeminiModelHealthMonitor();
  * Never throws: a ListModels outage degrades to one "could not verify" warning.
  */
 async function ensureGeminiModelHealth(
-  geminiApiKeys: readonly string[],
+  keyPool: readonly GeminiKeyEntry[],
+  deadline: RequestDeadline,
 ): Promise<void> {
-  if (geminiApiKeys.length === 0) return;
+  if (keyPool.length === 0) return;
 
   const report = await geminiModelHealth.ensure(resolveGeminiModels(), {
-    apiKey: geminiApiKeys[0],
+    apiKey: keyPool[0].key,
+    // The verdict doubles as the FIRST key's 1-hour catalog, so the request
+    // path never issues a second ListModels call for it.
+    catalogKey: keyPool[0].name,
+    signal: deadline.signal,
+    timeoutMs: Math.max(1_000, Math.min(6_000, deadline.remainingMs)),
   });
   if (!report) return;
 
@@ -1410,170 +1601,219 @@ async function ensureGeminiModelHealth(
 }
 
 /**
- * Run the per-request Gemini model chain ({@link resolveGeminiModels}) against
- * a single credential, starting at the shared default (`gemini-3.8-flash`, or
- * the `GEMINI_MODEL` override) and walking to the long-lived fallbacks on a
- * model-availability failure.
+ * Run the Gemini chain MODEL-first, KEY-second — the mandated rotation order.
  *
- * The whole chain is bounded by ONE 18 s `AbortController` deadline
- * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
- * model-availability failure (404 / model-not-found / "no longer available to
- * new users" — the signature of a retired generation) walks to the next id
- * with whatever budget remains (each walk is recorded in the result's
- * `warnings` so the client still sees the degradation), while any other
- * failure — invalid/missing key (400/403), safety block, empty candidate list,
- * network error or the timeout abort — throws {@link GeminiError} immediately
- * for the outer key-rotation loop.
- * Quota and transient upstream failures (HTTP 429/500/503) are likewise
- * surfaced to that loop, which backs off and tries the next credential.
- */
-async function runGeminiChain(
-  prompt: GeminiPrompt,
-  apiKey: string,
-): Promise<GeminiResult> {
-  const controller = new AbortController();
-  // Explicit AbortController + shared deadline (rather than per-call
-  // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
-  // by the 18 s window, and the pending round-trip and timer are always
-  // cancelled/cleared.
-  const deadline = Date.now() + GEMINI_TIMEOUT_MS;
-  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-
-  // Resolve the chain once per request so a `GEMINI_MODEL` change is picked
-  // up without a restart (same convention as the Gemini key pool).
-  const models = resolveGeminiModels();
-
-  try {
-    const failures: string[] = [];
-    const warnings: string[] = [];
-    for (const [index, model] of models.entries()) {
-      // Only reachable after fast 404 walks that consumed the window — no
-      // budget left for another round-trip.
-      if (Date.now() >= deadline) break;
-
-      try {
-        const text = await generateWithGeminiModel(model, prompt, controller.signal, apiKey);
-        return { model: model.id, text, warnings };
-      } catch (error) {
-        if (!(error instanceof GeminiError)) throw error;
-        failures.push(`${model.id}: ${error.message}`);
-
-        if (!isGeminiModelAvailabilityError(error)) {
-          // Anything that isn't about model availability (bad key, quota,
-          // Google 5xx, timeout) fails the stage immediately — another id
-          // can't fix it.
-          throw error;
-        }
-
-        const next = models[index + 1];
-        if (next) {
-          warnings.push(`Gemini unavailable — ${error.message}`.slice(0, 400));
-          console.warn(`[Gemini: Model Fallback] ${error.message} — retrying with ${next.id}`);
-          continue;
-        }
-        // Availability failure on the LAST id — fall through to the summary.
-      }
-    }
-    // Every id in the chain was retired/gone (or the budget ran out) —
-    // report all of them so the operator can tell "Google retired these
-    // models" from "this key lacks access".
-    throw new GeminiError(
-      `no Gemini model could answer (tried ${models.map((m) => m.id).join(", ")}) — ${failures.join(" | ")}`,
-    );
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Google's rate-limit / quota signatures that must trigger a KEY rotation
- * (retry with the next credential) rather than an immediate stage failure —
- * the HTTP status covers the usual case, the message patterns catch quota
- * rejections surfaced in the body (e.g. `RESOURCE_EXHAUSTED`, "quota limit").
- */
-const GEMINI_QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
-  /RESOURCE_EXHAUSTED/i,
-  /\bquota(?:\s+limit| exceeded)?\b/i,
-  /rate[ _-]?limit/i,
-];
-
-/** True when Gemini returned a rate-limit/quota or transient server failure. */
-function isGeminiRetryableError(error: unknown): error is GeminiError {
-  if (!(error instanceof GeminiError)) return false;
-  if (error.status === 429 || error.status === 500 || error.status === 503) return true;
-  return GEMINI_QUOTA_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
-}
-
-/**
- * Run the Gemini model chain against each configured credential in order —
- * the multi-key rotation loop shared by both Gemini roles (Step 1 image
- * analysis and Step 3 text fallback).
+ * For the current model, every configured credential is tried in rotation
+ * order (see {@link resolveGeminiApiKeys}), because a different key usually
+ * belongs to a different Google project with its own daily quota:
  *
- * Rate-limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit —
- * see {@link isGeminiRetryableError}) and transient server failures (500,
- * 503) get a one-second backoff before the next key is tried; other Gemini
- * failures (e.g. an invalid or revoked key) also advance through the
- * remaining keys without a delay. The request retries the next key in the
- * pool until one answers successfully or ALL keys are exhausted. API keys
- * are represented only by their ordinal in logs and warnings; their values
- * never leave the server or appear in a client response.
+ *   • 429 / `RESOURCE_EXHAUSTED` / daily quota → park that (key, MODEL) pair for
+ *     10 minutes and move to the next key. The same key is still eligible for
+ *     the NEXT model — quotas can be per-model.
+ *   • 400 `API_KEY_INVALID` / 403 → park the KEY for 60 minutes and skip it.
+ *   • 503 / 5xx / network error / 8 s per-attempt timeout → retry the SAME key
+ *     once, then move on to the next key.
+ *   • model id missing from that key's cached `GET /v1beta/models` catalog
+ *     (1 hour TTL) → skip that (key, model) pair without a round-trip.
+ *   • 404 / model-not-found / "no longer available to users" → the model id
+ *     itself is gone: walk to the next model for every remaining key.
+ *   • anything else (safety block, empty candidate list, malformed request) →
+ *     fail the stage, because neither another key nor another model can fix it.
+ *
+ * When every key is parked or refused for a model, the outer loop simply moves
+ * to the next model in the chain. The whole walk is bounded by the request's
+ * single 45 s deadline; when it fires, {@link DeadlineExceededError} propagates
+ * and the route answers 503 instead of overrunning Vercel's 60 s limit.
+ *
+ * Only credential NAMES are ever logged or echoed — the winning pair is
+ * reported as `Gemini OK: GEMINI_API_KEY_4 / gemini-3.5-flash`.
  */
 async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
-  geminiApiKeys: readonly string[],
+  keyPool: readonly GeminiKeyEntry[],
+  deadline: RequestDeadline,
 ): Promise<GeminiResult> {
   // Once per process (TTL-bounded): proves the configured model ids still
   // exist BEFORE they are used, so a Google deprecation surfaces as one loud
-  // log line instead of 404-ing silently on every request.
-  await ensureGeminiModelHealth(geminiApiKeys);
+  // log line instead of 404-ing silently on every request. The same round-trip
+  // seeds the first key's catalog.
+  await ensureGeminiModelHealth(keyPool, deadline);
 
+  // Resolve the chain once per request so a `GEMINI_MODEL` change is picked up
+  // without a restart (same convention as the key pool).
+  const models = resolveGeminiModels();
   const failures: string[] = [];
-  const rotationWarnings: string[] = [];
+  const warnings: string[] = [];
 
-  for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
-    const apiKey = geminiApiKeys[keyIndex];
-    try {
-      const result = await runGeminiChain(prompt, apiKey);
-      return {
-        ...result,
-        warnings: [...rotationWarnings, ...result.warnings],
-      };
-    } catch (error) {
-      if (!(error instanceof GeminiError)) throw error;
+  // Per-key catalogs, cached for an hour. Resolved in parallel — each probe is
+  // capped by the 8 s attempt budget and by the request deadline — and `null`
+  // (unknown: unreachable, cancelled, or pre-verified) means "skip nothing".
+  const catalogs = await resolveKeyCatalogs(keyPool, deadline);
 
-      const keyLabel = `key ${keyIndex + 1}/${geminiApiKeys.length}`;
-      failures.push(`${keyLabel}: ${error.message}`);
-      const nextKeyIndex = keyIndex + 1;
-      const hasNextKey = nextKeyIndex < geminiApiKeys.length;
+  const warnedInvalid = new Set<string>();
+  /** Park events from THIS request, so the final failure explains itself. */
+  const quotaParked: string[] = [];
+  const invalidParked: string[] = [];
 
-      if (isGeminiRetryableError(error) && hasNextKey) {
-        const status = error.status ?? "unknown";
-        const warning =
-          `Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
-        rotationWarnings.push(warning);
-        console.warn(
-          `[Gemini: Key Rotation] ${warning} Retrying after 1 second.`,
-        );
-        await new Promise((res) => setTimeout(res, 1000));
-      } else if (hasNextKey) {
-        // A different failure can also be isolated to one credential (for
-        // example an invalid or revoked key). Try the next configured key
-        // before allowing the request to fall through to the next stage.
-        const warning =
-          `Gemini failed on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
-        rotationWarnings.push(warning);
-        console.warn(
-          `[Gemini: Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
+  for (const [modelIndex, model] of models.entries()) {
+    let modelRetired = false;
+    const nextModel = models[modelIndex + 1] ?? null;
+
+    for (const [keyIndex, entry] of keyPool.entries()) {
+      if (deadline.remainingMs <= MIN_STAGE_BUDGET_MS) {
+        throw new DeadlineExceededError(
+          `only ${Math.max(0, deadline.remainingMs)} ms left before the 45 s deadline`,
         );
       }
+
+      if (geminiKeyState.isInvalid(entry.name)) {
+        if (!warnedInvalid.has(entry.name)) {
+          warnedInvalid.add(entry.name);
+          console.warn(
+            `[Gemini: Key Skipped] ${entry.name} is parked as invalid (400 API_KEY_INVALID / 403) for up to 60 min — skipping.`,
+          );
+        }
+        continue;
+      }
+
+      if (geminiKeyState.isQuotaExhausted(entry.name, model.id)) {
+        continue;
+      }
+
+      const catalog = catalogs.get(entry.name) ?? null;
+      if (catalog && !catalog.has(model.id)) {
+        // This key's cached catalog does not offer the id (Google withholds
+        // models per project). Another key may still see it, so only this
+        // (key, model) pair is skipped — no round-trip, no noise per request.
+        console.warn(
+          `[Gemini: Model Skipped] ${model.id} is not offered to ${entry.name} (per-key catalog) — trying the next key/model.`,
+        );
+        continue;
+      }
+
+      const nextKeyIndex = keyIndex + 2;
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          const text = await generateWithGeminiModel(model, prompt, entry.key, deadline);
+          // The mandated success line — key NAME and model id only.
+          console.log(`Gemini OK: ${entry.name} / ${model.id}`);
+          return { model: model.id, text, warnings };
+        } catch (error) {
+          if (isDeadlineFailure(error)) throw error;
+          if (!(error instanceof GeminiError)) throw error;
+
+          const kind = classifyGeminiFailure(error);
+          const label = `key ${keyIndex + 1}/${keyPool.length} (${entry.name})`;
+          failures.push(`${entry.name} / ${model.id}: ${error.message}`);
+
+          const rotationNote =
+            nextKeyIndex <= keyPool.length
+              ? `key rotation attempt ${nextKeyIndex}/${keyPool.length}`
+              : "no key left in the pool";
+
+          if (kind === "quota") {
+            geminiKeyState.markQuotaExhausted(entry.name, model.id);
+            quotaParked.push(`${entry.name}@${model.id}`);
+            const warning =
+              `Gemini HTTP ${error.status ?? 429} quota failure on ${label} / ${model.id} — ` +
+              `${shortMessage(error.message)} (key parked for 10 min, ${rotationNote}).`;
+            warnings.push(shortMessage(warning, 400));
+            console.warn(`[Gemini: Key Rotation] ${warning}`);
+            break; // next key — another project may still have quota
+          }
+
+          if (kind === "invalid_key") {
+            geminiKeyState.markInvalid(entry.name);
+            invalidParked.push(entry.name);
+            const warning =
+              `Gemini HTTP ${error.status ?? 400} ${error.status === 403 ? "forbidden" : "API_KEY_INVALID"} on ${label} — ` +
+              `${shortMessage(error.message)} (key parked for 60 min, ${rotationNote}).`;
+            warnings.push(shortMessage(warning, 400));
+            console.warn(`[Gemini: Key Rotation] ${warning}`);
+            break; // next key
+          }
+
+          if (kind === "transient") {
+            const status = error.status ?? "network";
+            if (attempt === 1) {
+              const warning = `Gemini HTTP ${status} transient failure on ${label} / ${model.id} — retrying the same key once.`;
+              warnings.push(shortMessage(warning, 400));
+              console.warn(`[Gemini: Key Retry] ${warning}`);
+              continue; // retry the SAME key once
+            }
+            const warning =
+              `Gemini HTTP ${status} transient failure on ${label} / ${model.id} — ` +
+              `moving on, ${rotationNote}.`;
+            warnings.push(shortMessage(warning, 400));
+            console.warn(`[Gemini: Key Rotation] ${warning}`);
+            break; // next key
+          }
+
+          if (kind === "model") {
+            modelRetired = true;
+            warnings.push(shortMessage(`Gemini unavailable — ${error.message}`, 400));
+            console.warn(
+              `[Gemini: Model Fallback] ${error.message} — ${nextModel ? `retrying with ${nextModel.id}` : "no model left in the chain"}`,
+            );
+            break; // next model
+          }
+
+          // Safety block, empty candidate list, malformed request… nothing
+          // another key or model could fix.
+          throw error;
+        }
+      }
+
+      if (modelRetired) break; // leave the key loop, advance the model chain
     }
   }
 
+  // The client warning must still explain WHY nothing answered, so the parked
+  // credentials (names only) lead the summary, before the per-attempt details.
+  const quotaKeyNames = [...new Set(quotaParked.map((id) => id.split("@")[0]))];
+  const parkedState = [
+    quotaKeyNames.length
+      ? `quota-parked 10 min: ${quotaKeyNames
+          .map((name) => `${name} (${quotaParked.filter((id) => id.startsWith(`${name}@`)).length} model(s))`)
+          .join(", ")}`
+      : null,
+    invalidParked.length ? `invalid-parked 60 min: ${[...new Set(invalidParked)].join(", ")}` : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
+
   throw new GeminiError(
-    `all Gemini API keys failed — ${failures.join(" | ")}`,
+    `no Gemini model/key could answer (models: ${models.map((m) => m.id).join(", ")}; keys: ${keyPool
+      .map((entry) => entry.name)
+      .join(", ")})${parkedState ? ` — ${parkedState}` : ""} — first failure: ${failures[0] ?? "no attempt could be made"}` +
+      (failures.length > 1 ? ` (+${failures.length - 1} more attempt(s))` : ""),
   );
+}
+
+/**
+ * Resolve every key's cached `generateContent` catalog in parallel, once per
+ * request. Each probe is bounded by the 8 s attempt window and by the request
+ * deadline, cached for an hour, and NEVER fatal: `null` means "unknown, skip
+ * nothing", so an unreachable ListModels can only make the pipeline more
+ * permissive, never less available.
+ */
+async function resolveKeyCatalogs(
+  keyPool: readonly GeminiKeyEntry[],
+  deadline: RequestDeadline,
+): Promise<Map<string, ReadonlySet<string> | null>> {
+  const entries = await Promise.all(
+    keyPool.map(async (entry): Promise<[string, ReadonlySet<string> | null]> => {
+      const budget = deadline.remainingMs;
+      if (budget <= MIN_STAGE_BUDGET_MS) return [entry.name, geminiModelHealth.cachedCatalog(entry.name)];
+      const ids = await geminiModelHealth.ensureCatalog(entry.name, entry.key, {
+        signal: deadline.signal,
+        timeoutMs: Math.max(1_000, Math.min(PER_ATTEMPT_TIMEOUT_MS, budget)),
+      });
+      return [entry.name, ids];
+    }),
+  );
+  return new Map(entries);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1655,16 +1895,18 @@ interface HfErrorEnvelope {
  * in logs/warnings) or, failing that, the raw body prefix.
  */
 function describeHfHttpError(status: number, bodyText: string): string {
-  const fallback = `HTTP ${status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+  const fallback = `HTTP ${status}${bodyText ? ` — ${shortMessage(bodyText)}` : ""}`;
   try {
     const parsed = JSON.parse(bodyText) as HfErrorEnvelope;
     const envelope = parsed?.error;
-    if (typeof envelope === "string" && envelope) return `HTTP ${status} — ${envelope}`;
+    if (typeof envelope === "string" && envelope) {
+      return `HTTP ${status} — ${shortMessage(envelope)}`;
+    }
     if (envelope && typeof envelope === "object") {
       const message = typeof envelope.message === "string" ? envelope.message.trim() : "";
       const code = typeof envelope.code === "string" ? envelope.code.trim() : "";
       if (message || code) {
-        return `HTTP ${status} — ${[code && `[${code}]`, message].filter(Boolean).join(" ")}`;
+        return `HTTP ${status} — ${[code && `[${code}]`, shortMessage(message)].filter(Boolean).join(" ")}`;
       }
     }
   } catch {
@@ -1685,33 +1927,42 @@ async function generateWithHfLlmModel(
   userContent: string,
   apiKey: string,
   history: AssistantHistoryTurn[] = [],
+  deadline: RequestDeadline,
 ): Promise<string> {
   let res: Response;
   try {
-    res = await timedFetch(HF_ROUTER_CHAT_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
+    res = await timedFetch(
+      HF_ROUTER_CHAT_URL,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...history,
+            { role: "user", content: userContent },
+          ],
+          temperature: 0.4,
+          top_p: 0.9,
+          max_tokens: MAX_REPLY_TOKENS,
+          stream: false,
+        }),
       },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...history,
-          { role: "user", content: userContent },
-        ],
-        temperature: 0.4,
-        top_p: 0.9,
-        max_tokens: MAX_REPLY_TOKENS,
-        stream: false,
-      }),
-    });
+      deadline,
+    );
   } catch (error) {
-    // Network / timeout / abort errors — no HTTP status involved.
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    // A global-deadline abort is terminal for the whole request; an 8 s
+    // per-attempt timeout is a transport failure the chain handles like any
+    // other network error.
+    if (isDeadlineFailure(error)) throw error;
+    const detail = isAbortOrTimeoutError(error)
+      ? `timeout after ${PER_ATTEMPT_TIMEOUT_MS} ms (per-attempt window)`
+      : shortMessage(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     throw new HfLlmRequestError(detail);
   }
 
@@ -1737,54 +1988,111 @@ async function generateWithHfLlmModel(
 /**
  * Strict Step 2 (PRIMARY text model): concise Arabic text response formatting via
  * the Hugging Face Inference Providers router, starting at
- * {@link HF_LLM_MODELS Qwen/Qwen3-4B-Instruct-2507} and falling back
- * through the remaining open, non-gated ids when the router reports a model
- * as unavailable (404 not-found / 400 model_not_supported / 403
- * gated-license / empty choices). Any failure throws an "LLM Error:" — the
- * handler catches it and hands the request to Step 3 (Gemini) and then to
- * the built-in formatter, so a Step 2 outage never breaks the response.
- * - Never called without a token: the handler skips the stage synchronously
- *   when no Hugging Face token is configured.
- * - Runs FIRST in the text chain: Gemini (Step 3) is only consulted once this
- *   stage failed, timed out or could not be configured.
- * - Receives the exact same user turn Gemini would get — built by
- *   {@link buildUserContent}, so it carries the Step 1 ANALYSIS_DATA reference
- *   block (when an image was analysed), the user's text message and the
- *   Firestore profile context (Wilaya, crop). It never receives the photo:
- *   narrating structured data is the whole job.
- * - Uses the concise professional Arabic advisor system prompt.
- * - Throws an Error prefixed with "LLM Error:" once no model can answer.
+ * {@link HF_LLM_MODELS Qwen/Qwen3-4B-Instruct-2507} and walking the remaining
+ * open, non-gated ids.
+ *
+ * Failure policy (task A3), applied to EVERY round-trip:
+ *
+ *   • 401 / 402 / 429 / 5xx — log ONLY the status and a short, redacted message,
+ *     then fall through to the next provider (the next model id, which the
+ *     router resolves to a different inference provider). A 402 additionally
+ *     trips {@link hfCreditCircuit}: no model id can fix an empty account, so
+ *     the WHOLE Hugging Face chain is skipped, in memory, for 10 minutes and
+ *     the request goes straight to Gemini.
+ *   • 404 / `model_not_supported` / gated 403 / empty choices — the model id is
+ *     unusable, so walk the chain exactly as before.
+ *   • network error or the 8 s per-attempt timeout — fall through to Gemini
+ *     (the next provider in the pipeline).
+ *   • the global 45 s deadline — propagate, so the route answers 503.
+ *
+ * Any failure eventually throws an "LLM Error:" that the handler turns into the
+ * Gemini fallback and then the built-in formatter, so a Step 2 outage never
+ * breaks the response. Never called without a token (the handler skips the
+ * stage synchronously), and the token is never logged or echoed.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string, history: AssistantHistoryTurn[] = []): Promise<string> {
+async function askHfLlmStrict(
+  apiKey: string,
+  userContent: string,
+  history: AssistantHistoryTurn[] = [],
+  deadline: RequestDeadline = new RequestDeadline(),
+): Promise<string> {
   const failures: string[] = [];
 
+  // Circuit breaker: a 402 seen by an earlier request in this process parks the
+  // whole chain for 10 minutes instead of re-paying the same discovery cost.
+  if (hfCreditCircuit.isOpen) {
+    const detail = `Hugging Face skipped for another ${Math.ceil(hfCreditCircuit.remainingMs / 1000)} s (HTTP 402 — credits exhausted).`;
+    console.warn(`[Step 2: HF LLM Skipped] ${detail}`);
+    throw new Error(`LLM Error: ${detail}`);
+  }
+
   for (const [index, model] of HF_LLM_MODELS.entries()) {
+    if (deadline.remainingMs <= MIN_STAGE_BUDGET_MS) {
+      throw new DeadlineExceededError(
+        `only ${Math.max(0, deadline.remainingMs)} ms left before the 45 s deadline`,
+      );
+    }
+
+    const nextModel = index < HF_LLM_MODELS.length - 1 ? HF_LLM_MODELS[index + 1] : null;
+
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, history, deadline);
 
       console.log(
         `[Step 2: HF LLM Success] model=${model} replyLength=${text.length}`,
       );
       return text;
     } catch (error) {
+      // The 45 s deadline is terminal — never degrade it into a warning.
+      if (isDeadlineFailure(error)) throw error;
+
+      const status = error instanceof HfLlmRequestError ? error.status : undefined;
       const detail = error instanceof Error ? error.message : String(error);
-      const modelLevel = isHfLlmModelAvailabilityError(error);
       failures.push(`${model}: ${detail}`);
 
-      const nextModel = index < HF_LLM_MODELS.length - 1 ? HF_LLM_MODELS[index + 1] : null;
-      if (modelLevel && nextModel) {
-        console.warn(`[Step 2: HF LLM Fallback] ${detail} — retrying with ${nextModel}`);
-        continue;
+      // 401: the token itself is rejected — a different model id cannot help.
+      if (status === 401) {
+        const summary = `HTTP 401 — Hugging Face token rejected (${shortMessage(detail)}); falling through to Gemini.`;
+        console.error(`[Step 2: HF LLM Error] ${summary}`);
+        throw new Error(`LLM Error: ${summary}`);
       }
 
-      // Anything that isn't about model availability (bad key, quota, HF 5xx,
-      // timeout) fails the stage immediately.
-      if (!modelLevel) {
-        const wrapped = new Error(`LLM Error: ${detail}`);
-        console.error(`[Step 2: HF LLM Error] ${wrapped.message}`);
-        throw wrapped;
+      // 402: account-level, model-independent → trip the 10-minute circuit.
+      if (status === 402) {
+        hfCreditCircuit.trip();
+        const summary = `HTTP 402 — Hugging Face credits exhausted (${shortMessage(detail)}); skipping Hugging Face for ${Math.round(HF_CREDITS_SKIP_MS / 60000)} min.`;
+        console.error(`[Step 2: HF LLM Error] ${summary}`);
+        throw new Error(`LLM Error: ${summary}`);
       }
-      break;
+
+      // 429 / 5xx: a provider-level failure — log status + short message and
+      // try the NEXT provider in the chain.
+      const providerLevel = status === 429 || (status !== undefined && status >= 500);
+      if (providerLevel) {
+        const summary = `HTTP ${status} — ${shortMessage(detail)}`;
+        if (nextModel) {
+          console.warn(`[Step 2: HF LLM Provider Fallback] ${model}: ${summary} — retrying with ${nextModel}`);
+          continue;
+        }
+        console.error(`[Step 2: HF LLM Error] ${model}: ${summary} — no provider left in the chain.`);
+        throw new Error(`LLM Error: ${model}: ${summary}`);
+      }
+
+      // Model-level failure (404 / not supported / gated / empty choices):
+      // walk the chain; on the LAST id let the loop end so the summary below
+      // reports every id that was tried.
+      if (isHfLlmModelAvailabilityError(error)) {
+        if (nextModel) {
+          console.warn(`[Step 2: HF LLM Fallback] ${shortMessage(detail)} — retrying with ${nextModel}`);
+          continue;
+        }
+        break;
+      }
+
+      // Network/timeout or the last model of the chain: fail the stage.
+      const wrapped = new Error(`LLM Error: ${shortMessage(detail)}`);
+      console.error(`[Step 2: HF LLM Error] ${wrapped.message}`);
+      throw wrapped;
     }
   }
 
@@ -1793,7 +2101,7 @@ async function askHfLlmStrict(apiKey: string, userContent: string, history: Assi
   const wrapped = new Error(
     `LLM Error: no HF LLM model could answer (tried ${HF_LLM_MODELS.join(", ")}) — ${failures.join(" | ")}`,
   );
-  console.error(`[Step 2: HF LLM Error] ${wrapped.message}`);
+  console.error(`[Step 2: HF LLM Error] ${shortMessage(wrapped.message, 600)}`);
   throw wrapped;
 }
 
@@ -2270,9 +2578,15 @@ function buildTextFallbackReply(message: string): string {
  *   Step 1 produced an analysis, a friendly basic-mode reply otherwise.
  * - A text-only request has no image stage at all and runs Steps 2 → 3 →
  *   built-in formatter.
- * - The only non-200 responses left are client input errors (400/413) and
- *   the explicit server misconfiguration signal (503 + MISSING_KEYS, emitted
- *   only when NEITHER provider key is configured) — never an HTTP 500.
+ * - The only non-200 responses left are client input errors (400/413), the
+ *   explicit server misconfiguration signal (503 + MISSING_KEYS, emitted only
+ *   when NEITHER provider key is configured) and the 45 s deadline stop
+ *   (503 + DEADLINE_EXCEEDED, Arabic "service is busy" message) — never an
+ *   HTTP 500.
+ *
+ * The handler owns the ONE {@link RequestDeadline} (45 s) and hands it to every
+ * stage; a `DeadlineExceededError` from anywhere below unwinds to the 503
+ * branch, and `dispose()` always runs so no timer outlives the response.
  */
 async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let body: AssistantRequestBody;
@@ -2320,19 +2634,24 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // Server-only secrets — never exposed to the client bundle. Read on every
   // request (never at module load) so a rotated/added key is picked up without
   // a restart.
-  //   GEMINI_API_KEY        → Step 1 PRIMARY image model (Gemini) AND Step 3
-  //                           text fallback (comma-separated keys supported).
-  //   GEMINI_API_KEYS      → optional comma-separated Gemini key pool.
-  //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_1`, `_2`, …).
-  //                           All sources above are combined into ONE pool
-  //                           (trimmed, deduplicated, rotation-ordered) and
-  //                           rotated on 429 / RESOURCE_EXHAUSTED / quota.
+  //   GEMINI_API_KEY_4      → FIRST key of the rotation (usually a different
+  //                           Google project, hence its own quota).
+  //   GEMINI_API_KEY        → next in rotation; comma-separated values pool.
+  //   GEMINI_API_KEY_N      → numbered variants (`_1`, `_2`, …) in numeric
+  //                           order after the base variable.
+  //   GEMINI_API_KEYS       → LEGACY comma pool, appended last.
+  //                           Deps 1–4 feed `resolveGeminiKeyPool()`, which
+  //                           trims, dedupes and orders them; per model every
+  //                           key is tried, a 429 parks that (key, model) pair
+  //                           for 10 minutes, a 400 API_KEY_INVALID / 403
+  //                           parks the key for 60 minutes, and 503/network
+  //                           retries the same key once before rotating.
   //   HUGGINGFACE_API_KEY   → Step 1 FALLBACK image model (MobileNetV2) +
-  //                           Step 2 PRIMARY text model (HF_TOKEN, Hugging
-  //                           Face's own conventional variable name, is
-  //                           honoured as an alias).
+  //                           Step 2 PRIMARY text model. ONE variable name:
+  //                           there is no HF_TOKEN alias and no fallback.
   const geminiApiKeys = resolveGeminiApiKeys();
   const huggingfaceKey = resolveHuggingFaceToken();
+  logGeminiKeyConfiguration(geminiApiKeys);
 
   if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
@@ -2348,7 +2667,14 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   const warnings: string[] = [];
   /** Answer language, resolved once and shared by every stage. */
   const lang: "ar" | "fr" = context?.lang === "fr" ? "fr" : "ar";
+  /**
+   * The ONE 45 s ceiling for everything below: leaf detection, both image
+   * models, the HF text chain and the Gemini fallback. Every attempt also
+   * carries its own 8 s window, so no single provider can spend the budget.
+   */
+  const deadline = new RequestDeadline();
 
+  try {
   /* ---- STEP 0: leaf Detection & Cropping (image requests only) ------ */
   // An open-source object detector localises the leaf and sharp crops the
   // photo. The crop exists to keep background noise (hands, soil, pots) out
@@ -2360,18 +2686,25 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let analysis: AnalysisResult | null = null;
 
   if (image) {
-    const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
-    preprocessing = detection.preprocessing;
+      const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings, deadline);
+      preprocessing = detection.preprocessing;
 
-    // ---- STEP 1: IMAGE ANALYSIS (Gemini → MobileNetV2 → give up) ----
-    analysis = await runImageAnalysisStage({
-      geminiImage: image,
-      mobilenetImage: detection.image,
-      geminiApiKeys,
-      huggingfaceKey,
-      lang,
-      warnings,
-    });
+      // ---- STEP 1: IMAGE ANALYSIS (Gemini → MobileNetV2 → give up) ----
+      analysis = await runImageAnalysisStage({
+        geminiImage: image,
+        mobilenetImage: detection.image,
+        geminiApiKeys,
+        huggingfaceKey,
+        lang,
+        warnings,
+        deadline,
+      });
+  }
+
+  // The image stage consumed the budget: do not start a text model with less
+  // than one attempt's worth of time left.
+  if (deadline.remainingMs <= MIN_STAGE_BUDGET_MS && analysis === null) {
+    return serviceBusyResponse();
   }
 
   // ---- STEP 4: FINAL FALLBACK (both image models failed) ------------
@@ -2379,8 +2712,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // data. A photo arrived, neither Gemini nor MobileNetV2 could read it, so
   // the user gets a polite, pre-written retake request — not a guess.
   if (image && analysis === null) {
+    if (deadline.expired) return serviceBusyResponse();
     const reply = buildImageAnalysisUnavailableReply();
-    warnings.push("Image analysis unavailable — replied with the final-fallback message.");
+    pushWarning(warnings, "Image analysis unavailable — replied with the final-fallback message.");
     console.log(
       `[Step 4: Final Fallback] no image model could analyse the photo — ${warnings.length} degradation(s) recorded`,
     );
@@ -2412,7 +2746,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (huggingfaceKey) {
     try {
       reply = assertUsableTextReply(
-        await askHfLlmStrict(huggingfaceKey, userContent, history),
+        await askHfLlmStrict(huggingfaceKey, userContent, history, deadline),
         analysis?.data ?? null,
       );
       textSource = "huggingface";
@@ -2420,19 +2754,21 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         `[Step 2: HF LLM Success] analysis=${analysis?.source ?? "none"} replyLength=${reply.length}`,
       );
     } catch (error) {
+      // The 45 s deadline is the request's hard stop, not an HF failure.
+      if (isDeadlineFailure(error)) return serviceBusyResponse();
       const msg = error instanceof Error ? error.message : String(error);
-      const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
+      const detail = shortMessage(msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg, 700);
       console.warn(`[Step 2: HF LLM Failed → Step 3] ${detail}`);
-      warnings.push(`Step 2 HF text model unavailable — ${detail}`.slice(0, 400));
+      pushWarning(warnings, `Step 2 HF text model unavailable — ${detail}`, 700);
     }
   } else {
     // No Hugging Face token anywhere in the environment → skip the stage
     // synchronously (no request, no throw, no timer) and let Step 3
     // (Gemini) answer right away.
     const detail =
-      "HUGGINGFACE_API_KEY is not configured (HF_TOKEN unset too) — skipping the primary text model.";
+      "HUGGINGFACE_API_KEY is not configured — skipping the primary text model.";
     console.warn(`[Step 2: HF LLM Skipped] ${detail} → Step 3 (Gemini formatter)`);
-    warnings.push(`Step 2 HF text model unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 2 HF text model unavailable — ${detail}`);
   }
 
   // ---- STEP 3: Google Gemini (FALLBACK text model) -------------------
@@ -2454,6 +2790,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
           history,
         },
         geminiApiKeys,
+        deadline,
       );
       reply = assertUsableTextReply(geminiResult.text, analysis?.data ?? null);
       textSource = "gemini_fallback";
@@ -2464,14 +2801,15 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         `[Step 3: Gemini Formatter Success] model=${geminiResult.model} analysis=${analysis?.source ?? "none"} replyLength=${reply.length}`,
       );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      if (isDeadlineFailure(error)) return serviceBusyResponse();
+      const detail = shortMessage(error instanceof Error ? error.message : String(error), 700);
       console.warn(`[Step 3: Gemini Failed → built-in formatter] ${detail}`);
-      warnings.push(`Step 3 Gemini text fallback unavailable — ${detail}`.slice(0, 400));
+      pushWarning(warnings, `Step 3 Gemini text fallback unavailable — ${detail}`, 700);
     }
   } else if (reply === null) {
     const detail = "No GEMINI_API_KEY is configured — skipping the text fallback.";
     console.warn(`[Step 3: Gemini Skipped] ${detail} → built-in formatter`);
-    warnings.push(`Step 3 Gemini text fallback unavailable — ${detail}`.slice(0, 400));
+    pushWarning(warnings, `Step 3 Gemini text fallback unavailable — ${detail}`);
   }
 
   if (reply !== null) {
@@ -2493,14 +2831,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // ---- BUILT-IN FORMATTER (both text models down, ZERO-FAILURE) ------
   // Reachable only for a request that already has ANALYSIS_DATA (an image
   // request cannot get here: the Step 4 branch above returns first) or for a
-  // text-only question.
+  // text-only question. A request whose budget ran out is answered 503 here
+  // instead of pretending a text model is merely down.
+  if (deadline.expired) return serviceBusyResponse();
   let directReply: string;
   if (analysis) {
     directReply = buildDirectDiagnosisCard(analysis.diagnosis);
   } else {
     directReply = buildTextFallbackReply(message);
   }
-  warnings.push("Reply formatted locally — no upstream AI stage was available.");
+  pushWarning(warnings, "Reply formatted locally — no upstream AI stage was available.");
 
   const payload: AssistantResponseBody = {
     reply: directReply,
@@ -2512,6 +2852,20 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     warnings,
   };
   return NextResponse.json(payload);
+  } catch (error) {
+    // The 45 s ceiling fired inside ANY stage (leaf detection, either image
+    // model, the HF chain or the Gemini chain): stop everything and answer 503
+    // with the Arabic "service is busy" message. Any other exception keeps
+    // travelling to the outer safety net.
+    if (isDeadlineFailure(error)) return serviceBusyResponse();
+    throw error;
+  } finally {
+    // Always disarm the deadline timer — on success, on 4xx and on the 503
+    // path. An armed timer would keep the serverless invocation alive past the
+    // response; disposing here is what guarantees the 45 s ceiling is the LAST
+    // thing that can happen, never a leaked callback.
+    deadline.dispose();
+  }
 }
 
 /**
@@ -2523,14 +2877,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     return await handleAssistant(request);
   } catch (error) {
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    // A deadline that escaped a stage boundary (defensive: every stage already
+    // converts it) still answers the Arabic "service is busy" 503 — never a 500.
+    if (isDeadlineFailure(error)) return serviceBusyResponse();
+    const detail = shortMessage(
+      error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    );
     console.error(`[Safety Net] Unexpected handler exception → basic-mode reply: ${detail}`);
     return NextResponse.json({
       reply: buildTextFallbackReply(""),
       diagnosis: null,
       source: "direct",
-      warnings: [`Unexpected internal error — reply formatted locally: ${detail}`.slice(0, 400)],
+      warnings: [shortMessage(`Unexpected internal error — reply formatted locally: ${detail}`, 400)],
     } satisfies AssistantResponseBody);
   }
 }

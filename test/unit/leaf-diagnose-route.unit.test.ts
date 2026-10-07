@@ -166,11 +166,13 @@ test("leaf route tries a lone key twice per model, walks the model chain once, a
   const response = await POST(upload(await picture()));
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "provider-busy" });
-  // 1 key x 2 tries x 3 models in the chain (~1 s real pause between each pair of tries).
-  assert.equal(provider.mock.callCount(), 6);
+  // 1 key x 2 tries x 5 models in the mandated chain (~1 s real pause between
+  // each pair of tries). The chain grew from 3 to 5 ids, so this count moved
+  // from 6 to 10 — the leaf route shares `resolveGeminiModels` with the chat.
+  assert.equal(provider.mock.callCount(), 10);
   clearTestEnv();
   assert.equal((await POST(upload(await picture()))).status, 503);
-  assert.equal(provider.mock.callCount(), 6);
+  assert.equal(provider.mock.callCount(), 10);
 });
 
 test("leaf route skips a 404 model to the next one without retrying it or leaking upstream text", async (t) => {
@@ -178,7 +180,8 @@ test("leaf route skips a 404 model to the next one without retrying it or leakin
   const response = await POST(upload(await picture()));
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "provider-busy" });
-  assert.equal(provider.mock.callCount(), 3);
+  // One round-trip per model id in the shared (now 5-id) chain.
+  assert.equal(provider.mock.callCount(), 5);
 });
 
 for (const payload of [

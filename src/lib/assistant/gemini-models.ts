@@ -41,7 +41,10 @@ export const GEMINI_MODEL_DEFAULT: GeminiModel = {
 
 /**
  * Built-in fallback ids, walked within the remaining step budget when the
- * primary 404s / is retired.
+ * primary 404s / is retired — the mandated chain:
+ *
+ *   `gemini-3.8-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite`
+ *   → `gemini-2.5-flash` → `gemini-flash-latest`
  *
  * The ordering is deliberate and NOT simply "newest first". Google's 3.6 / 3.7 /
  * 3.8 Flash ids are *short-term availability* models — rolling point releases
@@ -50,20 +53,27 @@ export const GEMINI_MODEL_DEFAULT: GeminiModel = {
  *
  *   • `gemini-3.5-flash`      (2026-05-19, supported no earlier than 2027-05-19)
  *   • `gemini-3.5-flash-lite` (2026-07-21, supported no earlier than 2027-07-21)
+ *   • `gemini-2.5-flash`      (retiring 2026-10-20; still served to existing
+ *                             keys, and the last cheap 2.5-generation seat)
+ *   • `gemini-flash-latest`   (Google's rolling alias — a stable pointer that
+ *                             survives the point releases that kill 3.x ids)
  *
  * If the rolling 3.8 id is retired tomorrow, the request still lands on a
- * model with ~9 months of guaranteed support instead of 404-ing three times
- * and degrading to MobileNetV2.
+ * model with ~9 months of guaranteed support instead of 404-ing four times
+ * and degrading to MobileNetV2. Whether an id is actually offered to a given
+ * credential is NOT assumed: every key's `GET /v1beta/models` catalog is
+ * cached for an hour and ids missing from it are skipped (see
+ * {@link GEMINI_CATALOG_TTL_MS}).
  *
  * Retired on purpose (do not re-add without checking the deprecations page):
- *   • `gemini-2.5-flash`   — refused for new API keys ("no longer available
- *                             to new users"), retiring 2026-10-20
  *   • `gemini-2.0-flash*`  — SHUT DOWN 2026-06-01
  *   • `gemini-3.6`         — never existed; the real id was `gemini-3.6-flash`
  */
 export const GEMINI_FALLBACK_MODELS: readonly GeminiModel[] = [
   { id: "gemini-3.5-flash", thinking: { thinkingLevel: "low" } },
   { id: "gemini-3.5-flash-lite", thinking: { thinkingLevel: "low" } },
+  { id: "gemini-2.5-flash", thinking: { thinkingBudget: 0 } },
+  { id: "gemini-flash-latest", thinking: { thinkingLevel: "low" } },
 ];
 
 /**
@@ -99,7 +109,15 @@ export function resolveGeminiModels(
 const LIST_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /** ListModels is a cheap metadata call; it must never eat a request budget. */
-const LIST_MODELS_TIMEOUT_MS = 6_000;
+export const LIST_MODELS_TIMEOUT_MS = 6_000;
+
+/**
+ * How long one key's catalog is trusted. Google can withhold a model id from a
+ * specific key/project (that is how `gemini-2.5-flash` "no longer available to
+ * new users" lands), so the list is cached PER KEY — a shared list would both
+ * over-skip for a generous key and under-skip for a restricted one.
+ */
+export const GEMINI_CATALOG_TTL_MS = 60 * 60 * 1000;
 
 /** Model ids as returned by `GET /v1beta/models`. */
 export interface GeminiListedModel {
@@ -181,38 +199,56 @@ function isGeneralPurposeFlash(id: string): boolean {
  * Fetch every model this key can see that supports `generateContent`.
  *
  * Throws on any transport/HTTP failure so the caller can record it as
- * `error` and carry on — a health check must never break a request.
+ * `error` and carry on — a health check must never break a request. The
+ * timeout is an explicit `AbortController` (not `AbortSignal.timeout`) so the
+ * request's own 45 s deadline can cancel it too, and so tests can drive it.
  */
-async function listGenerateContentModels(apiKey: string): Promise<string[]> {
-  const response = await fetch(`${LIST_MODELS_URL}?pageSize=1000&key=${apiKey}`, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(LIST_MODELS_TIMEOUT_MS),
-  });
+async function listGenerateContentModels(
+  apiKey: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<string[]> {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  options.signal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = setTimeout(
+    () => controller.abort(new Error("ListModels timeout")),
+    options.timeoutMs ?? LIST_MODELS_TIMEOUT_MS,
+  );
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(
-      `ListModels HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`,
-    );
+  try {
+    const response = await fetch(`${LIST_MODELS_URL}?pageSize=1000&key=${apiKey}`, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `ListModels HTTP ${response.status}${body ? ` — ${body.slice(0, 200)}` : ""}`,
+      );
+    }
+
+    const payload = (await response.json().catch(() => null)) as
+      | { models?: GeminiListedModel[] }
+      | null;
+
+    const models = payload?.models;
+    if (!Array.isArray(models)) {
+      throw new Error("ListModels returned an unexpected payload shape");
+    }
+
+    return models
+      .filter(
+        (model) =>
+          model?.supportedGenerationMethods?.includes("generateContent") === true,
+      )
+      .map((model) => bareModelId(model.name))
+      .filter(Boolean)
+      .sort(byVersionDesc);
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", forwardAbort);
   }
-
-  const payload = (await response.json().catch(() => null)) as
-    | { models?: GeminiListedModel[] }
-    | null;
-
-  const models = payload?.models;
-  if (!Array.isArray(models)) {
-    throw new Error("ListModels returned an unexpected payload shape");
-  }
-
-  return models
-    .filter(
-      (model) =>
-        model?.supportedGenerationMethods?.includes("generateContent") === true,
-    )
-    .map((model) => bareModelId(model.name))
-    .filter(Boolean)
-    .sort(byVersionDesc);
 }
 
 /**
@@ -227,6 +263,10 @@ export async function checkGeminiModelHealth(options: {
   chain: readonly GeminiModel[];
   /** Injectable for tests. */
   fetchModels?: () => Promise<string[]>;
+  /** The caller's request deadline, so a diagnostic can never outlive it. */
+  signal?: AbortSignal;
+  /** Per-call ceiling for the ListModels round-trip. */
+  timeoutMs?: number;
 }): Promise<GeminiHealthReport> {
   const { apiKey, chain } = options;
 
@@ -235,7 +275,10 @@ export async function checkGeminiModelHealth(options: {
   try {
     available = options.fetchModels
       ? await options.fetchModels()
-      : await listGenerateContentModels(apiKey);
+      : await listGenerateContentModels(apiKey, {
+          signal: options.signal,
+          timeoutMs: options.timeoutMs,
+        });
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause);
   }
@@ -349,15 +392,30 @@ export class GeminiModelHealthMonitor {
   /** The in-flight (or most recent) check — single-flight guard. */
   private inFlight: Promise<GeminiHealthReport | null> | null = null;
   private checkedAt = Number.NEGATIVE_INFINITY;
+  /** Per-key `generateContent` catalogs, cached for {@link GEMINI_CATALOG_TTL_MS}. */
+  private catalogs = new Map<string, { ids: ReadonlySet<string>; fetchedAt: number }>();
+  /** Single-flight guard per catalog key. */
+  private catalogInFlight = new Map<string, Promise<ReadonlySet<string> | null>>();
+  /**
+   * Set by {@link markVerified}: callers that already know the catalog (tests,
+   * a boot check) must not trigger a ListModels round-trip per key.
+   */
+  private catalogVerifiedAt = Number.NEGATIVE_INFINITY;
   private readonly ttlMs: number;
+  private readonly catalogTtlMs: number;
   private readonly now: () => number;
 
   // NOTE: written as explicit fields, not TypeScript "parameter properties",
   // because this module is imported by both the Next build and a plain-Node CLI
   // and Node's type-stripping loader rejects parameter properties.
-  constructor(ttlMs: number = GEMINI_HEALTH_TTL_MS, now: () => number = Date.now) {
+  constructor(
+    ttlMs: number = GEMINI_HEALTH_TTL_MS,
+    now: () => number = Date.now,
+    catalogTtlMs: number = GEMINI_CATALOG_TTL_MS,
+  ) {
     this.ttlMs = ttlMs;
     this.now = now;
+    this.catalogTtlMs = catalogTtlMs;
   }
 
   /** Ids to exclude from the request chain (may be empty). */
@@ -372,7 +430,14 @@ export class GeminiModelHealthMonitor {
    */
   async ensure(
     chain: readonly GeminiModel[],
-    options: { apiKey: string; fetchModels?: () => Promise<string[]> },
+    options: {
+      apiKey: string;
+      fetchModels?: () => Promise<string[]>;
+      /** Cache key (the variable NAME) whose catalog this check populates. */
+      catalogKey?: string;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+    },
   ): Promise<GeminiHealthReport | null> {
     if (this.inFlight && this.now() - this.checkedAt < this.ttlMs) {
       return this.inFlight;
@@ -386,6 +451,14 @@ export class GeminiModelHealthMonitor {
           .map((check) => check.id);
         // A check that could not reach ListModels must not poison the chain.
         this.unavailable = new Set(dead);
+        // Reuse the same round-trip as this key's catalog, so the request path
+        // never issues a second ListModels call for the first key.
+        if (options.catalogKey && !report.error) {
+          this.catalogs.set(options.catalogKey, {
+            ids: new Set(report.available),
+            fetchedAt: this.now(),
+          });
+        }
         return report;
       })
       .catch((error: unknown) => {
@@ -401,7 +474,58 @@ export class GeminiModelHealthMonitor {
   }
 
   /**
-   * Treat the chain as freshly verified, with nothing marked dead.
+   * This key's `generateContent` catalog, cached for one hour.
+   *
+   * Returns `null` when the catalog is UNKNOWN — after {@link markVerified},
+   * when ListModels is unreachable, or when the caller's deadline cancelled the
+   * probe. `null` means "do not skip anything": a failed diagnostic must never
+   * disable a working model, exactly like the chain check above.
+   */
+  async ensureCatalog(
+    cacheKey: string,
+    apiKey: string,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<ReadonlySet<string> | null> {
+    const cached = this.catalogs.get(cacheKey);
+    if (cached && this.now() - cached.fetchedAt < this.catalogTtlMs) return cached.ids;
+
+    // A caller that declared the catalog known (tests, boot check) gets no
+    // extra round-trip until the next `reset()`.
+    if (this.now() - this.catalogVerifiedAt < this.catalogTtlMs) return null;
+
+    const inFlight = this.catalogInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+
+    const probe = listGenerateContentModels(apiKey, options)
+      .then((ids) => {
+        const set: ReadonlySet<string> = new Set(ids);
+        this.catalogs.set(cacheKey, { ids: set, fetchedAt: this.now() });
+        return set;
+      })
+      // Never throw: an unreachable catalog degrades to "skip nothing".
+      .catch(() => null)
+      .finally(() => {
+        this.catalogInFlight.delete(cacheKey);
+      });
+
+    this.catalogInFlight.set(cacheKey, probe);
+    return probe;
+  }
+
+  /** The cached catalog for a key, without any I/O. `null` when unknown. */
+  cachedCatalog(cacheKey: string): ReadonlySet<string> | null {
+    const cached = this.catalogs.get(cacheKey);
+    if (!cached) return null;
+    if (this.now() - cached.fetchedAt >= this.catalogTtlMs) {
+      this.catalogs.delete(cacheKey);
+      return null;
+    }
+    return cached.ids;
+  }
+
+  /**
+   * Treat the chain as freshly verified, with nothing marked dead, and the
+   * per-key catalogs as known.
    *
    * For callers that already know the verdict (a boot check that ran before
    * traffic arrived) and for tests, where re-issuing a ListModels call on every
@@ -411,12 +535,18 @@ export class GeminiModelHealthMonitor {
     this.inFlight = Promise.resolve(null);
     this.checkedAt = this.now();
     this.unavailable = new Set();
+    this.catalogVerifiedAt = this.now();
+    this.catalogs = new Map();
+    this.catalogInFlight = new Map();
   }
 
-  /** Forget the cached verdict. Used by tests and by a config reload. */
+  /** Forget the cached verdict and every per-key catalog. Used by tests. */
   reset(): void {
     this.inFlight = null;
     this.checkedAt = Number.NEGATIVE_INFINITY;
     this.unavailable = new Set();
+    this.catalogVerifiedAt = Number.NEGATIVE_INFINITY;
+    this.catalogs = new Map();
+    this.catalogInFlight = new Map();
   }
 }

@@ -30,23 +30,15 @@ import {
   formatGeminiHealthReport,
   resolveGeminiModels,
 } from "../src/lib/assistant/gemini-models.ts";
+import { resolveGeminiKeyPool } from "../src/lib/assistant/providers.ts";
 
 /**
- * Collect the Gemini key pool the same way the route does: every variable
- * whose name starts with `GEMINI_API_KEY`, comma-separated values included.
+ * Collect the Gemini key pool the same way the route does — from the ONE
+ * shared resolver, so the CLI probes the key the pipeline would actually use
+ * first (`GEMINI_API_KEY_4` when it is configured).
  */
 function resolveGeminiApiKeys() {
-  const prefix = "GEMINI_API_KEY";
-  return [
-    ...new Set(
-      Object.entries(process.env)
-        .filter(([name]) => name.startsWith(prefix))
-        .sort(([a], [b]) => a.localeCompare(b))
-        .flatMap(([, value]) => value?.split(",") ?? [])
-        .map((key) => key.trim())
-        .filter(Boolean),
-    ),
-  ];
+  return resolveGeminiKeyPool().map((entry) => entry.key);
 }
 
 const asJson = process.argv.includes("--json");
@@ -60,7 +52,7 @@ if (keys.length === 0) {
     console.log(JSON.stringify({ ok: false, error: message, chain }, null, 2));
   } else {
     console.error(`✖ ${message}`);
-    console.error("  Set GEMINI_API_KEY (or GEMINI_API_KEYS / GEMINI_API_KEY_N) and retry.");
+    console.error("  Set GEMINI_API_KEY_4 / GEMINI_API_KEY (or the numbered variants) and retry.");
   }
   process.exit(1);
 }

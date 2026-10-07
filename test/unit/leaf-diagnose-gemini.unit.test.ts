@@ -127,7 +127,7 @@ async function inMockTime<T>(t: TestContext, work: Promise<T>, clock: { now: num
 /*  1 · The SAME key list and model chain as the chat (read-only)      */
 /* ------------------------------------------------------------------ */
 
-test("key pool: same sources and order as the chat — base, numbered ascending, then the comma pool", () => {
+test("key pool: the chat's rotation order — GEMINI_API_KEY_4 first, then base, numbered ascending, then the comma pool", () => {
   const env = Object.freeze({
     GEMINI_API_KEYS: " pool-1 , pool-2 ,, pool-1 ",
     GEMINI_API_KEY_10: "ten",
@@ -140,8 +140,11 @@ test("key pool: same sources and order as the chat — base, numbered ascending,
     UNRELATED_GEMINI_API_KEY: "ignored",
     GEMINI_MODEL: "ignored-too",
   });
+  // GEMINI_API_KEY_4 leads by rule (it usually belongs to a different Google
+  // project, hence a separate daily quota), so its value — a duplicate of
+  // _2's — is kept once, at ITS first position, and _2 is then skipped.
   // A frozen env also proves resolution never writes to the environment.
-  assert.deepEqual(resolveLeafGeminiKeys(env), ["base", "two", "three", "ten", "pool-1", "pool-2"]);
+  assert.deepEqual(resolveLeafGeminiKeys(env), ["two", "base", "three", "ten", "pool-1", "pool-2"]);
 });
 
 test("key pool: nothing configured is an empty pool", () => {
