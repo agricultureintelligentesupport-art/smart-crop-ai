@@ -2,6 +2,7 @@
 
 import { motion, useReducedMotion } from "framer-motion";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { parseTokens, type InlineToken } from "@/lib/assistant/markdown-inline";
 
 /**
  * Dependency-free Markdown renderer with a polished, professional
@@ -15,24 +16,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
  * Full support for `prefers-reduced-motion` (instant display with subtle fade)
  * and automatic scroll tracking to eliminate layout jank.
  */
-
-interface InlineToken {
-  kind: "bold" | "code" | "plain";
-  text: string;
-}
-
-function parseTokens(raw: string): InlineToken[] {
-  const parts = raw.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
-  return parts.map((part) => {
-    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      return { kind: "bold", text: part.slice(2, -2) };
-    }
-    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
-      return { kind: "code", text: part.slice(1, -1) };
-    }
-    return { kind: "plain", text: part };
-  });
-}
 
 function renderTokens(
   tokens: InlineToken[],
@@ -71,6 +54,13 @@ function renderTokens(
           {visibleText}
           {cursor}
         </code>
+      );
+    } else if (token.kind === "italic") {
+      nodes.push(
+        <em key={`${keyPrefix}-i${i}`} className="italic text-emerald-900">
+          {visibleText}
+          {cursor}
+        </em>
       );
     } else {
       nodes.push(

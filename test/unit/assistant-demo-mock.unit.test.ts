@@ -139,14 +139,19 @@ test("photos: 1st = Leaf Scorch 88 %, 2nd = Dieback 85 %, badges and chips intac
   const first = (await getDemoMockResponse([user("شخّص هذه الورقة", IMAGE_B64)])) ?? "";
   assert.ok(first.startsWith("[ 🔍 لم يُعثر على ورقة واحدة — شُخِّصت الصورة كاملة. ]"));
   // `### ` heading, `**bold**` and the inline-code chip the UI colours.
-  assert.ok(first.includes("### **احتراق حواف الأوراق (Leaf Scorch)**"));
+  assert.ok(first.includes("### **احتراق حواف الأوراق والجفاف الأنسجي (Leaf Scorch / Tip Burn)**"));
   assert.ok(first.includes("**نسبة الثقة:** `88% · ثقة مرتفعة`"));
+  // Agro-depth: physiology, dose, timing, alternatives and the field note.
+  assert.ok(first.includes("(Chlorosis)"));
+  assert.ok(first.includes("(Salinity Stress)"));
   assert.ok(first.includes("**خطة علاج ووقاية:**"));
-  assert.ok(first.includes("`1` **اسم المنتج:** أكسي كلورور النحاس 50%"));
-  assert.ok(first.includes("• **الجرعة:** 1.5 غرام لكل لتر ماء"));
-  assert.ok(first.includes("• **الطريقة:** رش ورقي على الأجزاء المتضررة في الصباح الباكر"));
-  assert.ok(first.includes("• **البدائل:** إذا لم يتوفر، استخدم مبيد مانكوزيب 80% كبديل وقائي"));
-  assert.ok(first.includes("`1` **الوقاية:**"));
+  assert.ok(first.includes("`1` **اسم المنتج العلاجي:** أكسي كلورور النحاس 50% + سماد ورقي غني بالبوتاسيوم"));
+  assert.ok(first.includes("• **الجرعة الموصى بها:** 200 غرام من أكسي كلورور النحاس + 150 مل من السماد الورقي"));
+  assert.ok(first.includes("• **طريقة التطبيق:** رش ورقي متجانس يغطي كامل المجموع الخضري في الصباح الباكر"));
+  assert.ok(first.includes("• **البدائل المتاحة محلياً:** استخدام مركب **مانكوزيب 80%** (Mancozeb)"));
+  assert.ok(first.includes("• **ملاحظات ميدانية:** يجب تعديل حموضة مياه الرش (pH) لتكون بين 6.0 و6.5"));
+  assert.ok(first.includes("`1` **البروتوكول الوقائي:**"));
+  assert.ok(first.includes("• ضبط جدول السقي بنظام التقطير (Goutte-à-goutte) في الصباح الباكر"));
 
   // Second photo: the first scripted answer rides along as history — the UI
   // never resends the base64 payloads, so the marker in the assistant turn is
@@ -156,12 +161,18 @@ test("photos: 1st = Leaf Scorch 88 %, 2nd = Dieback 85 %, badges and chips intac
     { role: "assistant", content: first },
     user("وهذه الصورة الثانية؟", "c2Vjb25k"),
   ])) ?? "";
-  assert.ok(second.includes("### **تيبس الأغصان والموت الخلفي (Dieback)**"));
+  assert.ok(second.includes("### **تيبس الأغصان والموت الخلفي الفطري (Dieback / Botryosphaeria Canker)**"));
   assert.ok(second.includes("**نسبة الثقة:** `85% · ثقة مرتفعة`"));
-  assert.ok(second.includes("`1` **اسم المنتج:** مانكوزيب 80%"));
-  assert.ok(second.includes("• **الطريقة:** قص الأغصان الميتة حتى الخشب الحي"));
-  assert.ok(second.includes("• **ملاحظة:** حرق الأغصان المقصوصة فوراً وتطهير أدوات التقليم بالكحول"));
-  assert.ok(second.includes("`1` **الوقاية:**"));
+  assert.ok(second.includes("(Retrograde Drying)"));
+  assert.ok(second.includes("(Xylem Vessels)"));
+  assert.ok(second.includes("*Botryosphaeriaceae*"));
+  assert.ok(second.includes("`1` **اسم المنتج العلاجي:** مبيد فطر وعائي مركّب: **مانكوزيب 80%** (Mancozeb) + **تيفانات الميثيل 70%** (Thiophanate-Methyl)"));
+  assert.ok(second.includes("• **الجرعة الموصى بها:** 150 غرام من المانكوزيب + 100 غرام من تيفانات الميثيل"));
+  assert.ok(second.includes("• **طريقة التطبيق:** أولاً، إجراء تقليم صحي صارم بقص الأجزاء الميتة مع زيادة 3 إلى 5 سم"));
+  assert.ok(second.includes("• **البدائل المتاحة محلياً:** استخدام **كلوروثالونيل 50%** أو **هيكساكونازول 5%**"));
+  assert.ok(second.includes("• **ملاحظات ميدانية:** يجب تطهير أدوات التقليم (المقلم/المنشار)"));
+  assert.ok(second.includes("`1` **البروتوكول الوقائي:**"));
+  assert.ok(second.includes("• جمع كافة الأغصان المقصوصة والمصابة وحرقها فوراً خارج الضيعة"));
 
   // A legacy `imageUrl` turn counts as a photo too.
   assert.ok(
@@ -302,7 +313,7 @@ test("route: with the mock on, a photo is 200 hybrid (no provider, no quota)", a
   const payload = await response.json();
   assert.equal(payload.source, "hybrid");
   assert.equal(payload.diagnosis, null);
-  assert.match(payload.reply, /احتراق حواف الأوراق \(Leaf Scorch\)/);
+  assert.match(payload.reply, /احتراق حواف الأوراق والجفاف الأنسجي \(Leaf Scorch \/ Tip Burn\)/);
   // The 5 s vision beat survives the route (build + JSON round-trip included).
   assert.ok(elapsed >= SIMULATED_IMAGE_DELAY_MS, `photo reply came back in ${elapsed} ms`);
 });
