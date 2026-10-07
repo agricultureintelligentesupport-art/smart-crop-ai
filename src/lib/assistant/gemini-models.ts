@@ -98,7 +98,7 @@ export function resolveGeminiModels(
 
 const LIST_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
-/** ListModels is a cheap metadata call; it must never eat a request budget. */
+/** ListModels has a separate, short timeout and is never part of generation. */
 const LIST_MODELS_TIMEOUT_MS = 6_000;
 
 /** Model ids as returned by `GET /v1beta/models`. */
@@ -325,7 +325,7 @@ export function formatGeminiHealthReport(
 }
 
 /* ------------------------------------------------------------------ */
-/*  The runtime monitor                                                */
+/*  The diagnostic monitor                                            */
 /* ------------------------------------------------------------------ */
 
 /** How long a verified chain is trusted before re-checking (6 hours). */
@@ -333,12 +333,14 @@ export const GEMINI_HEALTH_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Single-flight, TTL-bounded wrapper around {@link checkGeminiModelHealth} for
- * the request path.
+ * diagnostics that own their API-key lifecycle (for example, a startup or
+ * operator health check).
  *
- * It exists so a Google deprecation surfaces as ONE loud log line — and so the
- * dead ids stop costing a round-trip per request — instead of a 404 buried in
- * the per-request warnings. Deliberately non-throwing: a diagnostic must never
- * be able to fail a request.
+ * `/api/assistant` deliberately does not invoke this monitor: a ListModels
+ * probe inside a user request would consume a Gemini key and violate that
+ * request's no-repeat generation-key contract. The assistant instead walks
+ * the generation chain using a fresh key for each call. Diagnostics remain
+ * non-throwing so they can never fail an assistant request.
  *
  * `now` and `fetchModels` are injectable so the caching behaviour is testable
  * without waiting six hours.

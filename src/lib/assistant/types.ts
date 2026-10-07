@@ -151,23 +151,23 @@ export type AssistantSource =
 export interface AssistantResponseBody {
   /** Markdown answer in Arabic (or French when requested). */
   reply: string;
-  diagnosis?: AssistantDiagnosis | null;
+  diagnosis: AssistantDiagnosis | null;
   source: AssistantSource;
-  /** Step 0 detection & cropping outcome (image requests only). */
-  preprocessing?: AssistantPreprocessing | null;
+  /** Step 0 detection & cropping outcome (null for text-only requests). */
+  preprocessing: AssistantPreprocessing | null;
   /**
    * Which image model produced `diagnosis` — `"gemini"` (primary) or
    * `"mobilenet"` (fallback). `null` for text-only requests and for the
    * Step 4 final fallback where no image model could answer. Carried for
    * debugging and analytics; the user only ever sees `reply`.
    */
-  analysisSource?: AnalysisSource | null;
+  analysisSource: AnalysisSource | null;
   /**
    * Which text model narrated the analysis — `"huggingface"` (primary) or
    * `"gemini_fallback"` (Step 3). `null` when no text model ran, i.e. the
    * built-in direct formatter answered or Step 4 replied on its own.
    */
-  textSource?: TextSource | null;
-  /** Non-fatal pipeline notes (e.g. "image analysis fell back to MobileNetV2"). */
-  warnings?: string[];
+  textSource: TextSource | null;
+  /** Non-fatal pipeline notes (empty when every upstream stage was available). */
+  warnings: string[];
 }

@@ -46,8 +46,9 @@
  *   STEP 3 — TEXT FALLBACK (Google Gemini, FORMAT-ONLY)
  *     Runs ONLY after Step 2 failed. The same Gemini model chain and key pool
  *     (`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered `GEMINI_API_KEY_N`,
- *     rotated on 429 / RESOURCE_EXHAUSTED / quota; one shared 18 s
- *     `AbortController` for the whole chain) turn the SAME `AnalysisData` into
+ *     randomly selected without replacement for the entire request; each
+ *     Gemini API call has a 10 s AbortController timeout and the shared
+ *     Gemini phase has a 50 s hard deadline) turn the SAME `AnalysisData` into
  *     the same kind of explanation. NO image is attached here: Gemini must
  *     format the data, not re-analyse the photo. This branch also covers the
  *     edge case where the analysis came from MobileNetV2 and Step 2 then
@@ -80,7 +81,7 @@
  * Gemini credentials — every environment variable starting with
  * `GEMINI_API_KEY` (`GEMINI_API_KEY`, the `GEMINI_API_KEYS` comma-separated
  * pool, and numbered `GEMINI_API_KEY_N` variants; combined, trimmed,
- * deduplicated, rotation-ordered) — and the Hugging Face secret
+ * deduplicated, randomized without replacement per request) — and the Hugging Face secret
  * (`HUGGINGFACE_API_KEY`, with Hugging Face's conventional `HF_TOKEN` accepted
  * as an alias) are read from `process.env` on the server only. They are never
  * shipped to the browser and never echoed back in a response body.
@@ -104,11 +105,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 import sharp from "sharp";
 import {
-  GeminiModelHealthMonitor,
-  formatGeminiHealthReport,
   resolveGeminiModels as resolveGeminiChain,
   type GeminiModel,
 } from "@/lib/assistant/gemini-models";
+import {
+  createGeminiKeyManager,
+  resolveGeminiApiKeys,
+  type GeminiKeyManager,
+} from "@/lib/assistant/gemini-key-manager";
 import {
   ANALYSIS_RESPONSE_SCHEMA,
   SEVERITY_AR,
@@ -419,71 +423,117 @@ async function runLeafDetectionStage(
 /**
  * The ordered Gemini chain — used for BOTH the Step 1 image analysis and the
  * Step 3 text fallback — is resolved per request from the shared
- * `@/lib/assistant/gemini-models` module, so the route, the
- * `tools/check-gemini-models.mjs` CLI and the health check below can never
- * drift apart. That drift is the failure mode that let `gemini-3.6` (a model
- * id Google never shipped) sit in production until every request 404'd and
- * every photo silently degraded to MobileNetV2.
+ * `@/lib/assistant/gemini-models` module, so the route and the
+ * `tools/check-gemini-models.mjs` CLI share one source of truth. Runtime
+ * model fallbacks handle catalog changes through generation errors without
+ * spending a request key on a separate ListModels probe.
  *
  * The default is `gemini-3.8-flash`; `GEMINI_MODEL` pins a different primary
  * and ids the health check proved unavailable are dropped from the chain, so a
  * retired id costs no round-trip.
  */
 function resolveGeminiModels(): GeminiModel[] {
-  return resolveGeminiChain(process.env.GEMINI_MODEL, geminiModelHealth.unavailableModels);
+  return resolveGeminiChain(process.env.GEMINI_MODEL);
 }
 
 
-/**
- * Hard timeout for the WHOLE Gemini model chain: 18 s. A full Arabic
- * ~200-word answer (system prompt + profile context + vision verdict in, up
- * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
- * Flash model; the previous 9 s window aborted those healthy generations
- * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
- * still leaves the built-in formatter comfortably
- * inside {@link maxDuration}. Enforced with an explicit `AbortController`
- * (not `AbortSignal.timeout`) so the abort reason and the timer are both
- * inspectable/clearable per request; a fast 404 on an earlier id hands the
- * remaining budget to the next id.
- */
-const GEMINI_TIMEOUT_MS = 18_000;
+/** Exact timeout for every individual Gemini generateContent request. */
+const GEMINI_ATTEMPT_TIMEOUT_MS = 10_000;
+/** Hard wall-clock limit shared by every Gemini stage in one assistant request. */
+const GEMINI_MASTER_TIMEOUT_MS = 50_000;
+/** Stop upstream work one second before Vercel's 60-second function deadline. */
+const ASSISTANT_RESPONSE_DEADLINE_MS = 59_000;
+/** Reserve text-generation time after MobileNet when the Gemini breaker fires. */
+const FALLBACK_TEXT_RESERVE_MS = 4_000;
 
 /**
  * Output cap for a Gemini call. Slightly above {@link MAX_REPLY_TOKENS} because
- * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
- * the per-generation thinking payload (`thinkingLevel: "low"` on 3.x,
- * `thinkingBudget: 0` on 2.5, none on 1.5/2.0) keeps the model in fast,
- * answer-first mode so the 18 s budget is spent on the reply.
+ * Gemini counts internal reasoning tokens against `maxOutputTokens`.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
+/** A single request-level deadline; all Gemini uses share its abort signal. */
+class GeminiPhaseBudget {
+  readonly deadlineAt: number;
+  readonly signal: AbortSignal;
+  private readonly controller = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+
+  constructor(deadlineAt: number) {
+    this.deadlineAt = deadlineAt;
+    this.signal = this.controller.signal;
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    this.timer = setTimeout(() => {
+      this.controller.abort(new DOMException(
+        `Gemini phase exceeded ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+        "TimeoutError",
+      ));
+    }, remainingMs);
+  }
+
+  get expired(): boolean {
+    return this.signal.aborted || Date.now() >= this.deadlineAt;
+  }
+
+  remainingMs(): number {
+    return Math.max(0, this.deadlineAt - Date.now());
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+  }
+}
+
+interface AssistantRequestRuntime {
+  /** Primary work, including Gemini, must stop at this 50-second boundary. */
+  primaryDeadlineAt: number;
+  /** Leave one second for serialization and the Vercel response hand-off. */
+  responseDeadlineAt: number;
+  geminiBudget: GeminiPhaseBudget | null;
+}
+
+/** Bound any non-Gemini stage by its shared absolute deadline. */
+function timeoutWithinDeadline(deadlineAt: number, capMs: number, reserveMs = 0): number {
+  return Math.max(0, Math.min(capMs, deadlineAt - Date.now() - reserveMs));
+}
+
 /**
- * Resolve every configured Gemini credential at request time. Every
- * environment variable whose name starts with `GEMINI_API_KEY` participates,
- * so deployments can add `GEMINI_API_KEY_3`, `GEMINI_API_KEY_4`, and so on
- * without another code change. Each value may itself be a comma-separated
- * pool. Numeric variants are sorted naturally after the base variable so
- * rotation remains deterministic (`GEMINI_API_KEY` → `_2` → `_3` …).
- * Whitespace-only entries are ignored and duplicate credentials are removed.
+ * Run a complete upstream operation (including response-body parsing) under
+ * an AbortController deadline. The abort race also releases the orchestrator
+ * promptly if an implementation or test double ignores the signal.
  */
-function resolveGeminiApiKeys(): string[] {
-  const prefix = "GEMINI_API_KEY";
-  const configured = Object.entries(process.env)
-    .filter(([name, value]) => name.startsWith(prefix) && typeof value === "string")
-    .sort(([first], [second]) => {
-      const order = (name: string): [number, string] => {
-        if (name === prefix) return [0, name];
-        const suffix = name.slice(`${prefix}_`.length);
-        return [/^\d+$/.test(suffix) ? Number(suffix) : Number.POSITIVE_INFINITY, name];
-      };
+function withTimeout<T>(
+  timeoutMs: number,
+  operation: (signal: AbortSignal) => Promise<T>,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  if (timeoutMs <= 0) {
+    return Promise.reject(new DOMException("The upstream deadline has expired.", "TimeoutError"));
+  }
 
-      const [firstRank, firstName] = order(first);
-      const [secondRank, secondName] = order(second);
-      return firstRank - secondRank || firstName.localeCompare(secondName);
-    })
-    .flatMap(([, value]) => value?.split(",") ?? []);
+  const controller = new AbortController();
+  const timeoutReason = new DOMException(`Timed out after ${timeoutMs} ms`, "TimeoutError");
+  let rejectOnAbort: (() => void) | undefined;
+  const abortPromise = new Promise<T>((_resolve, reject) => {
+    rejectOnAbort = () => reject(controller.signal.reason ?? new DOMException("Aborted", "AbortError"));
+    if (controller.signal.aborted) rejectOnAbort();
+    else controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+  });
 
-  return [...new Set(configured.map((key) => key.trim()).filter(Boolean))];
+  const onParentAbort = () => {
+    controller.abort(parentSignal?.reason ?? new DOMException("Parent operation aborted", "AbortError"));
+  };
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+
+  const timer = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
+  const work = Promise.resolve().then(() => operation(controller.signal));
+
+  return Promise.race([work, abortPromise]).finally(() => {
+    clearTimeout(timer);
+    if (rejectOnAbort) controller.signal.removeEventListener("abort", rejectOnAbort);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+  });
 }
 
 /* ---- Hugging Face — Step 1 (fallback vision) + Step 2 (text) ------ */
@@ -557,12 +607,25 @@ function resolveVisionModels(): string[] {
 /*  Small helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-function timedFetch(url: string, init: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
-}
-
 function bad(message: string, status = 400): NextResponse {
   return NextResponse.json({ error: message }, { status });
+}
+
+type AssistantResponseInput = Pick<AssistantResponseBody, "reply" | "source"> &
+  Partial<Omit<AssistantResponseBody, "reply" | "source">>;
+
+/** Emit one stable client contract regardless of which pipeline stage answered. */
+function assistantJson(payload: AssistantResponseInput): NextResponse {
+  const normalized: AssistantResponseBody = {
+    reply: payload.reply,
+    diagnosis: payload.diagnosis ?? null,
+    source: payload.source,
+    preprocessing: payload.preprocessing ?? null,
+    analysisSource: payload.analysisSource ?? null,
+    textSource: payload.textSource ?? null,
+    warnings: payload.warnings ?? [],
+  };
+  return NextResponse.json(normalized);
 }
 
 /**
@@ -644,8 +707,8 @@ interface MobileNetClassification {
  * - Sends the raw image bytes (the Step 0 crop when available) to the model.
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message.
- * - Per-model timeout: UPSTREAM_TIMEOUT_MS (25 s) — long enough for a cold
- *   serverless start under `X-Wait-For-Model: true`.
+ * - Per-model timeout is bounded by the assistant response deadline, reserving
+ *   time for the Hugging Face text formatter when the hard Gemini breaker fires.
  * - Throws an Error prefixed with "HF Error:" on any failure so the caller can
  *   degrade to the STEP 4 final fallback.
  */
@@ -653,97 +716,115 @@ async function classifyPlantImageStrict(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
+  deadlineAt: number,
+  reserveMs = 0,
 ): Promise<MobileNetClassification> {
   const body = Buffer.from(imageBase64, "base64");
-
   let lastErrorDetail: string | null = null;
   let loadingEstimate: number | null = null;
 
   const models = resolveVisionModels();
 
   for (const model of models) {
-    const timeoutMs = UPSTREAM_TIMEOUT_MS;
+    // Preserve time for the Hugging Face text stage when this is the forced
+    // fallback after Gemini's hard deadline. The timer covers fetch AND body
+    // parsing, not only the response headers.
+    const timeoutMs = timeoutWithinDeadline(deadlineAt, UPSTREAM_TIMEOUT_MS, reserveMs);
+    if (timeoutMs <= 0) {
+      lastErrorDetail = "assistant response deadline reached before MobileNetV2 could run";
+      break;
+    }
+
     try {
-      const res = await fetch(HF_ENDPOINT(model), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": mimeType || "application/octet-stream",
-          // Ask the HF router to wait for the model instead of instantly 503ing.
-          "X-Wait-For-Model": "true",
-        },
-        body,
-        signal: AbortSignal.timeout(timeoutMs),
+      const outcome = await withTimeout(timeoutMs, async (signal) => {
+        const res = await fetch(HF_ENDPOINT(model), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": mimeType || "application/octet-stream",
+            // Ask the HF router to wait for the model instead of instantly 503ing.
+            "X-Wait-For-Model": "true",
+          },
+          body,
+          signal,
+        });
+
+        // --- Model loading (503 / 530) -----------------------------------
+        if (res.status === 503 || res.status === 530) {
+          let estimated: number | null = null;
+          let errText: string | null = null;
+          try {
+            const payload = (await res.json()) as HfLoadingPayload;
+            if (typeof payload?.estimated_time === "number") estimated = payload.estimated_time;
+            if (typeof payload?.error === "string") errText = payload.error;
+          } catch {
+            // ignore JSON parse failure, fall back to status text
+          }
+          const detail = errText
+            ? `${errText}${estimated !== null ? ` — estimated_time: ${estimated}s` : ""}`
+            : `Model ${model} is loading (HTTP ${res.status})${estimated !== null ? ` — retry after ~${Math.ceil(estimated)}s` : ""}`;
+          return { kind: "retry" as const, detail, loadingEstimate: estimated };
+        }
+
+        if (!res.ok) {
+          let bodyText = "";
+          try {
+            bodyText = await res.text();
+          } catch {
+            bodyText = res.statusText;
+          }
+          let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+          try {
+            const j = JSON.parse(bodyText) as { error?: string };
+            if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
+          } catch {
+            // keep raw detail
+          }
+          return { kind: "retry" as const, detail: `${model}: ${detail}`, loadingEstimate: null };
+        }
+
+        const json: unknown = await res.json();
+        if (!isHfClassificationArray(json)) {
+          return {
+            kind: "retry" as const,
+            detail: `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`,
+            loadingEstimate: null,
+          };
+        }
+
+        const ranked = [...json].sort((a, b) => b.score - a.score);
+        const top = ranked[0];
+        const candidates: DiagnosisCandidate[] = ranked
+          .slice(0, 3)
+          .map(({ label, score }) => ({ label, score }));
+        return {
+          kind: "success" as const,
+          classification: {
+            rawLabel: top.label,
+            score: top.score,
+            model,
+            candidates,
+          },
+        };
       });
 
-      // --- Model loading (503 / 530) -------------------------------------------------
-      if (res.status === 503 || res.status === 530) {
-        let estimated: number | null = null;
-        let errText: string | null = null;
-        try {
-          const payload = (await res.json()) as HfLoadingPayload;
-          if (typeof payload?.estimated_time === "number") estimated = payload.estimated_time;
-          if (typeof payload?.error === "string") errText = payload.error;
-        } catch {
-          // ignore json parse failure, fall back to status text
-        }
-        if (estimated !== null) loadingEstimate = estimated;
-        const detail = errText
-          ? `${errText}${estimated !== null ? ` — estimated_time: ${estimated}s` : ""}`
-          : `Model ${model} is loading (HTTP ${res.status})${estimated !== null ? ` — retry after ~${Math.ceil(estimated)}s` : ""}`;
-        lastErrorDetail = detail;
-        console.warn(`[Step 1: HF Loading] ${model} → ${detail}`);
-        // Try next model (env override chain) before giving up — it may be warm.
-        continue;
+      if (outcome.kind === "success") {
+        const { rawLabel, score, candidates } = outcome.classification;
+        console.log(
+          `[Step 1: HF Success] label=${rawLabel} confidence=${Math.round(score * 100)}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
+        );
+        return outcome.classification;
       }
 
-      if (!res.ok) {
-        let bodyText = "";
-        try {
-          bodyText = await res.text();
-        } catch {
-          bodyText = res.statusText;
-        }
-        // Try to surface JSON error message if present
-        let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
-        try {
-          const j = JSON.parse(bodyText) as { error?: string };
-          if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
-        } catch {
-          // keep raw detail
-        }
-        lastErrorDetail = `${model}: ${detail}`;
-        console.warn(`[Step 1: HF Warning] ${model} → ${detail}`);
-        continue;
+      lastErrorDetail = outcome.detail;
+      if (outcome.loadingEstimate !== null) loadingEstimate = outcome.loadingEstimate;
+      if (outcome.loadingEstimate !== null || /loading/i.test(outcome.detail)) {
+        console.warn(`[Step 1: HF Loading] ${model} → ${outcome.detail}`);
+      } else {
+        console.warn(`[Step 1: HF Warning] ${outcome.detail}`);
       }
-
-      const json: unknown = await res.json();
-
-      // HF should return an array of { label, score }. Validate and parse.
-      if (!isHfClassificationArray(json)) {
-        const detail = `unexpected payload shape from ${model}: ${JSON.stringify(json).slice(0, 500)}`;
-        lastErrorDetail = detail;
-        console.warn(`[Step 1: HF Warning] ${detail}`);
-        continue;
-      }
-
-      // Properly parse returned array: sort descending and extract primary class + confidence.
-      const ranked = [...json].sort((a, b) => b.score - a.score);
-      const top = ranked[0];
-      const pct = Math.round(top.score * 100);
-      const candidates: DiagnosisCandidate[] = ranked
-        .slice(0, 3)
-        .map(({ label, score }) => ({ label, score }));
-
-      console.log(
-        `[Step 1: HF Success] label=${top.label} confidence=${pct}% model=${model} timeout=${timeoutMs}ms candidates=${candidates.length}`,
-      );
-      return { rawLabel: top.label, score: top.score, model, candidates };
     } catch (error) {
-      const detail =
-        error instanceof Error
-          ? `${error.name}: ${error.message}`
-          : String(error);
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
       if (/timeout|abort|TimeoutError|AbortError/i.test(detail) || detail.includes("timed out")) {
         console.warn(`[Step 1: HF Timeout] ${model} timed out after ${timeoutMs}ms`);
       } else {
@@ -753,7 +834,6 @@ async function classifyPlantImageStrict(
     }
   }
 
-  // All models exhausted — surface a clear HF Error.
   if (loadingEstimate !== null || (lastErrorDetail && /loading/i.test(lastErrorDetail))) {
     const msg = lastErrorDetail ?? `Model is loading, please retry after ~${Math.ceil(loadingEstimate ?? 20)}s`;
     throw new Error(
@@ -814,7 +894,8 @@ function isStructuredOutputRejection(error: unknown): boolean {
 
 async function analyzeImageWithGemini(
   image: AssistantImagePayload,
-  geminiApiKeys: readonly string[],
+  keyManager: GeminiKeyManager,
+  budget: GeminiPhaseBudget,
   lang: "ar" | "fr",
 ): Promise<AnalysisResult> {
   const userContent =
@@ -832,7 +913,8 @@ async function analyzeImageWithGemini(
         image,
         extraConfig,
       },
-      geminiApiKeys,
+      keyManager,
+      budget,
     );
 
   let result: GeminiResult;
@@ -916,16 +998,34 @@ async function runImageAnalysisStage(options: {
   geminiImage: AssistantImagePayload;
   mobilenetImage: AssistantImagePayload;
   geminiApiKeys: readonly string[];
+  geminiKeyManager: GeminiKeyManager;
+  geminiBudget: GeminiPhaseBudget;
+  fallbackDeadlineAt: number;
   huggingfaceKey: string | null;
   lang: "ar" | "fr";
   warnings: string[];
 }): Promise<AnalysisResult | null> {
-  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings } = options;
+  const {
+    geminiImage,
+    mobilenetImage,
+    geminiApiKeys,
+    geminiKeyManager,
+    geminiBudget,
+    fallbackDeadlineAt,
+    huggingfaceKey,
+    lang,
+    warnings,
+  } = options;
 
   // ---- PRIMARY: Gemini -------------------------------------------------
   if (geminiApiKeys.length > 0) {
     try {
-      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang);
+      return await analyzeImageWithGemini(
+        geminiImage,
+        geminiKeyManager,
+        geminiBudget,
+        lang,
+      );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       console.warn(`[Step 1: Gemini Analysis Failed → MobileNetV2] ${detail}`);
@@ -951,6 +1051,8 @@ async function runImageAnalysisStage(options: {
       mobilenetImage.data,
       mobilenetImage.mimeType,
       huggingfaceKey,
+      fallbackDeadlineAt,
+      FALLBACK_TEXT_RESERVE_MS,
     );
     const result = analysisFromMobileNet(
       classification.rawLabel,
@@ -1195,10 +1297,17 @@ interface GeminiPrompt {
 class GeminiError extends Error {
   /** Upstream status when the failure came back as an HTTP response. */
   status: number | undefined;
-  constructor(message: string, status?: number) {
+  /** Deadline type distinguishes a key retry from the hard phase breaker. */
+  failureKind: "attempt-timeout" | "master-timeout" | null;
+  constructor(
+    message: string,
+    status?: number,
+    failureKind: "attempt-timeout" | "master-timeout" | null = null,
+  ) {
     super(message);
     this.name = "GeminiError";
     this.status = status;
+    this.failureKind = failureKind;
   }
 }
 
@@ -1274,97 +1383,111 @@ function isGeminiModelAvailabilityError(error: unknown): boolean {
 async function generateWithGeminiModel(
   model: GeminiModel,
   prompt: GeminiPrompt,
-  signal: AbortSignal,
+  budget: GeminiPhaseBudget,
   apiKey: string,
 ): Promise<string> {
+  if (budget.expired) {
+    throw new GeminiError(
+      `Gemini master timeout after ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+      undefined,
+      "master-timeout",
+    );
+  }
+
   const { systemInstruction, userContent, image, history, extraConfig } = prompt;
-  let response: Response;
   try {
-    response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal,
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents: [
-            ...(history ?? []).map((turn) => ({
-              role: turn.role === "assistant" ? "model" : "user",
-              parts: [{ text: turn.content }],
-            })),
-            {
-              role: "user",
-              parts: image
-                ? [
-                    // The photo itself. Only the Step 1 image-analysis call
-                    // ever sets this: the text stage is fed ANALYSIS_DATA and
-                    // is never given pixels to re-interpret.
-                    { inlineData: { mimeType: image.mimeType, data: image.data } },
-                    { text: userContent },
-                  ]
-                : [{ text: userContent }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.4,
-            topP: 0.9,
-            maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-            // Answer-first latency, per generation: Gemini 2.5 →
-            // thinkingBudget 0; the stable 1.5/2.0 ids (and unknown
-            // GEMINI_MODEL overrides) predate thinking and 400 on the
-            // parameter, so they get NO thinkingConfig at all.
-            ...(model.thinking ? { thinkingConfig: { ...model.thinking } } : {}),
-            // Structured-output pins (image analysis only).
-            ...(extraConfig ?? {}),
+    return await withTimeout(
+      GEMINI_ATTEMPT_TIMEOUT_MS,
+      async (signal) => {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model.id}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal,
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              contents: [
+                ...(history ?? []).map((turn) => ({
+                  role: turn.role === "assistant" ? "model" : "user",
+                  parts: [{ text: turn.content }],
+                })),
+                {
+                  role: "user",
+                  parts: image
+                    ? [
+                        // The photo itself. Only Step 1 image analysis gets pixels;
+                        // Gemini's later text-formatting stage receives data only.
+                        { inlineData: { mimeType: image.mimeType, data: image.data } },
+                        { text: userContent },
+                      ]
+                    : [{ text: userContent }],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.4,
+                topP: 0.9,
+                maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+                ...(model.thinking ? { thinkingConfig: { ...model.thinking } } : {}),
+                ...(extraConfig ?? {}),
+              },
+            }),
           },
-        }),
+        );
+
+        if (!response.ok) {
+          let bodyText = "";
+          try {
+            bodyText = await response.text();
+            // Preserve Google's exact, untruncated response in server logs.
+            console.error("[Gemini Error]", response.status, bodyText);
+          } catch {
+            bodyText = response.statusText;
+          }
+          let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
+          try {
+            const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
+            if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
+          } catch {
+            // keep the raw detail
+          }
+          throw new GeminiError(detail, response.status);
+        }
+
+        const payload = (await response.json().catch(() => null)) as GeminiPayload | null;
+        const text = geminiText(payload);
+        if (!text) {
+          const blocked = payload?.promptFeedback?.blockReason;
+          const finish = payload?.candidates?.[0]?.finishReason;
+          throw new GeminiError(
+            blocked
+              ? `no usable text — blocked by safety filters (${blocked})`
+              : `no usable text in response (finishReason: ${finish ?? "unknown"})`,
+          );
+        }
+        return text;
       },
+      budget.signal,
     );
   } catch (error) {
-    if (signal.aborted) {
+    if (budget.expired) {
       throw new GeminiError(
-        `timeout after ${GEMINI_TIMEOUT_MS} ms (AbortController fired)`,
+        `Gemini master timeout after ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+        undefined,
+        "master-timeout",
       );
     }
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    if (error instanceof GeminiError) throw error;
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new GeminiError(
+        `timeout after ${GEMINI_ATTEMPT_TIMEOUT_MS} ms (AbortController fired)`,
+        undefined,
+        "attempt-timeout",
+      );
+    }
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     throw new GeminiError(detail);
   }
-
-  if (!response.ok) {
-    let bodyText = "";
-    try {
-      // Preserve the body for the existing warning parser while logging
-      // Google's exact, untruncated response on the server.
-      const errorResponse = response.clone();
-      console.error('[Gemini Error]', response.status, await response.text());
-      bodyText = await errorResponse.text();
-    } catch {
-      bodyText = response.statusText;
-    }
-    let detail = `HTTP ${response.status}${bodyText ? ` — ${bodyText.slice(0, 400)}` : ""}`;
-    try {
-      const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
-      if (parsed?.error?.message) detail = `HTTP ${response.status} — ${parsed.error.message}`;
-    } catch {
-      // keep the raw detail
-    }
-    throw new GeminiError(detail, response.status);
-  }
-
-  const payload = (await response.json().catch(() => null)) as GeminiPayload | null;
-  const text = geminiText(payload);
-  if (!text) {
-    const blocked = payload?.promptFeedback?.blockReason;
-    const finish = payload?.candidates?.[0]?.finishReason;
-    throw new GeminiError(
-      blocked
-        ? `no usable text — blocked by safety filters (${blocked})`
-        : `no usable text in response (finishReason: ${finish ?? "unknown"})`,
-    );
-  }
-  return text;
 }
 
 /** A completed Gemini round-trip: the model id that answered, its text and any
@@ -1373,116 +1496,6 @@ interface GeminiResult {
   model: string;
   text: string;
   warnings: string[];
-}
-
-/* ---- Health check — validate the chain against ListModels ---------- */
-
-/**
- * One monitor per process: single-flight, 6-hour TTL, and the source of the
- * "these ids are dead" set that {@link resolveGeminiModels} filters the chain
- * with. Exported so tests can reset it between cases.
- */
-export const geminiModelHealth = new GeminiModelHealthMonitor();
-
-/**
- * Validate the configured Gemini chain against `GET /v1beta/models` and log a
- * one-line verdict, at most once per monitor TTL and always from the single
- * Gemini entry point — so both Gemini roles are covered by one check.
- *
- * Never throws: a ListModels outage degrades to one "could not verify" warning.
- */
-async function ensureGeminiModelHealth(
-  geminiApiKeys: readonly string[],
-): Promise<void> {
-  if (geminiApiKeys.length === 0) return;
-
-  const report = await geminiModelHealth.ensure(resolveGeminiModels(), {
-    apiKey: geminiApiKeys[0],
-  });
-  if (!report) return;
-
-  for (const line of formatGeminiHealthReport(report, resolveGeminiModels())) {
-    // A broken chain is a deployment problem, not a request problem — it must
-    // be impossible to miss in the platform logs.
-    if (line.includes("❌") || line.includes("⚠")) console.error(line);
-    else console.log(line);
-  }
-}
-
-/**
- * Run the per-request Gemini model chain ({@link resolveGeminiModels}) against
- * a single credential, starting at the shared default (`gemini-3.8-flash`, or
- * the `GEMINI_MODEL` override) and walking to the long-lived fallbacks on a
- * model-availability failure.
- *
- * The whole chain is bounded by ONE 18 s `AbortController` deadline
- * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
- * model-availability failure (404 / model-not-found / "no longer available to
- * new users" — the signature of a retired generation) walks to the next id
- * with whatever budget remains (each walk is recorded in the result's
- * `warnings` so the client still sees the degradation), while any other
- * failure — invalid/missing key (400/403), safety block, empty candidate list,
- * network error or the timeout abort — throws {@link GeminiError} immediately
- * for the outer key-rotation loop.
- * Quota and transient upstream failures (HTTP 429/500/503) are likewise
- * surfaced to that loop, which backs off and tries the next credential.
- */
-async function runGeminiChain(
-  prompt: GeminiPrompt,
-  apiKey: string,
-): Promise<GeminiResult> {
-  const controller = new AbortController();
-  // Explicit AbortController + shared deadline (rather than per-call
-  // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
-  // by the 18 s window, and the pending round-trip and timer are always
-  // cancelled/cleared.
-  const deadline = Date.now() + GEMINI_TIMEOUT_MS;
-  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-
-  // Resolve the chain once per request so a `GEMINI_MODEL` change is picked
-  // up without a restart (same convention as the Gemini key pool).
-  const models = resolveGeminiModels();
-
-  try {
-    const failures: string[] = [];
-    const warnings: string[] = [];
-    for (const [index, model] of models.entries()) {
-      // Only reachable after fast 404 walks that consumed the window — no
-      // budget left for another round-trip.
-      if (Date.now() >= deadline) break;
-
-      try {
-        const text = await generateWithGeminiModel(model, prompt, controller.signal, apiKey);
-        return { model: model.id, text, warnings };
-      } catch (error) {
-        if (!(error instanceof GeminiError)) throw error;
-        failures.push(`${model.id}: ${error.message}`);
-
-        if (!isGeminiModelAvailabilityError(error)) {
-          // Anything that isn't about model availability (bad key, quota,
-          // Google 5xx, timeout) fails the stage immediately — another id
-          // can't fix it.
-          throw error;
-        }
-
-        const next = models[index + 1];
-        if (next) {
-          warnings.push(`Gemini unavailable — ${error.message}`.slice(0, 400));
-          console.warn(`[Gemini: Model Fallback] ${error.message} — retrying with ${next.id}`);
-          continue;
-        }
-        // Availability failure on the LAST id — fall through to the summary.
-      }
-    }
-    // Every id in the chain was retired/gone (or the budget ran out) —
-    // report all of them so the operator can tell "Google retired these
-    // models" from "this key lacks access".
-    throw new GeminiError(
-      `no Gemini model could answer (tried ${models.map((m) => m.id).join(", ")}) — ${failures.join(" | ")}`,
-    );
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**
@@ -1505,75 +1518,107 @@ function isGeminiRetryableError(error: unknown): error is GeminiError {
 }
 
 /**
- * Run the Gemini model chain against each configured credential in order —
- * the multi-key rotation loop shared by both Gemini roles (Step 1 image
- * analysis and Step 3 text fallback).
- *
- * Rate-limit / quota failures (HTTP 429, RESOURCE_EXHAUSTED, quota limit —
- * see {@link isGeminiRetryableError}) and transient server failures (500,
- * 503) get a one-second backoff before the next key is tried; other Gemini
- * failures (e.g. an invalid or revoked key) also advance through the
- * remaining keys without a delay. The request retries the next key in the
- * pool until one answers successfully or ALL keys are exhausted. API keys
- * are represented only by their ordinal in logs and warnings; their values
- * never leave the server or appear in a client response.
+ * Run Gemini attempts with one fresh, randomly selected credential per
+ * generateContent call. The request-scoped manager is shared by image analysis
+ * and text formatting, and a lease is never reused across model fallbacks or
+ * stages. Availability errors advance the model chain; timeouts and other
+ * request failures immediately rotate to another untried key on the same
+ * model. Every call has an exact 10 s attempt timeout under the shared 50 s
+ * phase deadline.
  */
 async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
-  geminiApiKeys: readonly string[],
+  keyManager: GeminiKeyManager,
+  budget: GeminiPhaseBudget,
 ): Promise<GeminiResult> {
-  // Once per process (TTL-bounded): proves the configured model ids still
-  // exist BEFORE they are used, so a Google deprecation surfaces as one loud
-  // log line instead of 404-ing silently on every request.
-  await ensureGeminiModelHealth(geminiApiKeys);
-
+  const models = resolveGeminiModels();
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
+  let modelIndex = 0;
+  let selectedHere = 0;
+  let modelChainExhausted = false;
 
-  for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
-    const apiKey = geminiApiKeys[keyIndex];
+  while (
+    !budget.expired &&
+    keyManager.remainingCount > 0 &&
+    modelIndex < models.length
+  ) {
+    const lease = keyManager.next();
+    if (!lease) break;
+    selectedHere += 1;
+    const model = models[modelIndex];
+
     try {
-      const result = await runGeminiChain(prompt, apiKey);
+      const text = await generateWithGeminiModel(model, prompt, budget, lease.apiKey);
       return {
-        ...result,
-        warnings: [...rotationWarnings, ...result.warnings],
+        model: model.id,
+        text,
+        warnings: rotationWarnings,
       };
     } catch (error) {
       if (!(error instanceof GeminiError)) throw error;
-
-      const keyLabel = `key ${keyIndex + 1}/${geminiApiKeys.length}`;
-      failures.push(`${keyLabel}: ${error.message}`);
-      const nextKeyIndex = keyIndex + 1;
-      const hasNextKey = nextKeyIndex < geminiApiKeys.length;
-
-      if (isGeminiRetryableError(error) && hasNextKey) {
-        const status = error.status ?? "unknown";
-        const warning =
-          `Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
-        rotationWarnings.push(warning);
-        console.warn(
-          `[Gemini: Key Rotation] ${warning} Retrying after 1 second.`,
-        );
-        await new Promise((res) => setTimeout(res, 1000));
-      } else if (hasNextKey) {
-        // A different failure can also be isolated to one credential (for
-        // example an invalid or revoked key). Try the next configured key
-        // before allowing the request to fall through to the next stage.
-        const warning =
-          `Gemini failed on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
-        rotationWarnings.push(warning);
-        console.warn(
-          `[Gemini: Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
+      if (error.failureKind === "master-timeout" || budget.expired) {
+        throw new GeminiError(
+          `Gemini master timeout after ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+          undefined,
+          "master-timeout",
         );
       }
+
+      const keyLabel = `key ${lease.attempt}/${lease.poolSize}`;
+      failures.push(`${keyLabel} (${model.id}): ${error.message}`);
+
+      if (isGeminiModelAvailabilityError(error)) {
+        const nextModel = models[modelIndex + 1];
+        if (nextModel) {
+          modelIndex += 1;
+          rotationWarnings.push(`Gemini unavailable — ${error.message}`.slice(0, 400));
+          const nextAttempt = lease.attempt + 1;
+          console.warn(
+            `[Gemini: Model Fallback] ${error.message} — retrying with ${nextModel.id} and a fresh untried key (${nextAttempt}/${lease.poolSize}).`,
+          );
+          continue;
+        }
+
+        // The last model may be hidden from one key but visible to another.
+        // Give it the remaining distinct keys, without ever reusing this lease.
+        modelChainExhausted = true;
+      } else {
+        modelChainExhausted = false;
+      }
+
+      if (keyManager.remainingCount > 0) {
+        const nextAttempt = lease.attempt + 1;
+        const warning = isGeminiRetryableError(error)
+          ? `Gemini HTTP ${error.status ?? "unknown"} transient/quota failure on ${keyLabel} — key rotation attempt ${nextAttempt}/${lease.poolSize}.`
+          : `Gemini failed on ${keyLabel} — key rotation attempt ${nextAttempt}/${lease.poolSize}.`;
+        rotationWarnings.push(warning);
+        console.warn(
+          `[Gemini: Key Rotation] ${error.message} — immediately retrying with an untried key (${nextAttempt}/${lease.poolSize}).`,
+        );
+      }
+      // No backoff: failed/timed-out credentials hand off immediately to the
+      // next random key. The model index stays put unless that model was
+      // unavailable, and a credential is never reused for a second model.
     }
   }
 
-  throw new GeminiError(
-    `all Gemini API keys failed — ${failures.join(" | ")}`,
-  );
+  if (budget.expired) {
+    throw new GeminiError(
+      `Gemini master timeout after ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+      undefined,
+      "master-timeout",
+    );
+  }
+  if (selectedHere === 0) {
+    throw new GeminiError("no untried Gemini API keys remain in this request");
+  }
+  if (modelChainExhausted) {
+    throw new GeminiError(
+      `no Gemini model could answer (tried ${models.map((model) => model.id).join(", ")}) — ${failures.join(" | ")}`,
+    );
+  }
+  throw new GeminiError(`all Gemini API keys failed — ${failures.join(" | ")}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1684,54 +1729,55 @@ async function generateWithHfLlmModel(
   model: string,
   userContent: string,
   apiKey: string,
-  history: AssistantHistoryTurn[] = [],
+  history: AssistantHistoryTurn[],
+  deadlineAt: number,
 ): Promise<string> {
-  let res: Response;
+  const timeoutMs = timeoutWithinDeadline(deadlineAt, UPSTREAM_TIMEOUT_MS);
+  if (timeoutMs <= 0) {
+    throw new HfLlmRequestError("assistant response deadline reached before the HF LLM attempt");
+  }
+
   try {
-    res = await timedFetch(HF_ROUTER_CHAT_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...history,
-          { role: "user", content: userContent },
-        ],
-        temperature: 0.4,
-        top_p: 0.9,
-        max_tokens: MAX_REPLY_TOKENS,
-        stream: false,
-      }),
+    return await withTimeout(timeoutMs, async (signal) => {
+      const res = await fetch(HF_ROUTER_CHAT_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        signal,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...history,
+            { role: "user", content: userContent },
+          ],
+          temperature: 0.4,
+          top_p: 0.9,
+          max_tokens: MAX_REPLY_TOKENS,
+          stream: false,
+        }),
+      });
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => res.statusText);
+        throw new HfLlmRequestError(describeHfHttpError(res.status, bodyText), res.status);
+      }
+
+      const json = (await res.json().catch(() => null)) as HfChatCompletion | null;
+      const text = json?.choices?.[0]?.message?.content?.trim() ?? "";
+      if (!text) {
+        throw new HfLlmEmptyResponseError(`Empty response from ${model} (no usable choice text).`);
+      }
+      return text;
     });
   } catch (error) {
-    // Network / timeout / abort errors — no HTTP status involved.
-    const detail =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    if (error instanceof HfLlmRequestError || error instanceof HfLlmEmptyResponseError) throw error;
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     throw new HfLlmRequestError(detail);
   }
-
-  if (!res.ok) {
-    let bodyText = "";
-    try {
-      bodyText = await res.text();
-    } catch {
-      bodyText = res.statusText;
-    }
-    throw new HfLlmRequestError(describeHfHttpError(res.status, bodyText), res.status);
-  }
-
-  const json = (await res.json().catch(() => null)) as HfChatCompletion | null;
-  const text = json?.choices?.[0]?.message?.content?.trim() ?? "";
-
-  if (!text) {
-    throw new HfLlmEmptyResponseError(`Empty response from ${model} (no usable choice text).`);
-  }
-  return text;
 }
 
 /**
@@ -1755,12 +1801,17 @@ async function generateWithHfLlmModel(
  * - Uses the concise professional Arabic advisor system prompt.
  * - Throws an Error prefixed with "LLM Error:" once no model can answer.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string, history: AssistantHistoryTurn[] = []): Promise<string> {
+async function askHfLlmStrict(
+  apiKey: string,
+  userContent: string,
+  history: AssistantHistoryTurn[],
+  deadlineAt: number,
+): Promise<string> {
   const failures: string[] = [];
 
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, history, deadlineAt);
 
       console.log(
         `[Step 2: HF LLM Success] model=${model} replyLength=${text.length}`,
@@ -2274,7 +2325,10 @@ function buildTextFallbackReply(message: string): string {
  *   the explicit server misconfiguration signal (503 + MISSING_KEYS, emitted
  *   only when NEITHER provider key is configured) — never an HTTP 500.
  */
-async function handleAssistant(request: NextRequest): Promise<NextResponse> {
+async function handleAssistant(
+  request: NextRequest,
+  runtime: AssistantRequestRuntime,
+): Promise<NextResponse> {
   let body: AssistantRequestBody;
   try {
     body = (await request.json()) as AssistantRequestBody;
@@ -2324,15 +2378,18 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   //                           text fallback (comma-separated keys supported).
   //   GEMINI_API_KEYS      → optional comma-separated Gemini key pool.
   //   GEMINI_API_KEY_N     → optional numbered Gemini keys (`_1`, `_2`, …).
-  //                           All sources above are combined into ONE pool
-  //                           (trimmed, deduplicated, rotation-ordered) and
-  //                           rotated on 429 / RESOURCE_EXHAUSTED / quota.
+  //                           All sources above are combined into one pool,
+  //                           randomly selected without replacement for the
+  //                           whole request (including image + text stages).
   //   HUGGINGFACE_API_KEY   → Step 1 FALLBACK image model (MobileNetV2) +
   //                           Step 2 PRIMARY text model (HF_TOKEN, Hugging
   //                           Face's own conventional variable name, is
   //                           honoured as an alias).
   const geminiApiKeys = resolveGeminiApiKeys();
   const huggingfaceKey = resolveHuggingFaceToken();
+  const geminiKeyManager = createGeminiKeyManager(geminiApiKeys);
+  const geminiBudget = new GeminiPhaseBudget(runtime.primaryDeadlineAt);
+  runtime.geminiBudget = geminiBudget;
 
   if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
@@ -2368,6 +2425,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       geminiImage: image,
       mobilenetImage: detection.image,
       geminiApiKeys,
+      geminiKeyManager,
+      geminiBudget,
+      fallbackDeadlineAt: runtime.responseDeadlineAt,
       huggingfaceKey,
       lang,
       warnings,
@@ -2384,16 +2444,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     console.log(
       `[Step 4: Final Fallback] no image model could analyse the photo — ${warnings.length} degradation(s) recorded`,
     );
-    const payload: AssistantResponseBody = {
+    const payload: AssistantResponseInput = {
       reply,
       diagnosis: null,
       source: "direct",
-      ...(preprocessing ? { preprocessing } : {}),
+      preprocessing,
       analysisSource: null,
       textSource: null,
       warnings,
     };
-    return NextResponse.json(payload);
+    return assistantJson(payload);
   }
 
   // One user turn for both text stages: user query + Firestore profile
@@ -2412,7 +2472,14 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (huggingfaceKey) {
     try {
       reply = assertUsableTextReply(
-        await askHfLlmStrict(huggingfaceKey, userContent, history),
+        await askHfLlmStrict(
+          huggingfaceKey,
+          userContent,
+          history,
+          analysis?.source === "mobilenet"
+            ? runtime.responseDeadlineAt
+            : runtime.primaryDeadlineAt,
+        ),
         analysis?.data ?? null,
       );
       textSource = "huggingface";
@@ -2440,7 +2507,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
   // 3.5-flash-lite on a retired-id 404) via the Generative Language REST API,
   // keyed with the full
-  // Gemini key pool and bounded by a shared 18 s AbortController.
+  // Request-wide no-repeat key manager and 10 s per-call / 50 s master budgets.
   // Gemini is a FORMATTER here: the prompt is ANALYSIS_DATA and NO image is
   // attached, so it cannot re-analyse the photo even by accident. This also
   // covers the edge case where the analysis came from MobileNetV2 and the HF
@@ -2453,7 +2520,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
           userContent,
           history,
         },
-        geminiApiKeys,
+        geminiKeyManager,
+        geminiBudget,
       );
       reply = assertUsableTextReply(geminiResult.text, analysis?.data ?? null);
       textSource = "gemini_fallback";
@@ -2478,16 +2546,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
     console.log(
       `[Orchestrator] analysisSource=${analysis?.source ?? "none"} textSource=${textSource}`,
     );
-    const payload: AssistantResponseBody = {
+    const payload: AssistantResponseInput = {
       reply,
       diagnosis: analysis?.diagnosis ?? null,
       source: analysis ? "hybrid" : "llm",
-      ...(preprocessing ? { preprocessing } : {}),
+      preprocessing,
       analysisSource: analysis?.source ?? null,
       textSource,
-      ...(warnings.length > 0 ? { warnings } : {}),
+      warnings,
     };
-    return NextResponse.json(payload);
+    return assistantJson(payload);
   }
 
   // ---- BUILT-IN FORMATTER (both text models down, ZERO-FAILURE) ------
@@ -2502,16 +2570,16 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
   warnings.push("Reply formatted locally — no upstream AI stage was available.");
 
-  const payload: AssistantResponseBody = {
+  const payload: AssistantResponseInput = {
     reply: directReply,
     diagnosis: analysis?.diagnosis ?? null,
     source: "direct",
-    ...(preprocessing ? { preprocessing } : {}),
+    preprocessing,
     analysisSource: analysis?.source ?? null,
     textSource: null,
     warnings,
   };
-  return NextResponse.json(payload);
+  return assistantJson(payload);
 }
 
 /**
@@ -2520,18 +2588,29 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
  * 200 basic-mode reply, so `/api/assistant` NEVER returns HTTP 500.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
+  const runtime: AssistantRequestRuntime = {
+    primaryDeadlineAt: startedAt + GEMINI_MASTER_TIMEOUT_MS,
+    responseDeadlineAt: startedAt + ASSISTANT_RESPONSE_DEADLINE_MS,
+    geminiBudget: null,
+  };
+
   try {
-    return await handleAssistant(request);
+    return await handleAssistant(request, runtime);
   } catch (error) {
     const detail =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.error(`[Safety Net] Unexpected handler exception → basic-mode reply: ${detail}`);
-    return NextResponse.json({
+    return assistantJson({
       reply: buildTextFallbackReply(""),
       diagnosis: null,
       source: "direct",
+      preprocessing: null,
+      analysisSource: null,
+      textSource: null,
       warnings: [`Unexpected internal error — reply formatted locally: ${detail}`.slice(0, 400)],
-    } satisfies AssistantResponseBody);
+    });
+  } finally {
+    runtime.geminiBudget?.dispose();
   }
 }
-
