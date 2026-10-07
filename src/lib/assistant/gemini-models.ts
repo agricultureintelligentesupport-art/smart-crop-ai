@@ -182,11 +182,21 @@ function isGeneralPurposeFlash(id: string): boolean {
  *
  * Throws on any transport/HTTP failure so the caller can record it as
  * `error` and carry on — a health check must never break a request.
+ *
+ * `signal` optionally ties the diagnostic fetch to a request-level
+ * `AbortController` (the assistant route's global deadline guard): the call
+ * is then bounded by BOTH that signal and {@link LIST_MODELS_TIMEOUT_MS}, so
+ * a cancelled request releases this fetch immediately too.
  */
-async function listGenerateContentModels(apiKey: string): Promise<string[]> {
+async function listGenerateContentModels(
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const response = await fetch(`${LIST_MODELS_URL}?pageSize=1000&key=${apiKey}`, {
     headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(LIST_MODELS_TIMEOUT_MS),
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(LIST_MODELS_TIMEOUT_MS)])
+      : AbortSignal.timeout(LIST_MODELS_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -227,6 +237,8 @@ export async function checkGeminiModelHealth(options: {
   chain: readonly GeminiModel[];
   /** Injectable for tests. */
   fetchModels?: () => Promise<string[]>;
+  /** Optional request-level abort signal; bounds the ListModels fetch too. */
+  signal?: AbortSignal;
 }): Promise<GeminiHealthReport> {
   const { apiKey, chain } = options;
 
@@ -235,7 +247,7 @@ export async function checkGeminiModelHealth(options: {
   try {
     available = options.fetchModels
       ? await options.fetchModels()
-      : await listGenerateContentModels(apiKey);
+      : await listGenerateContentModels(apiKey, options.signal);
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause);
   }
@@ -372,7 +384,12 @@ export class GeminiModelHealthMonitor {
    */
   async ensure(
     chain: readonly GeminiModel[],
-    options: { apiKey: string; fetchModels?: () => Promise<string[]> },
+    options: {
+      apiKey: string;
+      fetchModels?: () => Promise<string[]>;
+      /** Optional request-level abort signal; bounds the ListModels fetch. */
+      signal?: AbortSignal;
+    },
   ): Promise<GeminiHealthReport | null> {
     if (this.inFlight && this.now() - this.checkedAt < this.ttlMs) {
       return this.inFlight;

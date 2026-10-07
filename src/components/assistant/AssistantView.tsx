@@ -518,9 +518,13 @@ export default function AssistantView() {
           // Configuration is known only by the server, never inferred on mount.
           // The route signals it with code MISSING_KEYS (503 — the API never
           // returns 500 anymore; it degrades to direct replies instead).
+          // SERVER_BUSY (503) is the deadline guard: the request outran the
+          // server's 40 s budget — transient, a retry is the remedy.
           const failure = await res.json().catch(() => null);
           if (failure?.code === "MISSING_KEYS") {
             errorMessage = t.chat.unavailable;
+          } else if (failure?.code === "SERVER_BUSY") {
+            errorMessage = t.chat.busy;
           }
           throw new Error(`HTTP ${res.status}`);
         }
@@ -546,7 +550,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, messages, activeConversationId, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, messages, activeConversationId, t.chat.error, t.chat.unavailable, t.chat.busy],
   );
 
   const retryLast = useCallback(() => {

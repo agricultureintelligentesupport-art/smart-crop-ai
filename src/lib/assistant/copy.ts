@@ -39,6 +39,11 @@ export interface AssistantCopy {
     error: string;
     retry: string;
     unavailable: string;
+    /**
+     * Transient deadline-guard signal (HTTP 503 + code SERVER_BUSY): the
+     * request outran the server's 40 s budget — a retry is the remedy.
+     */
+    busy: string;
     visionOnlyNote: string;
     /** Shown when Step 0 detected the leaf and cropped the background away. */
     cropApplied: string;
@@ -98,6 +103,7 @@ const AR: AssistantCopy = {
     error: "وقع خطأ أثناء الاتصال بالمساعد. حاول مرة أخرى.",
     retry: "إعادة المحاولة",
     unavailable: "خدمة المساعد غير متاحة حالياً. يرجى المحاولة لاحقاً.",
+    busy: "الخادم مشغول حالياً — استغرق التحليل وقتاً أطول من المعتاد. حاول مرة أخرى.",
     visionOnlyNote: "تم التشخيص بالصورة فقط — نصائح عامة (نموذج اللغة غير متاح).",
     cropApplied:
       "✂️ تم تحديد الورقة واقتصاص الخلفية (أيدٍ، تربة…) تلقائياً قبل التشخيص لرفع دقة التصنيف.",
@@ -154,6 +160,7 @@ const FR: AssistantCopy = {
     error: "Erreur de connexion à l'assistant. Réessayez.",
     retry: "Réessayer",
     unavailable: "Le service assistant est indisponible pour le moment. Réessayez plus tard.",
+    busy: "Serveur occupé — l'analyse a pris plus de temps que prévu. Réessayez.",
     visionOnlyNote: "Diagnostic image seul — conseils généraux (modèle de langage indisponible).",
     cropApplied:
       "✂️ Feuille détectée et recadrée automatiquement avant le diagnostic — l'arrière-plan (mains, sol…) a été retiré pour une meilleure précision.",

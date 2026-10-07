@@ -46,8 +46,9 @@
  *   STEP 3 — TEXT FALLBACK (Google Gemini, FORMAT-ONLY)
  *     Runs ONLY after Step 2 failed. The same Gemini model chain and key pool
  *     (`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered `GEMINI_API_KEY_N`,
- *     rotated on 429 / RESOURCE_EXHAUSTED / quota; one shared 18 s
- *     `AbortController` for the whole chain) turn the SAME `AnalysisData` into
+ *     rotated on 429 / RESOURCE_EXHAUSTED / quota — capped at 3 keys per
+ *     request; one shared 5 s `AbortController` per key) turn the SAME
+ *     `AnalysisData` into
  *     the same kind of explanation. NO image is attached here: Gemini must
  *     format the data, not re-analyse the photo. This branch also covers the
  *     edge case where the analysis came from MobileNetV2 and Step 2 then
@@ -68,7 +69,11 @@
  *     accuracy pre-step: every failure mode (missing HF key, undecodable
  *     image, unreachable/loading detector, a non-detection payload, or "no
  *     leaf above threshold") is non-fatal and falls back to the original.
- *     The outcome is reported in `preprocessing` on the response.
+ *     The whole pre-step is bounded by a strict 3 s fail-fast deadline
+ *     (`LEAF_DETECT_TIMEOUT_MS`): a sleepy or cold detector is aborted at
+ *     3 s and the pipeline moves on to Step 1 immediately, never blocking
+ *     the request. The outcome is reported in `preprocessing` on the
+ *     response.
  *
  *   Contract between the stages: `AnalysisData` is the single payload the
  *   text stage ever sees, so it cannot tell — and is never told — which image
@@ -85,10 +90,19 @@
  * as an alias) are read from `process.env` on the server only. They are never
  * shipped to the browser and never echoed back in a response body.
  *
+ * Global deadline guard: the WHOLE route execution runs under one request-
+ * scoped `AbortController` set to {@link REQUEST_TIMEOUT_MS} (40 s) — the
+ * Vercel-budget safeguard. Every `fetch` in the pipeline carries a signal
+ * derived from it, so when the budget runs out the in-flight round-trips are
+ * cancelled immediately and the handler answers a clean
+ * `503 { error: "Server busy. Please try again." }` INSTEAD of letting
+ * Vercel's 60 s hard limit terminate the function with an opaque 504.
+ *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
  * when NO provider key is configured at all (the explicit
- * server-misconfiguration signal). No HTTP 500 ever.
+ * server-misconfiguration signal); 503 + "Server busy. Please try again."
+ * when the pipeline exceeds the 40 s global deadline. No HTTP 500 ever.
  *
  * Error reporting: each stage logs to the server console —
  * `[Step 1: Gemini Analysis Success]` / `[Step 1: MobileNetV2 Fallback
@@ -143,6 +157,78 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 /** Vision + LLM round-trips; give slow cold starts room on hosted platforms. */
 export const maxDuration = 60;
+
+/* ------------------------------------------------------------------ */
+/*  Global request guard — the Vercel-budget safeguard                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The absolute budget for ONE `/api/assistant` execution: 40 s. Vercel's
+ * Node runtime hard-kills the function at {@link maxDuration} (60 s) with an
+ * opaque 504 when that happens mid-pipeline; the guard fires 20 s EARLIER so
+ * the route always wins the race and answers a clean, client-actionable
+ * `503 { error: "Server busy. Please try again." }` instead.
+ *
+ * Every upstream `fetch` in the pipeline carries a signal derived from this
+ * guard (combined with its stage-level timeout via `AbortSignal.any`), so an
+ * expired budget cancels the in-flight round-trip immediately and releases
+ * its memory — no request keeps running after the guard fires.
+ */
+export const REQUEST_TIMEOUT_MS = 40_000;
+
+/**
+ * Thrown (instead of letting a stage degrade further) the moment the global
+ * deadline has fired, so the pipeline unwinds into the 503 guard response
+ * rather than starting yet another fallback round-trip on borrowed time.
+ */
+class RequestDeadlineError extends Error {
+  constructor() {
+    super(`the request exceeded the ${REQUEST_TIMEOUT_MS} ms global deadline`);
+    this.name = "RequestDeadlineError";
+  }
+}
+
+/**
+ * The per-request guard: one `AbortController` + one timer, created when the
+ * request arrives and disposed (timer cleared) when the response is ready.
+ */
+interface RequestGuard {
+  /** Aborts once, when the global deadline fires. */
+  signal: AbortSignal;
+  /** Clear the deadline timer; safe to call more than once. */
+  dispose: () => void;
+}
+
+function createRequestGuard(timeoutMs: number = REQUEST_TIMEOUT_MS): RequestGuard {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new RequestDeadlineError()), timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
+/**
+ * Throws {@link RequestDeadlineError} when the global deadline has fired.
+ * Called at the top of every stage's catch block and before every new
+ * round-trip: once the budget is gone the route must stop degrading through
+ * the fallback chain and surface the 503 guard response instead.
+ */
+function assertRequestDeadline(requestSignal: AbortSignal): void {
+  if (requestSignal.aborted) throw new RequestDeadlineError();
+}
+
+/**
+ * The signal ONE upstream round-trip carries: the request-level guard signal
+ * combined with the stage-level timeout via `AbortSignal.any` — whichever
+ * fires first aborts the fetch. This is the async/await cleanup contract:
+ * every `fetch` in the route is cancellable, so an aborted request releases
+ * its socket and buffers immediately instead of running to completion in
+ * the background.
+ */
+function scopedSignal(requestSignal: AbortSignal, stageTimeoutMs: number): AbortSignal {
+  return AbortSignal.any([requestSignal, AbortSignal.timeout(stageTimeoutMs)]);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Tunables                                                           */
@@ -220,10 +306,15 @@ function resolveLeafDetectModels(): LeafDetectModel[] {
 }
 
 /**
- * Detection is a pre-step, not the main act: a tighter deadline than the
- * classifier so a sleepy detector can never eat the request budget.
+ * Detection is a pre-step, not the main act: a strict 3 s FAIL-FAST deadline
+ * for the WHOLE detection chain, so a sleepy or cold detector can never eat
+ * the request budget. On timeout or any error the stage aborts immediately
+ * and the pipeline falls through to Step 1 with the untouched frame —
+ * waiting longer for a nicer crop is never worth risking Vercel's 60 s
+ * hard limit (the previous 9 s window could burn a third of that budget on
+ * a stage that is purely an accuracy nicety).
  */
-const LEAF_DETECT_TIMEOUT_MS = 9_000;
+const LEAF_DETECT_TIMEOUT_MS = 3_000;
 
 /** Re-encoded crop constraints — mirror the client's own downscale. */
 const LEAF_CROP_MAX_EDGE_PX = 1024;
@@ -243,69 +334,94 @@ interface LeafDetectOutcome {
  * 1), validate the payload shape, walk the model chain on loading/404/shape
  * errors. Throws (message prefixed "HF Error:") when every id failed — the
  * caller treats that as "stage unavailable" and keeps the full frame.
+ *
+ * FAIL-FAST budget: ONE {@link LEAF_DETECT_TIMEOUT_MS} (3 s) deadline bounds
+ * the WHOLE chain (not each id), combined with the request-level guard
+ * signal — a sleepy detector can never block Step 1 for more than 3 s.
  */
 async function detectLeafStrict(
   source: Buffer,
   apiKey: string,
+  requestSignal: AbortSignal,
 ): Promise<LeafDetectOutcome> {
   let lastDetail = "no detection model was attempted";
 
-  for (const model of resolveLeafDetectModels()) {
-    try {
-      const res = await fetch(HF_ENDPOINT(model.id), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "image/jpeg",
-          // Ask the HF router to wait for a cold model instead of 503ing.
-          "X-Wait-For-Model": "true",
-        },
-        body: new Uint8Array(source),
-        signal: AbortSignal.timeout(LEAF_DETECT_TIMEOUT_MS),
-      });
+  // One shared 3 s deadline for the entire detection chain (an explicit
+  // AbortController, cleared in `finally`, so the timer never outlives the
+  // stage). A 3 s budget is too small to give every id its own window.
+  const controller = new AbortController();
+  const deadline = Date.now() + LEAF_DETECT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), LEAF_DETECT_TIMEOUT_MS);
 
-      if (res.status === 503 || res.status === 530) {
-        lastDetail = `${model.id}: model loading (HTTP ${res.status})`;
-        console.warn(`[Step 0: Detect Loading] ${lastDetail}`);
-        continue;
-      }
+  try {
+    for (const model of resolveLeafDetectModels()) {
+      // Only reachable after fast error walks — no budget left for another
+      // round-trip, so stop here and fail fast.
+      if (Date.now() >= deadline) break;
 
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => res.statusText);
-        let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""}`;
-        try {
-          const j = JSON.parse(bodyText) as { error?: string };
-          if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
-        } catch {
-          // keep the raw detail
+      try {
+        const res = await fetch(HF_ENDPOINT(model.id), {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "image/jpeg",
+            // Ask the HF router to wait for a cold model instead of 503ing —
+            // the 3 s deadline aborts that wait long before it matters.
+            "X-Wait-For-Model": "true",
+          },
+          body: new Uint8Array(source),
+          signal: AbortSignal.any([requestSignal, controller.signal]),
+        });
+
+        if (res.status === 503 || res.status === 530) {
+          lastDetail = `${model.id}: model loading (HTTP ${res.status})`;
+          console.warn(`[Step 0: Detect Loading] ${lastDetail}`);
+          continue;
         }
-        lastDetail = `${model.id}: ${detail}`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
 
-      const json: unknown = await res.json();
-      if (!Array.isArray(json)) {
-        lastDetail = `${model.id}: payload is not a detection array`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
-      const parsed = parseObjectDetections(json);
-      if (parsed.length === 0 && json.length > 0) {
-        // A 200 whose items are not detection-shaped (e.g. a classification
-        // array) — this id is not serving object detection; walk the chain.
-        lastDetail = `${model.id}: ${json.length} payload items, none a valid detection`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
+        if (!res.ok) {
+          const bodyText = await res.text().catch(() => res.statusText);
+          let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""}`;
+          try {
+            const j = JSON.parse(bodyText) as { error?: string };
+            if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
+          } catch {
+            // keep the raw detail
+          }
+          lastDetail = `${model.id}: ${detail}`;
+          console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+          continue;
+        }
 
-      const detections = parsed.filter((det) => model.acceptLabel(det.label));
-      return { model: model.id, detections };
-    } catch (error) {
-      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-      lastDetail = `${model.id}: ${detail}`;
-      console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+        const json: unknown = await res.json();
+        if (!Array.isArray(json)) {
+          lastDetail = `${model.id}: payload is not a detection array`;
+          console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+          continue;
+        }
+        const parsed = parseObjectDetections(json);
+        if (parsed.length === 0 && json.length > 0) {
+          // A 200 whose items are not detection-shaped (e.g. a classification
+          // array) — this id is not serving object detection; walk the chain.
+          lastDetail = `${model.id}: ${json.length} payload items, none a valid detection`;
+          console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+          continue;
+        }
+
+        const detections = parsed.filter((det) => model.acceptLabel(det.label));
+        return { model: model.id, detections };
+      } catch (error) {
+        // The GLOBAL deadline fired — stop walking the chain at once; the
+        // request is over and the guard response takes over.
+        assertRequestDeadline(requestSignal);
+        const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        const timedOut = controller.signal.aborted;
+        lastDetail = `${model.id}: ${detail}${timedOut ? ` (aborted at the ${LEAF_DETECT_TIMEOUT_MS} ms fail-fast deadline)` : ""}`;
+        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
+      }
     }
+  } finally {
+    clearTimeout(timer);
   }
 
   throw new Error(`HF Error: leaf detection failed — ${lastDetail}`);
@@ -329,13 +445,16 @@ async function cropLeafImage(source: Buffer, rect: CropRect): Promise<Buffer> {
  * Step 0 orchestration: detect the leaf, crop to it, and return BOTH the
  * stage report (`AssistantPreprocessing`) and the image the classifier must
  * receive — the cropped pixels on success, the untouched original in every
- * other case. Never throws: any internal failure is converted into an
- * "unavailable" report plus a non-fatal warning.
+ * other case. Never throws for a stage failure: any internal problem is
+ * converted into an "unavailable" report plus a non-fatal warning and the
+ * pipeline falls through to Step 1 immediately. The ONLY exception is the
+ * global deadline, which re-throws so the guard response takes over.
  */
 async function runLeafDetectionStage(
   image: AssistantImagePayload,
   huggingfaceKey: string | null,
   warnings: string[],
+  requestSignal: AbortSignal,
 ): Promise<{ preprocessing: AssistantPreprocessing; image: AssistantImagePayload }> {
   const original: AssistantImagePayload = { data: image.data, mimeType: image.mimeType };
 
@@ -360,7 +479,7 @@ async function runLeafDetectionStage(
       throw new Error(`image is not decodable or too small to crop (${width}×${height})`);
     }
 
-    const { model, detections } = await detectLeafStrict(source, huggingfaceKey);
+    const { model, detections } = await detectLeafStrict(source, huggingfaceKey, requestSignal);
     const decision = selectLeafCrop(detections, width, height, {
       minScore: LEAF_DETECT_DEFAULTS.minScore,
     });
@@ -399,6 +518,9 @@ async function runLeafDetectionStage(
       image: { data: cropped.toString("base64"), mimeType: "image/jpeg" },
     };
   } catch (error) {
+    // The global deadline fired — do NOT degrade into Step 1 on borrowed
+    // time; let the guard response take over.
+    assertRequestDeadline(requestSignal);
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(`[Step 0: Detect Unavailable] ${detail} — the full frame goes to Step 1`);
     warnings.push(`Step 0 leaf detection unavailable — ${detail}`.slice(0, 400));
@@ -435,25 +557,38 @@ function resolveGeminiModels(): GeminiModel[] {
 
 
 /**
- * Hard timeout for the WHOLE Gemini model chain: 18 s. A full Arabic
- * ~200-word answer (system prompt + profile context + vision verdict in, up
- * to {@link GEMINI_MAX_OUTPUT_TOKENS} out) regularly takes 10–15 s on a cold
- * Flash model; the previous 9 s window aborted those healthy generations
- * mid-flight and sent the request to the weaker fallbacks for nothing. 18 s
- * still leaves the built-in formatter comfortably
- * inside {@link maxDuration}. Enforced with an explicit `AbortController`
- * (not `AbortSignal.timeout`) so the abort reason and the timer are both
- * inspectable/clearable per request; a fast 404 on an earlier id hands the
- * remaining budget to the next id.
+ * Hard timeout for the Gemini model chain of ONE key: 5 s. The previous 18 s
+ * per-key window accumulated to 54 s+ across key-rotation retries
+ * (18 s × 3 keys) and blew straight through Vercel's 60 s hard limit into
+ * an opaque 504; 5 s keeps the WORST case of the whole rotation —
+ * {@link GEMINI_MAX_KEY_ATTEMPTS} keys × 5 s plus the 1 s back-offs — at
+ * ~17 s, comfortably inside the {@link REQUEST_TIMEOUT_MS} global guard and
+ * the {@link maxDuration} budget. A Flash answer that has not even started
+ * streaming after 5 s is, for this route's purposes, a failure worth trading
+ * for the next key / stage rather than a 504. Enforced with an explicit
+ * `AbortController` (not `AbortSignal.timeout`) so the abort reason and the
+ * timer are both inspectable/clearable per request; a fast 404 on an earlier
+ * id hands the remaining budget to the next id.
  */
-const GEMINI_TIMEOUT_MS = 18_000;
+const GEMINI_TIMEOUT_MS = 5_000;
+
+/**
+ * Key-rotation cap: at most 3 Gemini keys are tried per request. The pool
+ * may still hold more (they remain configured for load distribution across
+ * processes), but rotating through all of them at up to
+ * {@link GEMINI_TIMEOUT_MS} each is exactly how the old code stacked 54 s+
+ * of retries and hit Vercel's 60 s limit. 3 keys × 5 s + back-offs stays
+ * inside the {@link REQUEST_TIMEOUT_MS} guard with room for every other
+ * stage.
+ */
+const GEMINI_MAX_KEY_ATTEMPTS = 3;
 
 /**
  * Output cap for a Gemini call. Slightly above {@link MAX_REPLY_TOKENS} because
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
  * the per-generation thinking payload (`thinkingLevel: "low"` on 3.x,
  * `thinkingBudget: 0` on 2.5, none on 1.5/2.0) keeps the model in fast,
- * answer-first mode so the 18 s budget is spent on the reply.
+ * answer-first mode so the 5 s budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
@@ -557,8 +692,21 @@ function resolveVisionModels(): string[] {
 /*  Small helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-function timedFetch(url: string, init: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+/**
+ * Every Hugging Face round-trip goes through here: the stage-level
+ * {@link UPSTREAM_TIMEOUT_MS} deadline combined with the request-level
+ * guard signal ({@link scopedSignal}), so BOTH the per-stage budget and the
+ * global 40 s deadline can cancel the fetch and release it immediately.
+ */
+function timedFetch(
+  url: string,
+  init: RequestInit,
+  requestSignal: AbortSignal,
+): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    signal: scopedSignal(requestSignal, UPSTREAM_TIMEOUT_MS),
+  });
 }
 
 function bad(message: string, status = 400): NextResponse {
@@ -645,7 +793,8 @@ interface MobileNetClassification {
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message.
  * - Per-model timeout: UPSTREAM_TIMEOUT_MS (25 s) — long enough for a cold
- *   serverless start under `X-Wait-For-Model: true`.
+ *   serverless start under `X-Wait-For-Model: true` — COMBINED with the
+ *   request-level guard signal, so the global 40 s deadline still wins.
  * - Throws an Error prefixed with "HF Error:" on any failure so the caller can
  *   degrade to the STEP 4 final fallback.
  */
@@ -653,6 +802,7 @@ async function classifyPlantImageStrict(
   imageBase64: string,
   mimeType: string,
   apiKey: string,
+  requestSignal: AbortSignal,
 ): Promise<MobileNetClassification> {
   const body = Buffer.from(imageBase64, "base64");
 
@@ -673,7 +823,7 @@ async function classifyPlantImageStrict(
           "X-Wait-For-Model": "true",
         },
         body,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: scopedSignal(requestSignal, timeoutMs),
       });
 
       // --- Model loading (503 / 530) -------------------------------------------------
@@ -740,6 +890,9 @@ async function classifyPlantImageStrict(
       );
       return { rawLabel: top.label, score: top.score, model, candidates };
     } catch (error) {
+      // The global deadline fired — stop trying models; the guard response
+      // takes over instead of another degradation hop.
+      assertRequestDeadline(requestSignal);
       const detail =
         error instanceof Error
           ? `${error.name}: ${error.message}`
@@ -816,6 +969,7 @@ async function analyzeImageWithGemini(
   image: AssistantImagePayload,
   geminiApiKeys: readonly string[],
   lang: "ar" | "fr",
+  requestSignal: AbortSignal,
 ): Promise<AnalysisResult> {
   const userContent =
     lang === "fr"
@@ -833,6 +987,7 @@ async function analyzeImageWithGemini(
         extraConfig,
       },
       geminiApiKeys,
+      requestSignal,
     );
 
   let result: GeminiResult;
@@ -842,6 +997,8 @@ async function analyzeImageWithGemini(
       responseSchema: ANALYSIS_RESPONSE_SCHEMA,
     });
   } catch (error) {
+    // The global deadline fired — no budget left for the schema-less retry.
+    assertRequestDeadline(requestSignal);
     if (!isStructuredOutputRejection(error)) throw error;
     // The model would not take the schema constraint. Retry once with only
     // the JSON MIME hint: `parseAnalysisJson` still validates the result, and
@@ -919,14 +1076,18 @@ async function runImageAnalysisStage(options: {
   huggingfaceKey: string | null;
   lang: "ar" | "fr";
   warnings: string[];
+  requestSignal: AbortSignal;
 }): Promise<AnalysisResult | null> {
-  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings } = options;
+  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings, requestSignal } = options;
 
   // ---- PRIMARY: Gemini -------------------------------------------------
   if (geminiApiKeys.length > 0) {
     try {
-      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang);
+      return await analyzeImageWithGemini(geminiImage, geminiApiKeys, lang, requestSignal);
     } catch (error) {
+      // The global deadline fired — do not start the MobileNetV2 fallback on
+      // borrowed time; the guard response takes over.
+      assertRequestDeadline(requestSignal);
       const detail = error instanceof Error ? error.message : String(error);
       console.warn(`[Step 1: Gemini Analysis Failed → MobileNetV2] ${detail}`);
       warnings.push(`Step 1 Gemini image analysis failed — ${detail}`.slice(0, 400));
@@ -951,6 +1112,7 @@ async function runImageAnalysisStage(options: {
       mobilenetImage.data,
       mobilenetImage.mimeType,
       huggingfaceKey,
+      requestSignal,
     );
     const result = analysisFromMobileNet(
       classification.rawLabel,
@@ -965,6 +1127,8 @@ async function runImageAnalysisStage(options: {
     );
     return result;
   } catch (error) {
+    // The global deadline fired — no STEP 4 detour on borrowed time either.
+    assertRequestDeadline(requestSignal);
     const msg = error instanceof Error ? error.message : String(error);
     const detail = msg.startsWith("HF Error:") ? msg.slice("HF Error:".length).trim() : msg;
     console.warn(`[Step 1: MobileNetV2 Unavailable] ${detail} → STEP 4 (final fallback)`);
@@ -1393,11 +1557,15 @@ export const geminiModelHealth = new GeminiModelHealthMonitor();
  */
 async function ensureGeminiModelHealth(
   geminiApiKeys: readonly string[],
+  requestSignal: AbortSignal,
 ): Promise<void> {
   if (geminiApiKeys.length === 0) return;
 
   const report = await geminiModelHealth.ensure(resolveGeminiModels(), {
     apiKey: geminiApiKeys[0],
+    // The diagnostic fetch is cancellable too — a deadline that fires while
+    // ListModels is in flight aborts it instead of letting it linger.
+    signal: requestSignal,
   });
   if (!report) return;
 
@@ -1415,8 +1583,8 @@ async function ensureGeminiModelHealth(
  * the `GEMINI_MODEL` override) and walking to the long-lived fallbacks on a
  * model-availability failure.
  *
- * The whole chain is bounded by ONE 18 s `AbortController` deadline
- * ({@link GEMINI_TIMEOUT_MS}) instead of per-call timeouts: a fast
+ * The whole chain is bounded by ONE 5 s `AbortController` deadline
+ * ({@link GEMINI_TIMEOUT_MS}) per key instead of per-call timeouts: a fast
  * model-availability failure (404 / model-not-found / "no longer available to
  * new users" — the signature of a retired generation) walks to the next id
  * with whatever budget remains (each walk is recorded in the result's
@@ -1425,19 +1593,30 @@ async function ensureGeminiModelHealth(
  * network error or the timeout abort — throws {@link GeminiError} immediately
  * for the outer key-rotation loop.
  * Quota and transient upstream failures (HTTP 429/500/503) are likewise
- * surfaced to that loop, which backs off and tries the next credential.
+ * surfaced to that loop, which backs off and tries the next credential —
+ * for at most {@link GEMINI_MAX_KEY_ATTEMPTS} keys in total.
+ *
+ * The fetch signal ALSO carries the request-level guard signal, so the
+ * global 40 s deadline cancels the round-trip too — and an abort from the
+ * guard is converted into {@link RequestDeadlineError} instead of another
+ * fallback hop.
  */
 async function runGeminiChain(
   prompt: GeminiPrompt,
   apiKey: string,
+  requestSignal: AbortSignal,
 ): Promise<GeminiResult> {
   const controller = new AbortController();
   // Explicit AbortController + shared deadline (rather than per-call
   // AbortSignal.timeout) so the WHOLE model chain — not one call — is bounded
-  // by the 18 s window, and the pending round-trip and timer are always
+  // by the 5 s window, and the pending round-trip and timer are always
   // cancelled/cleared.
   const deadline = Date.now() + GEMINI_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+  // The pending fetch must die on EITHER deadline: this key's 5 s chain
+  // window OR the request-level 40 s guard — whichever fires first.
+  const fetchSignal = AbortSignal.any([controller.signal, requestSignal]);
 
   // Resolve the chain once per request so a `GEMINI_MODEL` change is picked
   // up without a restart (same convention as the Gemini key pool).
@@ -1452,9 +1631,12 @@ async function runGeminiChain(
       if (Date.now() >= deadline) break;
 
       try {
-        const text = await generateWithGeminiModel(model, prompt, controller.signal, apiKey);
+        const text = await generateWithGeminiModel(model, prompt, fetchSignal, apiKey);
         return { model: model.id, text, warnings };
       } catch (error) {
+        // The GLOBAL deadline fired — stop walking the chain and let the
+        // guard response take over; another model id cannot buy back time.
+        assertRequestDeadline(requestSignal);
         if (!(error instanceof GeminiError)) throw error;
         failures.push(`${model.id}: ${error.message}`);
 
@@ -1514,65 +1696,92 @@ function isGeminiRetryableError(error: unknown): error is GeminiError {
  * 503) get a one-second backoff before the next key is tried; other Gemini
  * failures (e.g. an invalid or revoked key) also advance through the
  * remaining keys without a delay. The request retries the next key in the
- * pool until one answers successfully or ALL keys are exhausted. API keys
- * are represented only by their ordinal in logs and warnings; their values
- * never leave the server or appear in a client response.
+ * pool until one answers successfully or the rotation budget is exhausted —
+ * and that budget is HARD-CAPPED at {@link GEMINI_MAX_KEY_ATTEMPTS} (3)
+ * keys per request, no matter how many keys are configured: at up to
+ * {@link GEMINI_TIMEOUT_MS} per key, rotating through a large pool is
+ * exactly how the old 18 s-per-key code stacked past Vercel's 60 s limit.
+ * API keys are represented only by their ordinal in logs and warnings;
+ * their values never leave the server or appear in a client response.
  */
 async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
   geminiApiKeys: readonly string[],
+  requestSignal: AbortSignal,
 ): Promise<GeminiResult> {
   // Once per process (TTL-bounded): proves the configured model ids still
   // exist BEFORE they are used, so a Google deprecation surfaces as one loud
   // log line instead of 404-ing silently on every request.
-  await ensureGeminiModelHealth(geminiApiKeys);
+  await ensureGeminiModelHealth(geminiApiKeys, requestSignal);
+  // The health check swallows its own failures — so an abort that happened
+  // DURING it must still be honoured here, before any round-trip starts.
+  assertRequestDeadline(requestSignal);
+
+  // The rotation cap: at most 3 keys per request, even when the pool is
+  // larger (the remaining keys stay configured for other processes).
+  const maxAttempts = Math.min(geminiApiKeys.length, GEMINI_MAX_KEY_ATTEMPTS);
+  if (geminiApiKeys.length > maxAttempts) {
+    console.warn(
+      `[Gemini: Key Rotation] pool holds ${geminiApiKeys.length} keys — capped at ${maxAttempts} attempts per request (${GEMINI_TIMEOUT_MS} ms each).`,
+    );
+  }
 
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
 
-  for (let keyIndex = 0; keyIndex < geminiApiKeys.length; keyIndex += 1) {
+  for (let keyIndex = 0; keyIndex < maxAttempts; keyIndex += 1) {
     const apiKey = geminiApiKeys[keyIndex];
     try {
-      const result = await runGeminiChain(prompt, apiKey);
+      const result = await runGeminiChain(prompt, apiKey, requestSignal);
       return {
         ...result,
         warnings: [...rotationWarnings, ...result.warnings],
       };
     } catch (error) {
+      // The global deadline fired — no further rotation; the guard response
+      // takes over.
+      assertRequestDeadline(requestSignal);
       if (!(error instanceof GeminiError)) throw error;
 
-      const keyLabel = `key ${keyIndex + 1}/${geminiApiKeys.length}`;
+      const keyLabel = `key ${keyIndex + 1}/${maxAttempts}`;
       failures.push(`${keyLabel}: ${error.message}`);
       const nextKeyIndex = keyIndex + 1;
-      const hasNextKey = nextKeyIndex < geminiApiKeys.length;
+      const hasNextKey = nextKeyIndex < maxAttempts;
 
       if (isGeminiRetryableError(error) && hasNextKey) {
         const status = error.status ?? "unknown";
         const warning =
           `Gemini HTTP ${status} transient/quota failure on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
+          `key rotation attempt ${nextKeyIndex + 1}/${maxAttempts}.`;
         rotationWarnings.push(warning);
         console.warn(
           `[Gemini: Key Rotation] ${warning} Retrying after 1 second.`,
         );
         await new Promise((res) => setTimeout(res, 1000));
+        // The back-off may have carried us past the deadline — check before
+        // spending another key's budget.
+        assertRequestDeadline(requestSignal);
       } else if (hasNextKey) {
         // A different failure can also be isolated to one credential (for
         // example an invalid or revoked key). Try the next configured key
         // before allowing the request to fall through to the next stage.
         const warning =
           `Gemini failed on ${keyLabel} — ` +
-          `key rotation attempt ${nextKeyIndex + 1}/${geminiApiKeys.length}.`;
+          `key rotation attempt ${nextKeyIndex + 1}/${maxAttempts}.`;
         rotationWarnings.push(warning);
         console.warn(
-          `[Gemini: Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${geminiApiKeys.length}.`,
+          `[Gemini: Key Rotation] ${error.message} — retrying with key ${nextKeyIndex + 1}/${maxAttempts}.`,
         );
       }
     }
   }
 
+  const poolNote =
+    geminiApiKeys.length > maxAttempts
+      ? ` (tried ${maxAttempts} of ${geminiApiKeys.length} configured keys — rotation cap)`
+      : "";
   throw new GeminiError(
-    `all Gemini API keys failed — ${failures.join(" | ")}`,
+    `all Gemini API keys failed${poolNote} — ${failures.join(" | ")}`,
   );
 }
 
@@ -1684,7 +1893,8 @@ async function generateWithHfLlmModel(
   model: string,
   userContent: string,
   apiKey: string,
-  history: AssistantHistoryTurn[] = [],
+  history: AssistantHistoryTurn[],
+  requestSignal: AbortSignal,
 ): Promise<string> {
   let res: Response;
   try {
@@ -1707,8 +1917,11 @@ async function generateWithHfLlmModel(
         max_tokens: MAX_REPLY_TOKENS,
         stream: false,
       }),
-    });
+    }, requestSignal);
   } catch (error) {
+    // The global deadline fired — surface it as such, not as a plain
+    // transport error (the caller's degradation would otherwise continue).
+    assertRequestDeadline(requestSignal);
     // Network / timeout / abort errors — no HTTP status involved.
     const detail =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -1755,18 +1968,26 @@ async function generateWithHfLlmModel(
  * - Uses the concise professional Arabic advisor system prompt.
  * - Throws an Error prefixed with "LLM Error:" once no model can answer.
  */
-async function askHfLlmStrict(apiKey: string, userContent: string, history: AssistantHistoryTurn[] = []): Promise<string> {
+async function askHfLlmStrict(
+  apiKey: string,
+  userContent: string,
+  history: AssistantHistoryTurn[] = [],
+  requestSignal: AbortSignal,
+): Promise<string> {
   const failures: string[] = [];
 
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     try {
-      const text = await generateWithHfLlmModel(model, userContent, apiKey, history);
+      const text = await generateWithHfLlmModel(model, userContent, apiKey, history, requestSignal);
 
       console.log(
         `[Step 2: HF LLM Success] model=${model} replyLength=${text.length}`,
       );
       return text;
     } catch (error) {
+      // The global deadline fired — stop walking the model chain; the guard
+      // response takes over.
+      assertRequestDeadline(requestSignal);
       const detail = error instanceof Error ? error.message : String(error);
       const modelLevel = isHfLlmModelAvailabilityError(error);
       failures.push(`${model}: ${detail}`);
@@ -2273,8 +2494,16 @@ function buildTextFallbackReply(message: string): string {
  * - The only non-200 responses left are client input errors (400/413) and
  *   the explicit server misconfiguration signal (503 + MISSING_KEYS, emitted
  *   only when NEITHER provider key is configured) — never an HTTP 500.
+ *
+ * `requestSignal` is the global deadline guard's signal
+ * ({@link REQUEST_TIMEOUT_MS}): every stage passes it to its fetches, and
+ * once it fires the stages stop degrading and re-throw so {@link POST}
+ * answers the 503 guard response instead of letting Vercel 504 the request.
  */
-async function handleAssistant(request: NextRequest): Promise<NextResponse> {
+async function handleAssistant(
+  request: NextRequest,
+  requestSignal: AbortSignal,
+): Promise<NextResponse> {
   let body: AssistantRequestBody;
   try {
     body = (await request.json()) as AssistantRequestBody;
@@ -2360,7 +2589,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   let analysis: AnalysisResult | null = null;
 
   if (image) {
-    const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings);
+    const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings, requestSignal);
     preprocessing = detection.preprocessing;
 
     // ---- STEP 1: IMAGE ANALYSIS (Gemini → MobileNetV2 → give up) ----
@@ -2371,6 +2600,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       huggingfaceKey,
       lang,
       warnings,
+      requestSignal,
     });
   }
 
@@ -2412,7 +2642,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   if (huggingfaceKey) {
     try {
       reply = assertUsableTextReply(
-        await askHfLlmStrict(huggingfaceKey, userContent, history),
+        await askHfLlmStrict(huggingfaceKey, userContent, history, requestSignal),
         analysis?.data ?? null,
       );
       textSource = "huggingface";
@@ -2420,6 +2650,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         `[Step 2: HF LLM Success] analysis=${analysis?.source ?? "none"} replyLength=${reply.length}`,
       );
     } catch (error) {
+      // The global deadline fired — no Step 3 detour on borrowed time.
+      assertRequestDeadline(requestSignal);
       const msg = error instanceof Error ? error.message : String(error);
       const detail = msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg;
       console.warn(`[Step 2: HF LLM Failed → Step 3] ${detail}`);
@@ -2440,7 +2672,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
   // 3.5-flash-lite on a retired-id 404) via the Generative Language REST API,
   // keyed with the full
-  // Gemini key pool and bounded by a shared 18 s AbortController.
+  // Gemini key pool (capped at 3 attempts per request, each bounded by a
+  // shared 5 s AbortController).
   // Gemini is a FORMATTER here: the prompt is ANALYSIS_DATA and NO image is
   // attached, so it cannot re-analyse the photo even by accident. This also
   // covers the edge case where the analysis came from MobileNetV2 and the HF
@@ -2454,6 +2687,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
           history,
         },
         geminiApiKeys,
+        requestSignal,
       );
       reply = assertUsableTextReply(geminiResult.text, analysis?.data ?? null);
       textSource = "gemini_fallback";
@@ -2464,6 +2698,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         `[Step 3: Gemini Formatter Success] model=${geminiResult.model} analysis=${analysis?.source ?? "none"} replyLength=${reply.length}`,
       );
     } catch (error) {
+      // The global deadline fired — no built-in-formatter detour either;
+      // the guard response takes over.
+      assertRequestDeadline(requestSignal);
       const detail = error instanceof Error ? error.message : String(error);
       console.warn(`[Step 3: Gemini Failed → built-in formatter] ${detail}`);
       warnings.push(`Step 3 Gemini text fallback unavailable — ${detail}`.slice(0, 400));
@@ -2515,14 +2752,39 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
 }
 
 /**
- * Route entrypoint wrapped in the final safety net: even an unexpected
- * internal exception (a bug, a serialization failure…) is converted into a
- * 200 basic-mode reply, so `/api/assistant` NEVER returns HTTP 500.
+ * Route entrypoint wrapped in TWO safety nets:
+ *
+ *  1. The GLOBAL REQUEST GUARD — one `AbortController` per request set to
+ *     {@link REQUEST_TIMEOUT_MS} (40 s), the Vercel-budget safeguard. Its
+ *     signal is threaded into every stage and every `fetch` below; if the
+ *     whole pipeline is still running when the budget expires, the in-flight
+ *     round-trips are cancelled and the route answers a clean
+ *     `503 { error: "Server busy. Please try again." }` — instead of letting
+ *     Vercel's 60 s hard limit terminate the function with an opaque 504.
+ *  2. The fail-proof catch-all: any OTHER unexpected internal exception (a
+ *     bug, a serialization failure…) is converted into a 200 basic-mode
+ *     reply, so `/api/assistant` NEVER returns HTTP 500.
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const guard = createRequestGuard();
   try {
-    return await handleAssistant(request);
+    return await handleAssistant(request, guard.signal);
   } catch (error) {
+    // GLOBAL DEADLINE GUARD — the 40 s budget ran out before the pipeline
+    // completed. Every upstream fetch already carries the guard's signal, so
+    // the in-flight requests are already cancelled and releasing memory;
+    // answer the clean 503 before Vercel's 60 s limit answers a 504.
+    if (guard.signal.aborted) {
+      const detail =
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      console.error(
+        `[Deadline Guard] /api/assistant exceeded the ${REQUEST_TIMEOUT_MS} ms global budget → 503 (Vercel 60 s limit pre-empted): ${detail}`,
+      );
+      return NextResponse.json(
+        { error: "Server busy. Please try again.", code: "SERVER_BUSY" },
+        { status: 503 },
+      );
+    }
     const detail =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.error(`[Safety Net] Unexpected handler exception → basic-mode reply: ${detail}`);
@@ -2532,6 +2794,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       source: "direct",
       warnings: [`Unexpected internal error — reply formatted locally: ${detail}`.slice(0, 400)],
     } satisfies AssistantResponseBody);
+  } finally {
+    // Clear the deadline timer so it never outlives the request — and a
+    // fast request never sits on a 40 s pending timer.
+    guard.dispose();
   }
 }
 

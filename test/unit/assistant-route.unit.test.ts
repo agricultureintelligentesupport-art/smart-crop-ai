@@ -15,11 +15,31 @@ const CODECRAFT_URL_PATTERN = /codecraftapi\.com/i;
 
 /**
  * Stage-2 (Gemini fallback) AbortController window, mirrored from the route:
- * 18 s for the whole Google Gemini model chain (a full Arabic answer needs
- * 10–15 s on a cold Flash model — the former 9 s window aborted healthy
- * generations).
+ * 5 s per key for the Google Gemini model chain. The former 18 s per-key
+ * window accumulated to 54 s+ across key-rotation retries (18 s × 3 keys)
+ * and blew straight through Vercel's 60 s hard limit into a 504.
  */
-const GEMINI_TIMEOUT_MS = 18_000;
+const GEMINI_TIMEOUT_MS = 5_000;
+
+/**
+ * Gemini key-rotation cap, mirrored from the route: at most 3 keys are
+ * tried per request, no matter how many are configured.
+ */
+const GEMINI_MAX_KEY_ATTEMPTS = 3;
+
+/**
+ * Step 0 fail-fast deadline, mirrored from the route: the WHOLE DETR leaf
+ * detection chain gets 3 s, then the pipeline falls back to Step 1 with the
+ * untouched frame instead of blocking.
+ */
+const LEAF_DETECT_TIMEOUT_MS = 3_000;
+
+/**
+ * The global request deadline guard, mirrored from the route: the WHOLE
+ * `/api/assistant` execution is bounded by 40 s, so the route always answers
+ * (with a clean 503) before Vercel's 60 s hard limit can 504 the request.
+ */
+const REQUEST_TIMEOUT_MS = 40_000;
 
 /**
  * Stage-2 (Gemini fallback) model chain, in order — must mirror the route's
@@ -719,11 +739,12 @@ test("Stage 2 rotates comma-separated and dynamically numbered Gemini keys after
   assert.equal(payload.reply, "اسقِ بعد تدويم المحصول.");
   assert.deepEqual(calls.map(requestedGeminiKey), ["key-one", "key-two"]);
   assert.match(warningText(payload), /HTTP 429/);
-  assert.match(warningText(payload), /key rotation attempt 2\/4/);
+  // Attempts are counted against the 3-key rotation CAP (the pool holds 4).
+  assert.match(warningText(payload), /key rotation attempt 2\/3/);
   assert.doesNotMatch(JSON.stringify(payload), /key-one|key-two|key-three|key-four/);
 });
 
-test("Stage 2 waits through every dynamically numbered Gemini key before Stage 3 answers", async () => {
+test("Stage 2 rotates through at most three Gemini keys (rotation cap) before Stage 3 answers", async () => {
   process.env.GEMINI_API_KEY = "key-one,key-two";
   process.env.GEMINI_API_KEY_2 = "key-three";
   process.env.GEMINI_API_KEY_3 = "key-four";
@@ -743,13 +764,18 @@ test("Stage 2 waits through every dynamically numbered Gemini key before Stage 3
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "direct");
-  assert.deepEqual(geminiKeys, ["key-one", "key-two", "key-three", "key-four"]);
+  // The rotation stops at the 3-key cap even though 4 keys are configured —
+  // walking the WHOLE pool at 18 s/key is exactly how the old code stacked
+  // 54 s+ of retries and hit Vercel's 60 s limit.
+  assert.equal(GEMINI_MAX_KEY_ATTEMPTS, 3);
+  assert.deepEqual(geminiKeys, ["key-one", "key-two", "key-three"]);
   assert.match(warningText(payload), /all Gemini API keys failed/);
+  assert.match(warningText(payload), /tried 3 of 4 configured keys — rotation cap/);
   assert.match(warningText(payload), /HTTP 429/);
   assert.match(warningText(payload), /Step 2 HF text model unavailable/);
 });
 
-test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merge trimmed, deduplicated and rotation-ordered", async () => {
+test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merge trimmed, deduplicated and rotation-ordered — capped at 3 attempts", async () => {
   // Four sources with overlaps and whitespace on purpose:
   //   GEMINI_API_KEY   = " alpha , gamma "  (rank 0 — base variable first)
   //   GEMINI_API_KEY_1 = " beta "           (rank 1)
@@ -763,7 +789,7 @@ test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merg
   mock.method(globalThis, "fetch", async (url: string) => {
     const key = requestedGeminiKey(String(url));
     attempted.push(key ?? "");
-    if (key === "delta") return geminiReply("إجابة من المفتاح الأخير.");
+    if (key === "beta") return geminiReply("إجابة من المفتاح الثالث.");
     return geminiHttpError(429, "Resource has been exhausted (RESOURCE_EXHAUSTED).");
   });
 
@@ -771,15 +797,16 @@ test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merg
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload;
   assert.equal(payload.source, "llm");
-  assert.equal(payload.reply, "إجابة من المفتاح الأخير.");
-  // Exactly the deduplicated pool, in deterministic rotation order: the base
-  // variable first, then _1, _2, and finally the GEMINI_API_KEYS pool (its
-  // alpha/beta already tried → skipped). No empty/whitespace entries.
-  assert.deepEqual(attempted, ["alpha", "gamma", "beta", "delta"]);
-  // Every exhausted key left a rotation warning…
-  assert.match(warningText(payload), /key rotation attempt 2\/4/);
-  assert.match(warningText(payload), /key rotation attempt 3\/4/);
-  assert.match(warningText(payload), /key rotation attempt 4\/4/);
+  assert.equal(payload.reply, "إجابة من المفتاح الثالث.");
+  // The deduplicated pool in deterministic rotation order — the base
+  // variable first, then _1 — but STOPPED at the 3-attempt rotation cap:
+  // `delta` (rank 4, via GEMINI_API_KEY_2 after the plural pool's dedup)
+  // is never tried, no matter that it is configured.
+  assert.deepEqual(attempted, ["alpha", "gamma", "beta"]);
+  assert.equal(attempted.includes("delta"), false, "the 4th key is beyond the rotation cap");
+  // Every exhausted key left a rotation warning (counted against the cap)…
+  assert.match(warningText(payload), /key rotation attempt 2\/3/);
+  assert.match(warningText(payload), /key rotation attempt 3\/3/);
   // …and the key values never leak to the client.
   assert.doesNotMatch(JSON.stringify(payload), /alpha|gamma|beta|delta/);
 });
@@ -1406,7 +1433,7 @@ test("Stage 1 network failure falls through to the Gemini fallback chain", async
   assert.equal(upstream.mock.callCount(), 2);
 });
 
-test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 18 s and falls through", async () => {
+test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 5 s and falls through", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   let geminiAborted = false;
@@ -1428,24 +1455,22 @@ test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 18 
     throw new Error(`unexpected upstream: ${url}`);
   });
 
-  // Fast-forward the 18 s Stage-1 window instead of waiting for it.
+  // Fast-forward the 5 s per-key window instead of waiting for it.
   mock.timers.enable({ apis: ["setTimeout"] });
   let response: Response;
   try {
     const pending = POST(request());
     // Let the handler reach the hanging Gemini round-trip…
     await new Promise((resolve) => setImmediate(resolve));
-    // …the former 9 s window must NOT fire any more: a healthy 10–15 s Gemini
-    // generation has to be allowed to finish…
-    mock.timers.tick(9_001);
+    // …almost the whole per-key window passes without an abort…
+    mock.timers.tick(GEMINI_TIMEOUT_MS - 1_000);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(geminiAborted, false, "Gemini was aborted before the 18 s deadline");
-    // The primary failed fast and the Gemini fallback round-trip is in
-    // flight — the former 9 s window must NOT abort it.
-    assert.equal(calls.length, 2, "the Gemini fallback started before the 18 s deadline");
+    assert.equal(geminiAborted, false, "Gemini was aborted before the 5 s deadline");
+    assert.equal(calls.length, 2, "the Gemini fallback started before the 5 s deadline");
     assert.ok(isGeminiUrl(calls[1].url));
-    // …only the 18 s deadline aborts the round-trip.
-    mock.timers.tick(GEMINI_TIMEOUT_MS - 9_001 + 1);
+    // …only the 5 s deadline aborts the round-trip (the old 18 s window
+    // accumulated to 54 s+ across key rotations and 504'd on Vercel).
+    mock.timers.tick(1_001);
     response = await pending;
   } finally {
     mock.timers.reset();
@@ -1457,11 +1482,86 @@ test("Stage 2 timeout aborts the Gemini round-trip via AbortController after 18 
   assert.equal(payload.source, "direct");
   assert.match(warningText(payload), /Step 2 HF text model unavailable/);
   assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
-  assert.match(warningText(payload), /timeout after 18000 ms/);
-  // The Gemini fallback ran after the primary failed — and nothing else did.
+  assert.match(warningText(payload), /timeout after 5000 ms/);
+  // The Gemini fallback ran after the primary failed — and nothing else did
+  // (a single key is configured, so there is no rotation either).
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
   assert.ok(isGeminiUrl(calls[1].url));
+});
+
+/* ------------------------------------------------------------------ */
+/*  Global request guard — the 40 s Vercel-budget safeguard             */
+/* ------------------------------------------------------------------ */
+
+test("global guard: a pipeline stuck beyond the 40 s deadline answers 503 'Server busy' instead of a Vercel 504", async () => {
+  configureKeys();
+  let chatAborted = false;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isChatUrl(target)) {
+      // The primary text model HANGS — only the request-level guard signal
+      // can cancel it.
+      const signal = init.signal as AbortSignal;
+      assert.ok(signal instanceof AbortSignal);
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          chatAborted = true;
+          reject(signal.reason ?? new Error("aborted"));
+        });
+      });
+    }
+    throw new Error(`unexpected upstream: ${target}`);
+  });
+
+  // Fast-forward the 40 s global budget instead of waiting for it.
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let response: Response;
+  try {
+    const pending = POST(request());
+    // Let the handler reach the hanging round-trip…
+    await new Promise((resolve) => setImmediate(resolve));
+    // …just before the deadline the request is still in flight, no 503 yet…
+    mock.timers.tick(REQUEST_TIMEOUT_MS - 1_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(chatAborted, false, "the guard must not fire before 40 s");
+    // …and exactly at the deadline the guard cancels the in-flight request.
+    mock.timers.tick(1_001);
+    response = await pending;
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.equal(chatAborted, true, "the guard signal must cancel the in-flight fetch");
+  // A clean 503 the client can act on — NOT Vercel's opaque 504, NOT a 500,
+  // and NOT the basic-mode 200 (the deadline outranks the stage fallbacks).
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "Server busy. Please try again.",
+    code: "SERVER_BUSY",
+  });
+});
+
+test("global guard: every upstream fetch carries the request-level guard signal", async () => {
+  configureKeys();
+  const signals: (AbortSignal | null | undefined)[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    signals.push(init.signal as AbortSignal | null | undefined);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(target)) return geminiAnalysis();
+    if (isDetectUrl(target)) return Response.json([]);
+    return mobilenetReply();
+  });
+
+  const response = await POST(imageRequest(LEAF_JPEG_B64));
+  assert.equal(response.status, 200);
+  // detect + Gemini analysis + HF text — every single round-trip.
+  assert.ok(signals.length >= 3, `expected >=3 upstream calls, got ${signals.length}`);
+  for (const signal of signals) {
+    assert.ok(signal instanceof AbortSignal, "every fetch must receive an AbortSignal");
+    assert.equal(signal.aborted, false, "the guard must not be aborted on a fast request");
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -2641,6 +2741,69 @@ test("Step 0 outage (detector loading) degrades to the full frame with a warning
   assert.equal(classifyBody, LEAF_JPEG_B64);
   assert.match(warningText(payload), /Step 0 leaf detection unavailable/);
   assert.equal(payload.source, "hybrid");
+});
+
+test("Step 0 fail-fast: a hanging DETR detector is aborted at the 3 s deadline and Step 1 runs immediately", async () => {
+  configureKeys();
+  let detectorAborted = false;
+  let detectorReached = false;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    if (isGeminiUrl(target)) return geminiAnalysis();
+    if (isDetectUrl(target)) {
+      detectorReached = true;
+      // A cold detector that NEVER answers — the fail-fast deadline must
+      // cancel it at 3 s and hand the untouched frame to Step 1, not block
+      // the pipeline on a slow pre-step.
+      const signal = init.signal as AbortSignal;
+      assert.ok(signal instanceof AbortSignal);
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          detectorAborted = true;
+          reject(signal.reason ?? new Error("aborted"));
+        });
+      });
+    }
+    throw new Error(`unexpected upstream: ${target}`);
+  });
+
+  assert.equal(LEAF_DETECT_TIMEOUT_MS, 3_000);
+  // Fast-forward the 3 s fail-fast window instead of waiting for it.
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let response: Response;
+  try {
+    const pending = POST(imageRequest(LEAF_JPEG_B64));
+    // Let the handler reach the hanging detector (sharp's metadata decode
+    // takes a few event-loop turns before the round-trip starts)…
+    for (let spin = 0; spin < 100 && !detectorReached; spin += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(detectorReached, true, "the detector round-trip must start");
+    // …just before the deadline the detector is still given its window…
+    mock.timers.tick(LEAF_DETECT_TIMEOUT_MS - 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(detectorAborted, false, "the detector must get its full 3 s window");
+    // …and exactly at the deadline it is cancelled — fail fast.
+    mock.timers.tick(2);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(detectorAborted, true, "the detector must be aborted at the 3 s deadline");
+    response = await pending;
+  } finally {
+    mock.timers.reset();
+  }
+
+  // The timeout is NON-FATAL: the request still answers 200 — Gemini
+  // analysed the untouched frame and the HF text model narrated it.
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+  assert.equal(payload.source, "hybrid");
+  assert.equal(payload.analysisSource, "gemini");
+  assert.equal(payload.reply, GROUNDED_REPLY);
+  // The failed pre-step is reported, with its fail-fast deadline named.
+  assert.equal(payload.preprocessing?.status, "unavailable");
+  assert.match(warningText(payload), /Step 0 leaf detection unavailable/);
+  assert.match(warningText(payload), /3000 ms fail-fast deadline/);
 });
 
 test("Step 0 without an HF key is skipped silently and Step 1 reports its own skip", async () => {
