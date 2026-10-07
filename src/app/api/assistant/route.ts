@@ -57,6 +57,16 @@
  *     Never fails: a concise Arabic diagnosis card built from the analysis,
  *     or a greeting-aware basic-mode reply for a text-only question.
  *
+ *   DEMO MOCK (opt-in — `DEMO_MOCK=1`, OFF by default)
+ *     With the flag on, `getDemoMockResponse` (@/lib/assistant/demo-mock)
+ *     answers the SCRIPTED demo prompts (greeting, self-introduction,
+ *     "explain more", French, first photo, second photo) from a canned script
+ *     after a simulated 600 ms round-trip, and it does so BEFORE any provider
+ *     key is read — so a demo/pitch recording cannot burn or hit a quota,
+ *     whatever the provider state is. Any turn outside the script returns
+ *     null and the whole pipeline below runs untouched, which is also the
+ *     behaviour whenever the flag is unset.
+ *
  *   STEP 0 (pre-step, photo requests only) — leaf Detection & Cropping.
  *     The free Hugging Face router also runs an open-source object detector:
  *     the COCO `facebook/detr-resnet-50` (DETR-ResNet-50) with a plant-only
@@ -88,7 +98,9 @@
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
  * when NO provider key is configured at all (the explicit
- * server-misconfiguration signal). No HTTP 500 ever.
+ * server-misconfiguration signal — never reached for a scripted turn while
+ * the demo mock is enabled: it answers 200 with zero keys configured). No
+ * HTTP 500 ever.
  *
  * Error reporting: each stage logs to the server console —
  * `[Step 1: Gemini Analysis Success]` / `[Step 1: MobileNetV2 Fallback
@@ -128,6 +140,11 @@ import {
   type LeafDetection,
 } from "@/lib/assistant/leaf-detect";
 import { confidenceBucket, diseaseFamilyForArabic, parsePlantLabel } from "@/lib/assistant/plantvillage";
+import {
+  buildDemoMockMessages,
+  getDemoMockResponse,
+  isDemoMockEnabled,
+} from "@/lib/assistant/demo-mock";
 import type {
   AssistantContext,
   AssistantDiagnosis,
@@ -136,6 +153,7 @@ import type {
   AssistantPreprocessing,
   AssistantRequestBody,
   AssistantResponseBody,
+  AssistantSource,
   DiagnosisCandidate,
 } from "@/lib/assistant/types";
 
@@ -2315,6 +2333,34 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   }
   if (!message && !image) {
     return bad("Provide a message and/or an image.");
+  }
+
+  /* ---- DEMO MOCK (opt-in, `DEMO_MOCK=1`; OFF by default) ------------ */
+  // First thing the pipeline does, BEFORE any provider key is read: when the
+  // demo flag is on, a scripted turn is answered straight from
+  // `@/lib/assistant/demo-mock` after a simulated 600 ms round-trip, so the
+  // demo recording can never burn a quota, hit a rate limit or wait on a cold
+  // model. A turn that is not part of the script returns null and every stage
+  // below runs exactly as before — the flag being off (the default) makes
+  // this block a no-op, which is what production and the test suite see.
+  if (isDemoMockEnabled()) {
+    const demoReply = await getDemoMockResponse(
+      buildDemoMockMessages(message, image?.data, history),
+    );
+    if (demoReply !== null) {
+      // Photo turns report `hybrid` and text turns `llm`, so the demo bubble
+      // renders exactly like a real model answer (no "vision only" notice).
+      const demoSource: AssistantSource = image ? "hybrid" : "llm";
+      console.log(
+        `[Demo Mock] scripted reply served (source=${demoSource}, ${demoReply.length} chars) — no provider was called.`,
+      );
+      return NextResponse.json({
+        reply: demoReply,
+        diagnosis: null,
+        source: demoSource,
+        warnings: ["Demo mock reply (DEMO_MOCK enabled) — no provider call was made."],
+      } satisfies AssistantResponseBody);
+    }
   }
 
   // Server-only secrets — never exposed to the client bundle. Read on every
