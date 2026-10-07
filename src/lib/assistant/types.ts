@@ -69,11 +69,14 @@ export interface AssistantHistoryTurn {
   content: string;
 }
 
+export type AssistantPreferredModel = "3.8" | "3.5";
+
 export interface AssistantRequestBody {
   message?: string;
   image?: AssistantImagePayload;
   context?: AssistantContext;
   history?: AssistantHistoryTurn[];
+  preferredModel?: AssistantPreferredModel;
 }
 
 /** One raw candidate from the vision classifier. */

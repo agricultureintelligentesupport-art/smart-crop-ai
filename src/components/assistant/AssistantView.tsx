@@ -26,6 +26,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
@@ -54,6 +55,7 @@ import {
 } from "@/lib/assistant/conversationStore";
 import { HISTORY_COPY } from "@/lib/assistant/historyCopy";
 import type {
+  AssistantPreferredModel,
   AssistantPreprocessing,
   AssistantResponseBody,
   AssistantSource,
@@ -75,6 +77,77 @@ import "./assistant.css";
 /** History UX tuning — storage-layer/presentation only, no effect on what is sent to the model. */
 const SAVE_DEBOUNCE_MS = 800;
 const MIN_BOOT_SKELETON_MS = 300;
+/** Versioned storage key for the UI model selector (never the history keys). */
+const ASSISTANT_MODEL_PREFERENCE_STORAGE_KEY = "phytoscan.assistant-model.v1";
+/** Today's default: the chain's primary id, i.e. the current behaviour. */
+const DEFAULT_PREFERRED_MODEL: AssistantPreferredModel = "3.8";
+
+function isAssistantPreferredModel(value: unknown): value is AssistantPreferredModel {
+  return value === "3.8" || value === "3.5";
+}
+
+/** Same-tab sync event, mirroring the guest/profile stores. */
+const ASSISTANT_MODEL_SYNC_EVENT = "phytoscan:assistant-model";
+/** In-memory mirror, so the selector still works when storage is blocked. */
+let sessionPreferredModel: AssistantPreferredModel | null = null;
+
+/**
+ * Reads the persisted selector choice — `null` on the server, when nothing is
+ * stored, or when storage throws (private mode / blocked localStorage).
+ */
+function readStoredPreferredModel(): AssistantPreferredModel | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = window.localStorage.getItem(ASSISTANT_MODEL_PREFERENCE_STORAGE_KEY);
+    return isAssistantPreferredModel(stored) ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+const readPreferredModel = (): AssistantPreferredModel =>
+  readStoredPreferredModel() ?? sessionPreferredModel ?? DEFAULT_PREFERRED_MODEL;
+
+function subscribePreferredModel(onStoreChange: () => void): () => void {
+  window.addEventListener(ASSISTANT_MODEL_SYNC_EVENT, onStoreChange);
+  window.addEventListener("storage", onStoreChange);
+  return () => {
+    window.removeEventListener(ASSISTANT_MODEL_SYNC_EVENT, onStoreChange);
+    window.removeEventListener("storage", onStoreChange);
+  };
+}
+
+/**
+ * The selector is an external (localStorage) store read through
+ * `useSyncExternalStore` on purpose: the server snapshot is always today's
+ * default, and React switches to the stored choice right after hydration. A
+ * plain `useState` initializer reads storage DURING hydration instead, and
+ * React then keeps the server-rendered attributes — the farmer would see
+ * phyto3.8 highlighted while requests actually carry the stored phyto3.5.
+ */
+function usePreferredModel() {
+  const preferredModel = useSyncExternalStore(
+    subscribePreferredModel,
+    readPreferredModel,
+    () => DEFAULT_PREFERRED_MODEL,
+  );
+
+  const choosePreferredModel = useCallback((model: AssistantPreferredModel) => {
+    sessionPreferredModel = model;
+    try {
+      window.localStorage.setItem(ASSISTANT_MODEL_PREFERENCE_STORAGE_KEY, model);
+    } catch {
+      /* private mode / blocked storage: the in-memory choice still applies */
+    }
+    try {
+      window.dispatchEvent(new CustomEvent(ASSISTANT_MODEL_SYNC_EVENT));
+    } catch {
+      /* event dispatch unavailable */
+    }
+  }, []);
+
+  return { preferredModel, choosePreferredModel };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Local chat model                                                   */
@@ -191,6 +264,8 @@ export default function AssistantView() {
   const [conversationMetas, setConversationMetas] = useState<ConversationMeta[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  /** UI model selector: "phyto3.8" (default) or "phyto3.5", persisted on-device. */
+  const { preferredModel, choosePreferredModel } = usePreferredModel();
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
   /** Whether the in-flight request carries a photo (drives the thinking label). */
@@ -512,6 +587,7 @@ export default function AssistantView() {
             image: image ? { data: image.data, mimeType: image.mimeType } : undefined,
             context: buildContext(),
             history,
+            preferredModel,
           }),
         });
         if (!res.ok) {
@@ -546,7 +622,7 @@ export default function AssistantView() {
         setBusy(false);
       }
     },
-    [busy, buildContext, messages, activeConversationId, t.chat.error, t.chat.unavailable],
+    [busy, buildContext, messages, activeConversationId, preferredModel, t.chat.error, t.chat.unavailable],
   );
 
   const retryLast = useCallback(() => {
@@ -807,6 +883,40 @@ export default function AssistantView() {
         <span aria-hidden className="chat-composer-fade" />
 
         <div className="chat-composer p-2">
+          <div className="mb-2 flex justify-start px-1">
+            <div
+              role="group"
+              dir={lang === "ar" ? "rtl" : "ltr"}
+              aria-label={lang === "ar" ? "اختيار نموذج المساعد" : "Modèle de l’assistant"}
+              className="flex items-center gap-1 rounded-full bg-white/80 p-1 shadow-sm ring-1 ring-emerald-900/10"
+            >
+              <button
+                type="button"
+                aria-pressed={preferredModel === "3.8"}
+                onClick={() => choosePreferredModel("3.8")}
+                className={`grid h-11 min-w-[76px] place-items-center rounded-full px-3 text-[11px] font-black transition-colors ${FOCUS_RING} ${
+                  preferredModel === "3.8"
+                    ? "bg-emerald-700 text-white shadow-sm"
+                    : "text-emerald-900/65 hover:bg-emerald-50"
+                }`}
+              >
+                phyto3.8
+              </button>
+              <button
+                type="button"
+                aria-pressed={preferredModel === "3.5"}
+                onClick={() => choosePreferredModel("3.5")}
+                className={`grid h-11 min-w-[76px] place-items-center rounded-full px-3 text-[11px] font-black transition-colors ${FOCUS_RING} ${
+                  preferredModel === "3.5"
+                    ? "bg-emerald-700 text-white shadow-sm"
+                    : "text-emerald-900/65 hover:bg-emerald-50"
+                }`}
+              >
+                phyto3.5
+              </button>
+            </div>
+          </div>
+
           <AnimatePresence>
             {pendingImage && (
               <motion.div

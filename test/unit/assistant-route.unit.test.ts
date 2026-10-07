@@ -38,7 +38,11 @@ const HF_KEY = "test-hf";
 const CODECRAFT_URL_PATTERN = /codecraftapi\.com/i;
 
 /** Exact per-generateContent Gemini attempt timeout, mirrored from the route. */
-const GEMINI_ATTEMPT_TIMEOUT_MS = 10_000;
+const GEMINI_ATTEMPT_TIMEOUT_MS = 6_000;
+/** Hard wall-clock budget shared by every Gemini stage, mirrored from the route. */
+const GEMINI_MASTER_TIMEOUT_MS = 40_000;
+/** A new attempt is never started with less than this much budget left. */
+const GEMINI_MIN_ATTEMPT_BUDGET_MS = 6_000;
 
 /**
  * Stage-2 (Gemini fallback) model chain, in order — must mirror the route's
@@ -108,6 +112,31 @@ function textRequest(message: string) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
+  });
+}
+
+/** A text request carrying the UI model selector (`preferredModel`). */
+function preferredModelRequest(preferredModel: unknown) {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: "How should I irrigate tomatoes?",
+      preferredModel,
+    }),
+  });
+}
+
+/** An image request carrying the UI model selector (`preferredModel`). */
+function preferredModelImageRequest(data: string, preferredModel: unknown) {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: "شخّص هذه الورقة",
+      image: { data, mimeType: "image/jpeg" },
+      preferredModel,
+    }),
   });
 }
 
@@ -1318,7 +1347,7 @@ test("Stage 1 network failure falls through to the Gemini fallback chain", async
   assert.equal(upstream.mock.callCount(), 2);
 });
 
-test("a Gemini generateContent attempt is aborted at exactly 10 s and falls through", async () => {
+test("a Gemini generateContent attempt is aborted at exactly 6 s and falls through", async () => {
   configureKeys();
   const calls: { url: string; init: RequestInit }[] = [];
   let geminiAborted = false;
@@ -1340,7 +1369,7 @@ test("a Gemini generateContent attempt is aborted at exactly 10 s and falls thro
     throw new Error(`unexpected upstream: ${url}`);
   });
 
-  // Fast-forward the 10 s per-attempt window instead of waiting for it.
+  // Fast-forward the 6 s per-attempt window instead of waiting for it.
   mock.timers.enable({ apis: ["setTimeout"] });
   let response: Response;
   try {
@@ -1350,10 +1379,10 @@ test("a Gemini generateContent attempt is aborted at exactly 10 s and falls thro
     // The request remains live just before the mandated per-attempt deadline.
     mock.timers.tick(GEMINI_ATTEMPT_TIMEOUT_MS - 1);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(geminiAborted, false, "Gemini was aborted before 10,000 ms");
+    assert.equal(geminiAborted, false, "Gemini was aborted before 6,000 ms");
     assert.equal(calls.length, 2, "the Gemini fallback started before its deadline");
     assert.ok(isGeminiUrl(calls[1].url));
-    // At exactly 10 s, the attempt's controller aborts the in-flight fetch.
+    // At exactly 6 s, the attempt's controller aborts the in-flight fetch.
     mock.timers.tick(1);
     response = await pending;
   } finally {
@@ -1366,14 +1395,14 @@ test("a Gemini generateContent attempt is aborted at exactly 10 s and falls thro
   assert.equal(payload.source, "direct");
   assert.match(warningText(payload), /Step 2 HF text model unavailable/);
   assert.match(warningText(payload), /Step 3 Gemini text fallback unavailable/);
-  assert.match(warningText(payload), /timeout after 10000 ms/);
+  assert.match(warningText(payload), /timeout after 6000 ms/);
   // The Gemini fallback ran after the primary failed — and nothing else did.
   assert.equal(calls.length, 2);
   assert.equal(calls[0].url, HF_ROUTER_CHAT_URL);
   assert.ok(isGeminiUrl(calls[1].url));
 });
 
-test("the 50 s master breaker aborts Gemini and executes MobileNetV2 + HF with the stable response schema", async () => {
+test("the 40 s Gemini budget stops key attempts and executes MobileNetV2 + HF with the stable response schema", async () => {
   process.env.GEMINI_API_KEY = "master-key-1";
   process.env.GEMINI_API_KEYS = "master-key-2,master-key-3,master-key-4,master-key-5,master-key-6";
   process.env.HUGGINGFACE_API_KEY = HF_KEY;
@@ -1413,11 +1442,11 @@ test("the 50 s master breaker aborts Gemini and executes MobileNetV2 + HF with t
     }
     assert.equal(geminiAttempts.length, 1, "the first Gemini attempt should be in flight");
 
-    // Four per-key 10 s expirations hand off immediately to fresh keys. At
-    // exactly 50 s the master controller aborts the fifth call and prevents
-    // key six from starting.
-    for (let elapsed = 10_000; elapsed <= 50_000; elapsed += 10_000) {
-      mock.timers.tick(10_000);
+    // Five per-key 6 s expirations hand off immediately to fresh keys; the
+    // sixth is aborted at 36 s, where the 40 s phase budget has less than the
+    // 6 s a new attempt requires, so no seventh call is ever launched.
+    for (let elapsed = GEMINI_ATTEMPT_TIMEOUT_MS; elapsed <= 36_000; elapsed += GEMINI_ATTEMPT_TIMEOUT_MS) {
+      mock.timers.tick(GEMINI_ATTEMPT_TIMEOUT_MS);
       await new Promise((resolve) => setImmediate(resolve));
     }
     response = await pending;
@@ -1426,7 +1455,7 @@ test("the 50 s master breaker aborts Gemini and executes MobileNetV2 + HF with t
   }
 
   assert.equal(response.status, 200);
-  assert.equal(geminiAttempts.length, 5, "the master deadline must stop further Gemini keys");
+  assert.equal(geminiAttempts.length, 6, "every pooled key gets one 6 s attempt");
   assert.equal(new Set(geminiAttempts.map(({ key }) => key)).size, geminiAttempts.length);
   assert.ok(geminiAttempts.every(({ signal }) => signal.aborted));
   assert.equal(mobilenetCalled, true, "MobileNetV2 must execute after the Gemini breaker");
@@ -1436,7 +1465,8 @@ test("the 50 s master breaker aborts Gemini and executes MobileNetV2 + HF with t
   assert.equal(payload.analysisSource, "mobilenet");
   assert.equal(payload.textSource, "huggingface");
   assert.equal(payload.source, "hybrid");
-  assert.match(warningText(payload), /Gemini master timeout after 50000 ms/);
+  assert.match(warningText(payload), /all Gemini API keys failed/);
+  assert.match(warningText(payload), /timeout after 6000 ms/);
   assert.deepEqual(Object.keys(payload), [
     "reply",
     "diagnosis",
@@ -1446,6 +1476,160 @@ test("the 50 s master breaker aborts Gemini and executes MobileNetV2 + HF with t
     "textSource",
     "warnings",
   ]);
+});
+
+test("the 40 s Gemini master budget aborts an in-flight attempt and the fallback starts immediately", async () => {
+  process.env.GEMINI_API_KEY = "budget-key-1,budget-key-2,budget-key-3";
+  process.env.HUGGINGFACE_API_KEY = HF_KEY;
+  const geminiAttempts: { key: string; signal: AbortSignal }[] = [];
+  let mobilenetCalled = false;
+  let hfCalled = false;
+
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isDetectUrl(target)) return Response.json([]);
+    if (isGeminiUrl(target)) {
+      const signal = init.signal as AbortSignal;
+      geminiAttempts.push({ key: requestedGeminiKey(target) ?? "", signal });
+      const hanging = new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), {
+          once: true,
+        });
+      });
+      if (geminiAttempts.length === 1) {
+        // Burn 34 s of the 40 s phase budget inside the first attempt: its own
+        // 6 s controller fires during the tick, so the SECOND attempt starts
+        // with exactly the 6 s minimum and is still in flight when the master
+        // budget expires.
+        mock.timers.tick(GEMINI_MASTER_TIMEOUT_MS - GEMINI_MIN_ATTEMPT_BUDGET_MS);
+      }
+      return await hanging;
+    }
+    if (isClassifyUrl(target)) {
+      mobilenetCalled = true;
+      return mobilenetReply("Tomato___Late_blight", 0.9);
+    }
+    if (isChatUrl(target)) {
+      hfCalled = true;
+      return chatReply(GROUNDED_REPLY);
+    }
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let response: Response;
+  try {
+    const pending = POST(imageRequest(LEAF_JPEG_B64));
+    for (let turn = 0; turn < 50 && geminiAttempts.length < 2; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(
+      geminiAttempts.length,
+      2,
+      "the second attempt starts with exactly the 6 s minimum budget left",
+    );
+
+    // The master budget expires 6 s later, mid-attempt.
+    mock.timers.tick(GEMINI_MIN_ATTEMPT_BUDGET_MS);
+    await new Promise((resolve) => setImmediate(resolve));
+    response = await pending;
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.equal(response.status, 200);
+  assert.equal(geminiAttempts.length, 2, "the master deadline must stop further Gemini keys");
+  assert.equal(new Set(geminiAttempts.map(({ key }) => key)).size, geminiAttempts.length);
+  assert.ok(geminiAttempts.every(({ signal }) => signal.aborted));
+  assert.equal(mobilenetCalled, true, "MobileNetV2 must execute as soon as the budget expires");
+  assert.equal(hfCalled, true, "the HF formatter must execute after MobileNetV2 succeeds");
+
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.analysisSource, "mobilenet");
+  assert.equal(payload.textSource, "huggingface");
+  assert.equal(payload.source, "hybrid");
+  assert.match(warningText(payload), /Gemini master timeout after 40000 ms/);
+  assert.deepEqual(Object.keys(payload), [
+    "reply",
+    "diagnosis",
+    "source",
+    "preprocessing",
+    "analysisSource",
+    "textSource",
+    "warnings",
+  ]);
+});
+
+test("no new Gemini key attempt starts with less than 6 s of the phase budget left", async () => {
+  process.env.GEMINI_API_KEY = [
+    "guard-key-1",
+    "guard-key-2",
+    "guard-key-3",
+    "guard-key-4",
+    "guard-key-5",
+    "guard-key-6",
+    "guard-key-7",
+    "guard-key-8",
+  ].join(",");
+  process.env.HUGGINGFACE_API_KEY = HF_KEY;
+  const geminiKeys: string[] = [];
+  let mobilenetCalled = false;
+  let hfCalled = false;
+
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const target = String(url);
+    if (isDetectUrl(target)) return Response.json([]);
+    if (isGeminiUrl(target)) {
+      geminiKeys.push(requestedGeminiKey(target) ?? "");
+      const signal = init.signal as AbortSignal;
+      return await new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), {
+          once: true,
+        });
+      });
+    }
+    if (isClassifyUrl(target)) {
+      mobilenetCalled = true;
+      return mobilenetReply("Tomato___Late_blight", 0.9);
+    }
+    if (isChatUrl(target)) {
+      hfCalled = true;
+      return chatReply(GROUNDED_REPLY);
+    }
+    throw new Error(`unexpected upstream request: ${target}`);
+  });
+
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let response: Response;
+  try {
+    const pending = POST(imageRequest(LEAF_JPEG_B64));
+    for (let turn = 0; turn < 50 && geminiKeys.length === 0; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    // Six 6 s attempts land at 36 s, where only 4 s of the 40 s budget remain.
+    for (let elapsed = GEMINI_ATTEMPT_TIMEOUT_MS; elapsed <= 36_000; elapsed += GEMINI_ATTEMPT_TIMEOUT_MS) {
+      mock.timers.tick(GEMINI_ATTEMPT_TIMEOUT_MS);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    response = await pending;
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    geminiKeys.length,
+    6,
+    "two pooled keys stay untried: an attempt below the 6 s minimum is never launched",
+  );
+  assert.equal(new Set(geminiKeys).size, geminiKeys.length);
+  assert.equal(mobilenetCalled, true, "the fallback starts as soon as the budget guard fires");
+  assert.equal(hfCalled, true);
+
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "hybrid");
+  assert.match(warningText(payload), /Gemini budget exhausted/);
+  assert.match(warningText(payload), /below the 6000 ms needed to start another attempt/);
 });
 
 test("successful Gemini and MobileNetV2 + HF fallback responses expose the identical JSON key set", async () => {
@@ -1736,6 +1920,151 @@ test("a blank GEMINI_MODEL falls back to the gemini-3.8-flash default", async ()
   assert.equal(response.status, 200);
   assert.equal(((await response.json()) as AssistantPayload).source, "llm");
   assert.deepEqual(urls.map(requestedGeminiModel), [GEMINI_FALLBACK_ORDER[0]]);
+});
+
+/* ------------------------------------------------------------------ */
+/*  UI model selector — `preferredModel` ("3.8" | "3.5")                */
+/* ------------------------------------------------------------------ */
+
+/** The chain ids the selector may promote, mirrored from the route config. */
+const PREFERRED_MODEL_IDS = {
+  "3.8": GEMINI_FALLBACK_ORDER[0],
+  "3.5": GEMINI_FALLBACK_ORDER[1],
+} as const;
+
+test('preferredModel "3.5" promotes gemini-3.5-flash to the first attempt (Step 3)', async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    urls.push(String(url));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+    return geminiReply("اسقِ في الصباح الباكر.");
+  });
+
+  const response = await POST(preferredModelRequest("3.5"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  // One round-trip against the selected id, and no new response field.
+  assert.deepEqual(urls.map(requestedGeminiModel), [PREFERRED_MODEL_IDS["3.5"]]);
+  assert.deepEqual(Object.keys(payload), [
+    "reply",
+    "diagnosis",
+    "source",
+    "preprocessing",
+    "analysisSource",
+    "textSource",
+    "warnings",
+  ]);
+});
+
+test('preferredModel "3.8" keeps today\'s default first (Step 3)', async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    urls.push(String(url));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+    return geminiReply("اسقِ في الصباح الباكر.");
+  });
+
+  const response = await POST(preferredModelRequest("3.8"));
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).source, "llm");
+  assert.deepEqual(urls.map(requestedGeminiModel), [PREFERRED_MODEL_IDS["3.8"]]);
+});
+
+test('preferredModel "3.5" reorders the Step 1 image chain too', async () => {
+  configureKeys();
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const target = String(url);
+    if (isDetectUrl(target)) return Response.json([]);
+    if (isGeminiUrl(target)) {
+      urls.push(target);
+      return geminiAnalysis();
+    }
+    if (isChatUrl(target)) return chatReply(GROUNDED_REPLY);
+    throw new Error(`unexpected upstream: ${target}`);
+  });
+
+  const response = await POST(preferredModelImageRequest(LEAF_JPEG_B64, "3.5"));
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.analysisSource, "gemini");
+  assert.deepEqual(urls.map(requestedGeminiModel), [PREFERRED_MODEL_IDS["3.5"]]);
+});
+
+test('preferredModel "3.5" walks the whole reordered chain once, without duplicates', async () => {
+  process.env.GEMINI_API_KEY = "reorder-key-1,reorder-key-2,reorder-key-3";
+  process.env.HUGGINGFACE_API_KEY = HF_KEY;
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    if (isGeminiUrl(String(url))) {
+      urls.push(String(url));
+      return geminiModelNotFound(requestedGeminiModel(String(url)) ?? "unknown");
+    }
+    throw new Error(`unexpected upstream: ${url}`);
+  });
+
+  const response = await POST(preferredModelRequest("3.5"));
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).source, "direct");
+
+  const models = urls.map((url) => requestedGeminiModel(url) ?? "");
+  // Selected id first, then the rest of the existing chain in order.
+  assert.deepEqual(models, [
+    GEMINI_FALLBACK_ORDER[1],
+    GEMINI_FALLBACK_ORDER[0],
+    GEMINI_FALLBACK_ORDER[2],
+  ]);
+  assert.equal(new Set(models).size, models.length, "no id may be attempted twice");
+  assert.deepEqual(urls.map(requestedGeminiKey), [
+    "reorder-key-1",
+    "reorder-key-2",
+    "reorder-key-3",
+  ]);
+});
+
+for (const invalid of [undefined, null, "", "2.5", "3.50", "gemini-3.5-flash", 3.5, {}] as const) {
+  test(`an absent or invalid preferredModel (${JSON.stringify(invalid)}) leaves the default chain unchanged`, async () => {
+    configureKeys();
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+      urls.push(String(url));
+      assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+      return geminiReply("اسقِ في الصباح الباكر.");
+    });
+
+    const response = await POST(
+      invalid === undefined ? request() : preferredModelRequest(invalid),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(((await response.json()) as AssistantPayload).source, "llm");
+    assert.deepEqual(urls.map(requestedGeminiModel), [GEMINI_FALLBACK_ORDER[0]]);
+  });
+}
+
+test("a GEMINI_MODEL override that excludes the selected id ignores preferredModel", async () => {
+  configureKeys();
+  process.env.GEMINI_MODEL = "gemini-3.7-flash";
+  const urls: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
+    urls.push(String(url));
+    assert.ok(isGeminiUrl(String(url)), `unexpected upstream: ${url}`);
+    return geminiReply("اسقِ في الصباح الباكر.");
+  });
+
+  // "3.8" is not part of the overridden chain — no new id is invented, so the
+  // configured chain is used exactly as resolved.
+  const response = await POST(preferredModelRequest("3.8"));
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as AssistantPayload).source, "llm");
+  assert.deepEqual(urls.map(requestedGeminiModel), ["gemini-3.7-flash"]);
 });
 
 /* ------------------------------------------------------------------ */

@@ -47,8 +47,8 @@
  *     Runs ONLY after Step 2 failed. The same Gemini model chain and key pool
  *     (`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered `GEMINI_API_KEY_N`,
  *     randomly selected without replacement for the entire request; each
- *     Gemini API call has a 10 s AbortController timeout and the shared
- *     Gemini phase has a 50 s hard deadline) turn the SAME `AnalysisData` into
+ *     Gemini API call has a 6 s AbortController timeout and the shared
+ *     Gemini phase has a 40 s hard deadline) turn the SAME `AnalysisData` into
  *     the same kind of explanation. NO image is attached here: Gemini must
  *     format the data, not re-analyse the photo. This branch also covers the
  *     edge case where the analysis came from MobileNetV2 and Step 2 then
@@ -105,6 +105,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import sharp from "sharp";
 import {
+  GEMINI_FALLBACK_MODELS,
+  GEMINI_MODEL_DEFAULT,
   resolveGeminiModels as resolveGeminiChain,
   type GeminiModel,
 } from "@/lib/assistant/gemini-models";
@@ -138,6 +140,7 @@ import type {
   AssistantImagePayload,
   AssistantHistoryTurn,
   AssistantPreprocessing,
+  AssistantPreferredModel,
   AssistantRequestBody,
   AssistantResponseBody,
   DiagnosisCandidate,
@@ -436,15 +439,74 @@ function resolveGeminiModels(): GeminiModel[] {
   return resolveGeminiChain(process.env.GEMINI_MODEL);
 }
 
+/**
+ * The UI model selector (`preferredModel` in the request body) maps onto ids
+ * that ALREADY exist in the configured chain — no new model id is introduced
+ * here and no environment variable changes. "3.8" is the chain's default
+ * primary (`GEMINI_MODEL_DEFAULT`); "3.5" is the long-lived `gemini-3.5-flash`
+ * already listed first in `GEMINI_FALLBACK_MODELS`.
+ */
+const GEMINI_PREFERRED_MODEL_IDS: Readonly<Record<AssistantPreferredModel, string>> = {
+  "3.8": GEMINI_MODEL_DEFAULT.id,
+  "3.5": GEMINI_FALLBACK_MODELS[0].id,
+};
+
+/** Accepts only the two documented selector values; anything else is ignored. */
+function parsePreferredModel(value: unknown): AssistantPreferredModel | null {
+  return value === "3.8" || value === "3.5" ? value : null;
+}
+
+/**
+ * Per-request chain reordering for the selector: move the chosen id to the
+ * front, keep the rest of the existing chain after it, no duplicates. An
+ * absent/invalid choice — or a choice whose id is not part of the resolved
+ * chain (e.g. `GEMINI_MODEL` pins another primary) — returns the chain
+ * untouched, i.e. exactly today's default behaviour.
+ */
+function applyPreferredGeminiModel(
+  models: GeminiModel[],
+  preferred: AssistantPreferredModel | null,
+): GeminiModel[] {
+  if (!preferred) return models;
+  const id = GEMINI_PREFERRED_MODEL_IDS[preferred];
+  const chosen = models.find((model) => model.id === id);
+  if (!chosen) return models;
+  return [chosen, ...models.filter((model) => model.id !== id)];
+}
+
 
 /** Exact timeout for every individual Gemini generateContent request. */
-const GEMINI_ATTEMPT_TIMEOUT_MS = 10_000;
-/** Hard wall-clock limit shared by every Gemini stage in one assistant request. */
-const GEMINI_MASTER_TIMEOUT_MS = 50_000;
+const GEMINI_ATTEMPT_TIMEOUT_MS = 6_000;
+/** Requested hard wall-clock limit shared by every Gemini stage in one request. */
+const GEMINI_MASTER_TIMEOUT_REQUEST_MS = 40_000;
 /** Stop upstream work one second before Vercel's 60-second function deadline. */
 const ASSISTANT_RESPONSE_DEADLINE_MS = 59_000;
 /** Reserve text-generation time after MobileNet when the Gemini breaker fires. */
 const FALLBACK_TEXT_RESERVE_MS = 4_000;
+
+/** Vercel function budget, derived from this route's own `maxDuration` (60 s). */
+const VERCEL_FUNCTION_BUDGET_MS = maxDuration * 1_000;
+/** Wall-clock the fallback chain still needs once the Gemini breaker fires. */
+const FALLBACK_MIN_REMAINING_MS = 12_000;
+/**
+ * Derived guard (not a new knob): the Gemini master budget may never consume
+ * more than `VERCEL_FUNCTION_BUDGET_MS - FALLBACK_MIN_REMAINING_MS`
+ * (60_000 - 12_000 = 48_000 ms), so when the breaker fires the existing
+ * fallback chain (MobileNetV2 → HF LLM → built-in formatter) always starts
+ * with at least ~12 s left before the function limit. `maxDuration` itself is
+ * NOT changed. The requested 40_000 ms sits inside that cap, so 40_000 ms is
+ * the effective master budget.
+ */
+const GEMINI_MASTER_TIMEOUT_MS = Math.min(
+  GEMINI_MASTER_TIMEOUT_REQUEST_MS,
+  VERCEL_FUNCTION_BUDGET_MS - FALLBACK_MIN_REMAINING_MS,
+);
+/**
+ * Never launch a fresh key attempt when less than this much Gemini budget is
+ * left — such an attempt would be aborted almost immediately and would only
+ * burn a pool key and wall-clock time the fallback needs.
+ */
+const GEMINI_MIN_ATTEMPT_BUDGET_MS = 6_000;
 
 /**
  * Output cap for a Gemini call. Slightly above {@link MAX_REPLY_TOKENS} because
@@ -479,13 +541,22 @@ class GeminiPhaseBudget {
     return Math.max(0, this.deadlineAt - Date.now());
   }
 
+  /**
+   * True only when a NEW attempt may still be launched: the phase is live and
+   * at least {@link GEMINI_MIN_ATTEMPT_BUDGET_MS} remains, so the attempt is
+   * not aborted the instant it starts.
+   */
+  canStartAttempt(): boolean {
+    return !this.expired && this.remainingMs() >= GEMINI_MIN_ATTEMPT_BUDGET_MS;
+  }
+
   dispose(): void {
     clearTimeout(this.timer);
   }
 }
 
 interface AssistantRequestRuntime {
-  /** Primary work, including Gemini, must stop at this 50-second boundary. */
+  /** Primary work, including Gemini, must stop at this 40-second boundary. */
   primaryDeadlineAt: number;
   /** Leave one second for serialization and the Vercel response hand-off. */
   responseDeadlineAt: number;
@@ -897,6 +968,7 @@ async function analyzeImageWithGemini(
   keyManager: GeminiKeyManager,
   budget: GeminiPhaseBudget,
   lang: "ar" | "fr",
+  preferredModel: AssistantPreferredModel | null = null,
 ): Promise<AnalysisResult> {
   const userContent =
     lang === "fr"
@@ -915,6 +987,7 @@ async function analyzeImageWithGemini(
       },
       keyManager,
       budget,
+      preferredModel,
     );
 
   let result: GeminiResult;
@@ -1000,6 +1073,7 @@ async function runImageAnalysisStage(options: {
   geminiApiKeys: readonly string[];
   geminiKeyManager: GeminiKeyManager;
   geminiBudget: GeminiPhaseBudget;
+  preferredModel: AssistantPreferredModel | null;
   fallbackDeadlineAt: number;
   huggingfaceKey: string | null;
   lang: "ar" | "fr";
@@ -1011,6 +1085,7 @@ async function runImageAnalysisStage(options: {
     geminiApiKeys,
     geminiKeyManager,
     geminiBudget,
+    preferredModel,
     fallbackDeadlineAt,
     huggingfaceKey,
     lang,
@@ -1025,6 +1100,7 @@ async function runImageAnalysisStage(options: {
         geminiKeyManager,
         geminiBudget,
         lang,
+        preferredModel,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1393,6 +1469,15 @@ async function generateWithGeminiModel(
       "master-timeout",
     );
   }
+  if (!budget.canStartAttempt()) {
+    // Not enough Gemini budget left for a real attempt: stop now so the
+    // fallback chain starts immediately instead of aborting a doomed call.
+    throw new GeminiError(
+      `Gemini budget exhausted — only ${budget.remainingMs()} ms remain, less than the ${GEMINI_MIN_ATTEMPT_BUDGET_MS} ms needed to start an attempt`,
+      undefined,
+      "master-timeout",
+    );
+  }
 
   const { systemInstruction, userContent, image, history, extraConfig } = prompt;
   try {
@@ -1523,15 +1608,17 @@ function isGeminiRetryableError(error: unknown): error is GeminiError {
  * and text formatting, and a lease is never reused across model fallbacks or
  * stages. Availability errors advance the model chain; timeouts and other
  * request failures immediately rotate to another untried key on the same
- * model. Every call has an exact 10 s attempt timeout under the shared 50 s
- * phase deadline.
+ * model. Every call has an exact 6 s attempt timeout under the shared 40 s
+ * phase deadline; a fresh attempt is never started when less than
+ * {@link GEMINI_MIN_ATTEMPT_BUDGET_MS} of that phase budget remains.
  */
 async function runGeminiWithKeyPool(
   prompt: GeminiPrompt,
   keyManager: GeminiKeyManager,
   budget: GeminiPhaseBudget,
+  preferredModel: AssistantPreferredModel | null = null,
 ): Promise<GeminiResult> {
-  const models = resolveGeminiModels();
+  const models = applyPreferredGeminiModel(resolveGeminiModels(), preferredModel);
   const failures: string[] = [];
   const rotationWarnings: string[] = [];
   let modelIndex = 0;
@@ -1539,7 +1626,7 @@ async function runGeminiWithKeyPool(
   let modelChainExhausted = false;
 
   while (
-    !budget.expired &&
+    budget.canStartAttempt() &&
     keyManager.remainingCount > 0 &&
     modelIndex < models.length
   ) {
@@ -1606,6 +1693,15 @@ async function runGeminiWithKeyPool(
   if (budget.expired) {
     throw new GeminiError(
       `Gemini master timeout after ${GEMINI_MASTER_TIMEOUT_MS} ms`,
+      undefined,
+      "master-timeout",
+    );
+  }
+  if (!budget.canStartAttempt() && keyManager.remainingCount > 0) {
+    // Untried keys exist but the phase budget is too small to use one: stop
+    // now (same "master-timeout" kind) so the fallback starts immediately.
+    throw new GeminiError(
+      `Gemini budget exhausted — ${budget.remainingMs()} ms remain, below the ${GEMINI_MIN_ATTEMPT_BUDGET_MS} ms needed to start another attempt`,
       undefined,
       "master-timeout",
     );
@@ -2351,6 +2447,12 @@ async function handleAssistant(
     : [];
   const isFirstTurn = history.length === 0;
   const image = body.image;
+  /**
+   * Optional UI model selector. Absent or invalid ⇒ `null`, i.e. exactly the
+   * chain order the route uses today; a valid value only REORDERS that chain
+   * for this request (see {@link applyPreferredGeminiModel}).
+   */
+  const preferredModel = parsePreferredModel(body.preferredModel);
 
   if (message.length > MAX_MESSAGE_CHARS) {
     return bad("Message too long.");
@@ -2427,6 +2529,7 @@ async function handleAssistant(
       geminiApiKeys,
       geminiKeyManager,
       geminiBudget,
+      preferredModel,
       fallbackDeadlineAt: runtime.responseDeadlineAt,
       huggingfaceKey,
       lang,
@@ -2507,7 +2610,7 @@ async function handleAssistant(
   // gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
   // 3.5-flash-lite on a retired-id 404) via the Generative Language REST API,
   // keyed with the full
-  // Request-wide no-repeat key manager and 10 s per-call / 50 s master budgets.
+  // Request-wide no-repeat key manager and 6 s per-call / 40 s master budgets.
   // Gemini is a FORMATTER here: the prompt is ANALYSIS_DATA and NO image is
   // attached, so it cannot re-analyse the photo even by accident. This also
   // covers the edge case where the analysis came from MobileNetV2 and the HF
@@ -2522,6 +2625,7 @@ async function handleAssistant(
         },
         geminiKeyManager,
         geminiBudget,
+        preferredModel,
       );
       reply = assertUsableTextReply(geminiResult.text, analysis?.data ?? null);
       textSource = "gemini_fallback";
