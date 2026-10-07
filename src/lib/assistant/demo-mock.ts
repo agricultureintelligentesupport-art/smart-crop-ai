@@ -300,12 +300,15 @@ export function buildDemoMockMessages(
  * `null` when the turn is not part of the script (the real orchestrator then
  * runs untouched).
  *
+ * Accepts the same `{ role, content, image? }` turns the route builds — plus
+ * the legacy `imageUrl` alias some stored turns still carry, which is why the
+ * parameter is the {@link DemoMockMessage} contract (both photo fields are
+ * understood, see {@link countImages}).
+ *
  * The simulated 600 ms delay is applied ONLY when a match was found, so a
  * non-scripted turn never pays for it before reaching the real pipeline.
  */
-export async function getDemoMockResponse(
-  messages: Array<{ role: string; content: string; image?: string }>,
-): Promise<string | null> {
+export async function getDemoMockResponse(messages: DemoMockMessage[]): Promise<string | null> {
   if (!messages || messages.length === 0) return null;
 
   const userMessages = messages.filter((message) => message.role === "user");
@@ -313,7 +316,7 @@ export async function getDemoMockResponse(
   if (!lastUserMsg) return null;
 
   const text = (lastUserMsg.content || "").trim().toLowerCase();
-  const hasImage = Boolean(lastUserMsg.image || (lastUserMsg as { imageUrl?: string }).imageUrl);
+  const hasImage = Boolean(lastUserMsg.image || lastUserMsg.imageUrl);
   const totalImages = countImages(messages);
 
   const reply = resolveScriptedReply(
