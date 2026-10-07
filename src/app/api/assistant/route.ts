@@ -46,6 +46,7 @@
  *   STEP 3 — TEXT FALLBACK (Google Gemini, FORMAT-ONLY)
  *     Runs ONLY after Step 2 failed. The same Gemini model chain and key pool
  *     (`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered `GEMINI_API_KEY_N`,
+ *     with `GEMINI_API_KEY_4` leading the pool whenever it is configured,
  *     rotated on 429 / RESOURCE_EXHAUSTED / quota; one shared 18 s
  *     `AbortController` for the whole chain) turn the SAME `AnalysisData` into
  *     the same kind of explanation. NO image is attached here: Gemini must
@@ -78,9 +79,10 @@
  *   final `reply`.
  *
  * Gemini credentials — every environment variable starting with
- * `GEMINI_API_KEY` (`GEMINI_API_KEY`, the `GEMINI_API_KEYS` comma-separated
- * pool, and numbered `GEMINI_API_KEY_N` variants; combined, trimmed,
- * deduplicated, rotation-ordered) — and the Hugging Face secret
+ * `GEMINI_API_KEY` (`GEMINI_API_KEY_4`, which is tried first, plus
+ * `GEMINI_API_KEY`, the `GEMINI_API_KEYS` comma-separated pool, and the
+ * numbered `GEMINI_API_KEY_N` variants; combined, trimmed, deduplicated,
+ * rotation-ordered) — and the Hugging Face secret
  * (`HUGGINGFACE_API_KEY`, with Hugging Face's conventional `HF_TOKEN` accepted
  * as an alias) are read from `process.env` on the server only. They are never
  * shipped to the browser and never echoed back in a response body.
@@ -458,13 +460,24 @@ const GEMINI_TIMEOUT_MS = 18_000;
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
 /**
+ * The lead Gemini credential: whenever `GEMINI_API_KEY_4` is configured
+ * (unset or blank = it simply does not participate), it is ranked ahead of
+ * every other variable so the rotation pool opens with it and the very first
+ * upstream request of both Gemini roles — Step 1 image analysis and Step 3
+ * text fallback — is made with this key.
+ */
+const GEMINI_PRIORITY_KEY_ENV = "GEMINI_API_KEY_4";
+
+/**
  * Resolve every configured Gemini credential at request time. Every
  * environment variable whose name starts with `GEMINI_API_KEY` participates,
  * so deployments can add `GEMINI_API_KEY_3`, `GEMINI_API_KEY_4`, and so on
  * without another code change. Each value may itself be a comma-separated
- * pool. Numeric variants are sorted naturally after the base variable so
- * rotation remains deterministic (`GEMINI_API_KEY` → `_2` → `_3` …).
- * Whitespace-only entries are ignored and duplicate credentials are removed.
+ * pool. `GEMINI_API_KEY_4` is tried FIRST whenever it is configured; the
+ * remaining variables are then sorted naturally so rotation stays
+ * deterministic (`GEMINI_API_KEY` → `_1` → `_2` → `_3` … → the
+ * `GEMINI_API_KEYS` pool). Whitespace-only entries are ignored and duplicate
+ * credentials are removed.
  */
 function resolveGeminiApiKeys(): string[] {
   const prefix = "GEMINI_API_KEY";
@@ -472,6 +485,8 @@ function resolveGeminiApiKeys(): string[] {
     .filter(([name, value]) => name.startsWith(prefix) && typeof value === "string")
     .sort(([first], [second]) => {
       const order = (name: string): [number, string] => {
+        // Designated lead credential — always the first key tried.
+        if (name === GEMINI_PRIORITY_KEY_ENV) return [-1, name];
         if (name === prefix) return [0, name];
         const suffix = name.slice(`${prefix}_`.length);
         return [/^\d+$/.test(suffix) ? Number(suffix) : Number.POSITIVE_INFINITY, name];
@@ -2327,6 +2342,9 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   //                           All sources above are combined into ONE pool
   //                           (trimmed, deduplicated, rotation-ordered) and
   //                           rotated on 429 / RESOURCE_EXHAUSTED / quota.
+  //   GEMINI_API_KEY_4      → the designated LEAD credential: whenever it is
+  //                           set it heads the rotation pool and is therefore
+  //                           the first key tried by both Gemini roles.
   //   HUGGINGFACE_API_KEY   → Step 1 FALLBACK image model (MobileNetV2) +
   //                           Step 2 PRIMARY text model (HF_TOKEN, Hugging
   //                           Face's own conventional variable name, is

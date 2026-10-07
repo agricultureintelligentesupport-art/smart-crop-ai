@@ -190,8 +190,9 @@ photo (base64)
   │    does not correspond to the AnalysisData.
   │
   └─ Step 3 · TEXT FALLBACK (Google Gemini, FORMAT-ONLY) — reached ONLY after
-       Step 2 failed. Same model chain and key pool (GEMINI_API_KEY +
-       GEMINI_API_KEYS + numbered GEMINI_API_KEY_N, rotated on 429 /
+       Step 2 failed. Same model chain and key pool (GEMINI_API_KEY_4 leads
+       when set, then GEMINI_API_KEY + GEMINI_API_KEYS + numbered
+       GEMINI_API_KEY_N, rotated on 429 /
        RESOURCE_EXHAUSTED / quota; one shared 18 s AbortController). It gets
        the AnalysisData and NO image, so it formats the data and never
        re-analyses the photo — including the edge case where the analysis came
@@ -266,7 +267,8 @@ and analytics; the user only ever sees the final `reply`. The same
 information is logged server-side, with a final `[Orchestrator]` line
 summarising the whole route.
 
-Gemini key pool: `GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered
+Gemini key pool: `GEMINI_API_KEY_4` (tried first whenever it is set) +
+`GEMINI_API_KEY` + `GEMINI_API_KEYS` + numbered
 `GEMINI_API_KEY_N` — rotated on 429 / RESOURCE_EXHAUSTED / quota. The
 CodeCraft gateway and its `CODECRAFT_*` environment variables are gone;
 leftover values are ignored.

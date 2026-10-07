@@ -784,6 +784,35 @@ test("Gemini key pool: GEMINI_API_KEYS + GEMINI_API_KEY + numbered variants merg
   assert.doesNotMatch(JSON.stringify(payload), /alpha|gamma|beta|delta/);
 });
 
+test("Gemini key pool: GEMINI_API_KEY_4 heads the rotation — tried FIRST, the older variables follow", async () => {
+  // The designated lead credential is configured alongside the older
+  // variables: _4 must open the pool, then the base variable and the remaining
+  // numbered variants keep their existing deterministic order.
+  process.env.GEMINI_API_KEY = " base ";
+  process.env.GEMINI_API_KEY_3 = " third ";
+  process.env.GEMINI_API_KEY_4 = " lead ";
+  const attempted: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    const key = requestedGeminiKey(String(url));
+    attempted.push(key ?? "");
+    if (key === "third") return geminiReply("إجابة من المفتاح الأخير.");
+    return geminiHttpError(429, "Resource has been exhausted (RESOURCE_EXHAUSTED).");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as AssistantPayload;
+  assert.equal(payload.source, "llm");
+  assert.equal(payload.reply, "إجابة من المفتاح الأخير.");
+  // The lead key is the FIRST credential touched; the pool does not lose the
+  // older keys, it only reorders them behind _4.
+  assert.deepEqual(attempted, ["lead", "base", "third"]);
+  assert.match(warningText(payload), /key rotation attempt 2\/3/);
+  assert.match(warningText(payload), /key rotation attempt 3\/3/);
+  // The key values never leak to the client.
+  assert.doesNotMatch(JSON.stringify(payload), /lead|base|third/);
+});
+
 /* ------------------------------------------------------------------ */
 /*  STEP 1 — IMAGE ANALYSIS: Gemini PRIMARY → MobileNetV2 FALLBACK      */
 /* ------------------------------------------------------------------ */
