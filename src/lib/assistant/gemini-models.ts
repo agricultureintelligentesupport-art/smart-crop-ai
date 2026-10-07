@@ -201,7 +201,7 @@ function isGeneralPurposeFlash(id: string): boolean {
  * Throws on any transport/HTTP failure so the caller can record it as
  * `error` and carry on — a health check must never break a request. The
  * timeout is an explicit `AbortController` (not `AbortSignal.timeout`) so the
- * request's own 45 s deadline can cancel it too, and so tests can drive it.
+ * request's own 60 s deadline can cancel it too, and so tests can drive it.
  */
 async function listGenerateContentModels(
   apiKey: string,

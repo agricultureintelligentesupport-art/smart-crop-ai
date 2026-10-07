@@ -53,7 +53,7 @@
  * classify a dead key — it is matched in memory and never stored or emitted.
  */
 import { resolveGeminiModels, type GeminiModel } from "@/lib/assistant/gemini-models";
-import { resolveGeminiKeyPool } from "@/lib/assistant/providers";
+import { resolveGeminiKeyPool, shuffleGeminiKeyPool } from "@/lib/assistant/providers";
 import type { LeafFailure } from "@/lib/leaf-diagnose";
 
 /**
@@ -85,13 +85,14 @@ const ERROR_BODY_PEEK_LIMIT = 16 * 1024;
 type Env = Readonly<Record<string, string | undefined>>;
 
 /**
- * The chat's Gemini key pool, resolved read-only from the environment — the
- * SAME `resolveGeminiKeyPool()` the assistant route rotates, so the two
- * pipelines can never disagree about which credential to spend first:
- * `GEMINI_API_KEY_4` FIRST (a different Google project usually means its own
- * quota), then `GEMINI_API_KEY`, then the numbered variants in numeric order,
- * then the legacy comma-separated `GEMINI_API_KEYS` pool. Blank entries are
- * dropped, duplicates removed and each value trimmed.
+ * The chat's CONFIGURED Gemini key inventory, read-only from the environment —
+ * the same `resolveGeminiKeyPool()` the assistant route draws from, so the two
+ * pipelines can never disagree about WHICH credentials exist: `GEMINI_API_KEY`
+ * and its numbered variants, then the legacy comma-separated `GEMINI_API_KEYS`
+ * pool. Blank entries are dropped, duplicates removed and each value trimmed.
+ *
+ * This is the inventory (stable order, used by tests and diagnostics). The
+ * order a request actually walks is {@link resolveLeafGeminiRotation}.
  */
 export function resolveLeafGeminiKeys(env: Env = process.env): string[] {
   return resolveGeminiKeyPool(env).map((entry) => entry.key);
@@ -102,12 +103,23 @@ export function resolveLeafGeminiKeys(env: Env = process.env): string[] {
  * first, then the shared fallbacks — gemini-3.8-flash → gemini-3.5-flash →
  * gemini-3.5-flash-lite unless the shared config says otherwise.
  */
+/**
+ * The keys in THIS REQUEST's rotation order — the configured pool drawn in a
+ * random permutation (`shuffleGeminiKeyPool`), so no key is repeated inside one
+ * cycle and consecutive requests do not always start on the same credential.
+ * `generateLeafGemini` walks the array in order, parking keys exactly as the
+ * chat route does.
+ */
+export function resolveLeafGeminiRotation(env: Env = process.env): string[] {
+  return shuffleGeminiKeyPool(resolveGeminiKeyPool(env)).map((entry) => entry.key);
+}
+
 export function resolveLeafGeminiModels(env: Env = process.env): GeminiModel[] {
   return resolveGeminiModels(env.GEMINI_MODEL);
 }
 
 export interface LeafGeminiOptions {
-  /** Credentials in rotation order — see {@link resolveLeafGeminiKeys}. */
+  /** Credentials in rotation order — see {@link resolveLeafGeminiRotation}. */
   keys: readonly string[];
   /** Model chain in fallback order — see {@link resolveLeafGeminiModels}. */
   models: readonly GeminiModel[];

@@ -1,20 +1,19 @@
 /**
- * Step 0 — leaf detection & smart cropping: shared geometry and payload
- * parsing for the "Detection & Cropping" preprocessing stage.
+ * Leaf detection & smart cropping — geometry and payload parsing for the
+ * "Detection & Cropping" pre-step.
  *
- * The stage runs BEFORE the PlantVillage disease classifier (Step 1): an
- * open-source object detector localises the leaf in the photo, the handler
- * crops the detected region (removing hands, soil, pots and other background
- * noise) and forwards ONLY the cropped pixels to the classifier — background
- * clutter is the most common cause of confident-but-wrong PlantVillage
- * verdicts, because the classifier has no notion of "leaf" and happily
- * classifies dirt.
+ * ⚠️ THE STAGE IS REMOVED FROM THE PIPELINE. `/api/assistant` no longer detects
+ * a leaf or crops anything: every stage receives the original frame, and
+ * `AssistantPreprocessing.status` is always `"skipped"`. Nothing in `src/`
+ * imports this module any more — it is kept (with its unit tests) as the
+ * reviewed, dependency-free implementation of the geometry, so the stage can be
+ * restored deliberately rather than reintroduced from scratch:
  *
- * This module is deliberately dependency-free (no sharp, no fetch, no DOM) so
- * it is importable from the route handler AND from `node --test` unit tests.
- * The I/O half (Hugging Face call + sharp crop) lives in the route.
+ *   object detector → below-threshold boxes dropped → cluster merged → padded
+ *   and clamped crop rectangle → the crop handed to a narrow classifier
  *
- * Server-safe: no browser APIs, no React.
+ * Server-safe: no browser APIs, no React, no I/O (the detector call and the
+ * sharp crop used to live in the route).
  */
 
 /** Pixel-space axis-aligned bounding box (HF object-detection convention). */

@@ -1,4 +1,18 @@
-# Step 0 — Leaf Detection & Cropping (preprocessing before classification)
+# Step 0 — Leaf Detection & Cropping (REMOVED — historical design note)
+
+> ⚠️ **THIS STAGE IS NO LONGER PART OF THE PIPELINE.** `/api/assistant` does not
+> run a detector and does not crop anything: no DETR round-trip, no `sharp`
+> re-encode, and `preprocessing` on an image response is always
+> `{ status: "skipped", detector: null, box: null, durationMs: 0 }`. Every model
+> — Gemini and the MobileNetV2 fallback — now receives the ORIGINAL frame.
+>
+> The doc is kept because it is the reviewed design of the geometry and the
+> failure modes, and because it is the restore plan: the pure helpers still live
+> in `src/lib/assistant/leaf-detect.ts` with their unit tests. Re-enabling means
+> re-adding the detector call + `sharp` crop to the route (git history has the
+> exact implementation), not redesigning it.
+>
+> `HF_LEAF_DETECT_MODELS` is dead configuration: nothing reads it.
 
 ## Why
 
@@ -20,12 +34,12 @@ surrounding context (leaf, stem, soil, neighbouring plants) that makes its
 
 | Stage | Where | Model | Cost |
 | --- | --- | --- | --- |
-| Step 0 · detection | Server (route) | `facebook/detr-resnet-50` (COCO DETR-ResNet-50, plant/leaf-labelled boxes only; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
-| Step 0 · crop | Server (route) | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
-| Step 1 · image analysis (PRIMARY) | Server (route) | Gemini `gemini-3.6` — multimodal, answers a pinned `AnalysisData` JSON object. Receives the ORIGINAL frame. | Reuses the existing Gemini key pool. |
-| Step 1 · image analysis (FALLBACK) | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`). Receives the Step 0 CROP. Reached only when the Gemini analysis failed. | Free tier. |
-| Step 2 · text generation (PRIMARY) | Server (route) | HF router LLMs (Qwen chain) — narrates the `AnalysisData`. Receives NO image. | Existing behaviour. |
-| Step 3 · text fallback | Server (route) | Gemini `gemini-3.6` — formats the same `AnalysisData`, no image, never re-analyses. → built-in formatter as the zero-failure net. | Existing behaviour. |
+| ~~Step 0 · detection~~ **removed** | — | `facebook/detr-resnet-50` (COCO DETR-ResNet-50, plant/leaf-labelled boxes only; chain overridable via `HF_LEAF_DETECT_MODELS`) | Free — Hugging Face serverless `hf-inference` CPU tier, same router + `HUGGINGFACE_API_KEY` the app already uses for Step 1. No new key. |
+| ~~Step 0 · crop~~ **removed** | — | `sharp` extract + re-encode (≤1024 px edge, JPEG q88 — mirrors the client's own downscale) | Free, MIT; ~tens of ms on the function. `sharp` is in Next.js' default server-external packages and is what Vercel uses for image optimisation anyway. |
+| Step 1 · image analysis (PRIMARY) | Server (route) | Gemini `gemini-3.8-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-2.5-flash` → `gemini-flash-latest` — multimodal, answers a pinned `AnalysisData` JSON object. Receives the ORIGINAL frame. | Reuses the existing Gemini key pool (random draw per request). |
+| Step 1 · image analysis (FALLBACK) | Server (route) | `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` (MobileNetV2 PlantVillage — the single clean default, overridable via `HF_VISION_MODEL`). Receives the ORIGINAL frame (the crop is gone). Reached only when the Gemini analysis failed AND `ENABLE_HUGGINGFACE` is on. | Free tier. |
+| Step 2 · text generation | Server (route) | HF router LLMs (Qwen chain) — narrates the `AnalysisData`. Receives NO image. **Bypassed while `ENABLE_HUGGINGFACE=false`** (the shipped default), in which case Gemini is the primary text model. | Existing behaviour. |
+| Step 3 · text generation | Server (route) | Gemini — formats the same `AnalysisData`, no image, never re-analyses. → built-in formatter as the zero-failure net. | Existing behaviour. |
 
 The obsolete fine-tuned PlantDoc detector
 (`suryanshgoel/detr-finetuned-plantdoc`) and the 400-prone vision cascade

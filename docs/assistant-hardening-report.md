@@ -1,5 +1,37 @@
 # `/api/assistant` LLM pipeline — hardening & verification report
 
+> **FOLLOW-UP (2026-10-07, second pass) — provider routing update.** The
+> pipeline is now **Gemini-only** and the leaf-cropping step is gone:
+>
+> 1. **Hugging Face soft-block** — `const ENABLE_HUGGINGFACE = false` in
+>    `src/lib/assistant/providers.ts` (with a per-deployment
+>    `ENABLE_HUGGINGFACE=1/0` override read only by `isHuggingFaceEnabled()`).
+>    With the flag off no token is resolved and no Hugging Face request is
+>    built: the MobileNetV2 fallback and the Step 2 text model are skipped
+>    without warnings, and `503 MISSING_KEYS` is decided by the Gemini key.
+>    Nothing was deleted — the two stages are still covered by the test suite,
+>    which pins the flag ON for that purpose.
+> 2. **Leaf cropping removed** — the DETR-ResNet-50 detector step and the
+>    `sharp` crop are gone from `/api/assistant` (the route no longer imports
+>    `sharp` or `leaf-detect`). `preprocessing` keeps its wire contract (image
+>    responses only) and always reports `status: "skipped"`.
+> 3. **Randomized key rotation** — `shuffleGeminiKeyPool()` (Fisher–Yates) draws
+>    a fresh permutation per request: every configured key is in the draw, no
+>    key repeats inside one cycle, and consecutive requests do not all start on
+>    the same credential. The same draw is used by `/api/leaf-diagnose`, the
+>    daily-task generator and the `/api/health/gemini` probe (which lists pool
+>    names in one such draw).
+> 4. **60 s global deadline** — `GLOBAL_DEADLINE_MS = 60_000` (was 45 s); the
+>    8 s per-attempt window is unchanged. The 503
+>    `{ code: "DEADLINE_EXCEEDED" }` answer now needs a little head-room in the
+>    platform limit (`maxDuration = 65` where the plan allows it) so the route's
+>    own response wins the race with Vercel's 60 s kill.
+>
+> Everything below describes the state after the FIRST pass; where the two
+> disagree (rotation order, 45 s, Step 0/leaf cropping, required variables), this
+> banner wins. Verified after the second pass: `npx tsc --noEmit` clean,
+> `npm run lint` 0 errors, `npm run test:unit` **799/799**.
+
 **Scope** — the Hugging Face + Gemini pipeline behind `POST /api/assistant`, its
 sibling key consumers (`/api/leaf-diagnose`, the daily-task generator,
 `tools/check-gemini-models.mjs`) and two new operational probes under

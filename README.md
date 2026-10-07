@@ -151,19 +151,22 @@ Values are labelled as decision-support estimates, not measurements.
 text-only question skips the image stage entirely and goes straight to the
 text stages.
 
+> **Current provider setup — Gemini-only.** `ENABLE_HUGGINGFACE = false`
+> (`src/lib/assistant/providers.ts`) soft-blocks every Hugging Face stage: no
+> token is read, no Hugging Face request is built, and Gemini handles the image
+> analysis AND the text. The Hugging Face code is untouched — set
+> `ENABLE_HUGGINGFACE=1` (or flip the constant) to restore the two stages marked
+> "while enabled" below. The leaf **Detection & Cropping** pre-step is
+> **removed**: every model receives the original frame and `preprocessing` is
+> always `"skipped"`.
+
 ```
 photo (base64)
   │
-  ├─ Step 0 · Detection & Cropping ── open-source object detector on the FREE
-  │    Hugging Face Inference router (facebook/detr-resnet-50 COCO
-  │    DETR-ResNet-50, plant labels only; chain overridable with
-  │    HF_LEAF_DETECT_MODELS). The dominant detection cluster becomes a
-  │    padded, clamped crop window and sharp crops the photo, so hands, soil
-  │    and pots never reach a classifier. Every failure (no key, undecodable
-  │    image, detector down/loading, no leaf) is non-fatal and falls back to
-  │    the ORIGINAL frame — the outcome lands in `preprocessing`. The crop
-  │    feeds the MobileNetV2 fallback ONLY; Gemini reasons over the full
-  │    scene and gets the untouched photo.
+  ├─ (removed) Detection & Cropping — the DETR-ResNet-50 detector + sharp crop
+  │    that used to run first is GONE. No detector round-trip, no crop, no
+  │    re-encode: the original frame is what every stage sees, and
+  │    `preprocessing` still rides along on image responses as `"skipped"`.
   │
   ├─ Step 1 · IMAGE ANALYSIS
   │    PRIMARY   — Google Gemini (gemini-3.8-flash → 3.5-flash →
@@ -175,14 +178,17 @@ photo (base64)
   │        affected_parts, severity, symptoms_observed, notes }.
   │    FALLBACK  — MobileNetV2 PlantVillage
   │      (linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification,
-  │      overridable with HF_VISION_MODEL) on the free Hugging Face router.
-  │      Reached ONLY after the Gemini analysis failed; its raw { label, score }
-  │      is mapped into the SAME AnalysisData shape, so the text stage is
+  │      overridable with HF_VISION_MODEL) on the free Hugging Face router —
+  │      only while ENABLE_HUGGINGFACE is on; with the flag off a failed Gemini
+  │      analysis goes straight to Step 4. Its raw { label, score } is mapped
+  │      into the SAME AnalysisData shape, so the text stage is
   │      source-agnostic.
   │    BOTH DOWN  — Step 4: no text model is ever called with empty data. The
   │      user gets a pre-written, polite "retry with a clearer photo" reply.
   │
-  ├─ Step 2 · TEXT GENERATION (PRIMARY) — the Hugging Face Inference Providers
+  ├─ Step 2 · TEXT GENERATION (while ENABLE_HUGGINGFACE is on; BYPASSED in the
+  │    shipped configuration, where Gemini is the primary text model) — the
+  │    Hugging Face Inference Providers
   │    router (open Qwen chain led by Qwen/Qwen3-4B-Instruct-2507, Bearer
   │    HUGGINGFACE_API_KEY — ONE variable name, no HF_TOKEN alias) narrates
   │    the AnalysisData into a clear,
@@ -190,19 +196,22 @@ photo (base64)
   │    transport error/timeout, an empty or nonsensical reply, or a reply that
   │    does not correspond to the AnalysisData.
   │
-  └─ Step 3 · TEXT FALLBACK (Google Gemini, FORMAT-ONLY) — reached ONLY after
-       Step 2 failed. Same 5-id model chain, key pool order GEMINI_API_KEY_4 →
-       GEMINI_API_KEY → the numbered variants in numeric order (legacy
-       GEMINI_API_KEYS last). Per model, every key is tried; a 429 parks that
-       (key, model) pair for 10 minutes, a 400 API_KEY_INVALID / 403 parks the
-       key for 60 minutes, and a 503/network error retries the same key once
-       before rotating. One 8 s AbortController per attempt inside ONE 45 s
+  └─ Step 3 · TEXT GENERATION (Google Gemini — the PRIMARY text model) —
+       reached after Step 2 failed, which with Hugging Face soft-blocked is
+       every request. Same 5-id model chain. The key pool is drawn in a RANDOM
+       order per request (`shuffleGeminiKeyPool`: a permutation without
+       replacement — no key repeats inside one cycle, and consecutive requests
+       do not all start on the same credential). Per model, every key is
+       tried in that drawn order; a 429 parks that (key, model) pair for 10
+       minutes, a 400 API_KEY_INVALID / 403 parks the key for 60 minutes, and a
+       503/network error retries the same key once before rotating. One 8 s
+       AbortController per attempt inside ONE 60 s
        deadline for the whole request; exceeding it answers HTTP 503
        { code: "DEADLINE_EXCEEDED" } with the Arabic
        "الخدمة مشغولة حالياً، حاول بعد قليل". It gets
        the AnalysisData and NO image, so it formats the data and never
        re-analyses the photo — including the edge case where the analysis came
-       from MobileNetV2. If both text models are down, the built-in formatter
+       from MobileNetV2. If the text model is down, the built-in formatter
        answers 200 from the analysis (direct diagnosis card) or with a
        greeting-aware basic-mode reply for a text-only question.
 ```
@@ -277,22 +286,31 @@ Every response carries `analysisSource` (`"gemini"` | `"mobilenet"` | `null`)
 and `textSource` (`"huggingface"` | `"gemini_fallback"` | `null`) for logging
 and analytics; the user only ever sees the final `reply`. The same
 information is logged server-side, with a final `[Orchestrator]` line
-summarising the whole route.
+summarising the whole route. `textSource: "gemini_fallback"` keeps its name for
+wire compatibility — with Hugging Face soft-blocked it is the PRIMARY text path.
 
-Gemini key pool, in rotation order: `GEMINI_API_KEY_4` FIRST, then
-`GEMINI_API_KEY`, then the numbered variants in numeric order (`_1`, `_2`,
-`_3`, `_5`, …), then the legacy comma-separated `GEMINI_API_KEYS` pool last.
+**Gemini key pool — randomized rotation.** The configured pool is
+`GEMINI_API_KEY` plus its numbered variants, plus the legacy comma-separated
+`GEMINI_API_KEYS` pool (read last). Each request draws that pool in a
+**random order** (`shuffleGeminiKeyPool()`: a permutation without replacement),
+so no key is tried twice inside one cycle and consecutive requests spread across
+projects instead of all starting on the same credential; `GEMINI_API_KEY_4` is
+still worth setting because it usually belongs to a different Google project
+(hence its own daily quota) and heads the inventory order shown in the logs and
+by `/api/health/gemini`.
+
 For the current model every key is tried; a 429 / `RESOURCE_EXHAUSTED` / daily
 quota parks that **(key name, model)** pair for 10 minutes, a 400
 `API_KEY_INVALID` or 403 parks the whole key for 60 minutes, and a 503 or
 network error retries the same key once before moving on. Success is logged by
 name only, e.g. `Gemini OK: GEMINI_API_KEY_4 / gemini-3.5-flash`.
 
-Every upstream attempt is bounded by an 8 s `AbortController` inside ONE 45 s
+Every upstream attempt is bounded by an 8 s `AbortController` inside ONE 60 s
 request deadline. When the deadline fires the route stops and answers HTTP 503
 `{ code: "DEADLINE_EXCEEDED" }` with the Arabic
-"الخدمة مشغولة حالياً، حاول بعد قليل" — the platform's 60 s limit is never
-reachable.
+"الخدمة مشغولة حالياً، حاول بعد قليل". Since the platform limit is also 60 s,
+keep a little head-room (`maxDuration = 65` where the plan allows it) so the
+503 — not a bare platform timeout — is what the user receives.
 
 Two protected operational probes report the same credentials and rotation the
 pipeline uses — by NAME, never by value (both spend one real 1-token request):
@@ -308,13 +326,22 @@ curl "https://<host>/api/health/gemini?key=$HEALTH_SECRET"
 They fail closed: without `HEALTH_SECRET` on the server they answer 503
 `MISSING_HEALTH_SECRET`, and a missing/wrong `?key=` answers 401. Set
 `HEALTH_SECRET` (e.g. `openssl rand -hex 32`) in Vercel → Project → Settings →
-Environment Variables. The required server variables are `GEMINI_API_KEY_4`,
-`GEMINI_API_KEY`, `HUGGINGFACE_API_KEY` and `HEALTH_SECRET`.
+Environment Variables. The required server variables are `GEMINI_API_KEY`
+(plus its numbered variants), `HUGGINGFACE_API_KEY` — optional while
+`ENABLE_HUGGINGFACE=false` — and `HEALTH_SECRET`.
 
 The CodeCraft gateway and its `CODECRAFT_*` environment variables are gone;
 leftover values are ignored.
 
-Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md).
+Design notes and Vercel sizing: [`docs/leaf-detection.md`](docs/leaf-detection.md)
+(historical — it documents the REMOVED Detection & Cropping stage and doubles as
+the restore plan), and [`docs/assistant-hardening-report.md`](docs/assistant-hardening-report.md)
+for the provider hardening work.
+
+Hugging Face soft-block: `ENABLE_HUGGINGFACE = false` in
+`src/lib/assistant/providers.ts` is the shipped default (Gemini-only). Setting
+`ENABLE_HUGGINGFACE=1` in the environment re-enables both Hugging Face stages
+without a code change; `isHuggingFaceEnabled()` is the only thing that reads it.
 
 
 ## Structure

@@ -14,11 +14,15 @@
  *
  * THE PROBE
  * ---------
- * One 1-token `generateContent` per configured key, in rotation order, against
- * the FIRST model of the chain (the id the request path starts with). Rotation
- * order comes from `resolveGeminiKeyPool()` and is the SAME order the pipeline
- * uses: `GEMINI_API_KEY_4` FIRST, then `GEMINI_API_KEY` and the remaining
- * `GEMINI_API_KEY_N` in numeric order, then the legacy `GEMINI_API_KEYS` pool.
+ * One 1-token `generateContent` per configured key, against the FIRST model of
+ * the chain (the id the request path starts with). The key pool is resolved by
+ * `resolveGeminiKeyPool()` and ordered here by the SAME
+ * `shuffleGeminiKeyPool()` draw the request path uses — a random permutation,
+ * so the listing below is ONE possible rotation order (the pipeline redraws it
+ * on every request). With `GEMINI_API_KEY_4` configured it usually holds a key
+ * from a different Google project, and the configured inventory order is
+ * `GEMINI_API_KEY_4` → `GEMINI_API_KEY` → the numbered variants → the legacy
+ * `GEMINI_API_KEYS` pool.
  *
  * RESPONSE
  * --------
@@ -59,6 +63,7 @@ import {
   geminiKeyState,
   redactSecrets,
   resolveGeminiKeyPool,
+  shuffleGeminiKeyPool,
 } from "@/lib/assistant/providers";
 import { authorizeHealthProbe } from "@/lib/assistant/health";
 
@@ -91,7 +96,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const denied = authorizeHealthProbe(request);
   if (denied) return denied;
 
-  const keyPool = resolveGeminiKeyPool();
+  // One random draw, exactly like a request: every key appears once.
+  const keyPool = shuffleGeminiKeyPool(resolveGeminiKeyPool());
   const model = resolveGeminiModels(process.env.GEMINI_MODEL)[0].id;
 
   const results: GeminiKeyHealth[] = [];

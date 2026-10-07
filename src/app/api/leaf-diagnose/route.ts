@@ -14,7 +14,7 @@ import {
 import {
   LEAF_GEMINI_BUDGET_MS,
   generateLeafGemini,
-  resolveLeafGeminiKeys,
+  resolveLeafGeminiRotation,
   resolveLeafGeminiModels,
 } from "@/lib/leaf-diagnose-gemini";
 
@@ -112,7 +112,9 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   // Same key pool and model chain the chat reads (read-only); see the helper.
-  const keys = resolveLeafGeminiKeys();
+  // This request's rotation order: the configured pool, randomly drawn (no
+  // key repeats inside this cycle) — see `resolveLeafGeminiRotation`.
+  const keys = resolveLeafGeminiRotation();
   const models = resolveLeafGeminiModels();
   if (!keys.length || !models.length) return failure("provider-busy", 503);
 

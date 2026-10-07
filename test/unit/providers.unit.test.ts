@@ -11,7 +11,7 @@
  *   • the in-memory rotation state (10-minute quota parks, 60-minute invalid
  *     keys, the 10-minute HF 402 credit circuit) behaves as specified;
  *   • every message that can reach a log or a response body is redacted, and
- *     the 8 s per-attempt / 45 s global timeouts are enforced with real
+ *     the 8 s per-attempt / 60 s global timeouts are enforced with real
  *     AbortController timers.
  */
 
@@ -20,6 +20,9 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 
 import {
   DeadlineExceededError,
+  ENABLE_HUGGINGFACE,
+  isHuggingFaceEnabled,
+  shuffleGeminiKeyPool,
   GEMINI_CATALOG_TTL_MS,
   GEMINI_INVALID_TTL_MS,
   GEMINI_KEY_NAME_PATTERN,
@@ -240,11 +243,12 @@ test("shortMessage collapses whitespace, redacts and caps the length", () => {
 /*  Timeouts                                                           */
 /* ------------------------------------------------------------------ */
 
-test("the shared windows are the agreed 8 s attempt and 45 s deadline", () => {
+test("the shared windows are the agreed 8 s attempt and 60 s deadline", () => {
   assert.equal(PER_ATTEMPT_TIMEOUT_MS, 8_000);
-  assert.equal(GLOBAL_DEADLINE_MS, 45_000);
-  // The deadline must stay well inside Vercel's 60 s function limit.
-  assert.ok(GLOBAL_DEADLINE_MS < 60_000);
+  assert.equal(GLOBAL_DEADLINE_MS, 60_000);
+  // The deadline is the platform ceiling: keep `maxDuration` at or above it so
+  // the route's own 503 wins the race instead of a bare platform timeout.
+  assert.ok(GLOBAL_DEADLINE_MS <= 60_000);
   assert.ok(GEMINI_CATALOG_TTL_MS === 60 * 60 * 1000);
 });
 
@@ -263,7 +267,7 @@ test("the request deadline arms one AbortController and disposes cleanly", () =>
   }
 });
 
-test("an attempt is cancelled by its OWN 8 s window, not by the 45 s deadline", async () => {
+test("an attempt is cancelled by its OWN 8 s window, not by the 60 s deadline", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
     const deadline = new RequestDeadline();
@@ -328,10 +332,48 @@ test("no request is issued once the deadline has already expired", async () => {
 /*  Health endpoints                                                   */
 /* ------------------------------------------------------------------ */
 
-test("HEALTH_SECRET is part of the required server variables", () => {
+test("the required server variables include HEALTH_SECRET and both providers", () => {
   assert.ok(REQUIRED_ENV_VARS.includes("HEALTH_SECRET"));
-  assert.ok(REQUIRED_ENV_VARS.includes(GEMINI_PRIORITY_KEY_NAME));
   assert.ok(REQUIRED_ENV_VARS.includes("HUGGINGFACE_API_KEY"));
+  assert.ok(REQUIRED_ENV_VARS.includes("GEMINI_API_KEY"));
+  // Hugging Face is soft-blocked by default, so no ROTATION LEADER is required:
+  // the pool is a random draw over whatever `GEMINI_API_KEY*` variables exist.
+  assert.equal(ENABLE_HUGGINGFACE, false);
+  assert.equal(isHuggingFaceEnabled({}), false);
+  assert.equal(isHuggingFaceEnabled({ ENABLE_HUGGINGFACE: "1" }), true);
+  assert.equal(isHuggingFaceEnabled({ ENABLE_HUGGINGFACE: "TRUE" }), true);
+  assert.equal(isHuggingFaceEnabled({ ENABLE_HUGGINGFACE: "false" }), false);
+  assert.ok(GEMINI_PRIORITY_KEY_NAME === "GEMINI_API_KEY_4");
+});
+
+test("the Gemini pool is drawn in a random order: a permutation, never a repeat", () => {
+  const pool = [
+    { name: "GEMINI_API_KEY", key: "a" },
+    { name: "GEMINI_API_KEY_2", key: "b" },
+    { name: "GEMINI_API_KEY_4", key: "c" },
+  ];
+
+  // Identity draw: the configured inventory order, byte for byte.
+  assert.deepEqual(
+    shuffleGeminiKeyPool(pool, () => 1 - Number.EPSILON).map((entry) => entry.key),
+    ["a", "b", "c"],
+  );
+  // Another draw is a genuine (deterministic) permutation…
+  const other = shuffleGeminiKeyPool(pool, () => 0).map((entry) => entry.key);
+  assert.notDeepEqual(other, ["a", "b", "c"]);
+  assert.deepEqual([...other].sort(), ["a", "b", "c"]);
+  // …and the input array is never mutated.
+  assert.deepEqual(pool.map((entry) => entry.key), ["a", "b", "c"]);
+
+  // Every draw of the REAL generator is a permutation: no key can be lost or
+  // repeated inside one request cycle, whatever the generator returns.
+  for (let round = 0; round < 200; round += 1) {
+    const drawn = shuffleGeminiKeyPool(pool).map((entry) => entry.key);
+    assert.deepEqual([...drawn].sort(), ["a", "b", "c"]);
+  }
+  // A one-key pool and an empty pool are returned unchanged.
+  assert.deepEqual(shuffleGeminiKeyPool([pool[0]]).map((e) => e.key), ["a"]);
+  assert.deepEqual(shuffleGeminiKeyPool([]), []);
 });
 
 test("the health secret is compared in constant time and fails closed on mismatch", () => {

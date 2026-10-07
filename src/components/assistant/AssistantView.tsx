@@ -13,8 +13,6 @@ import {
   Menu,
   Plus,
   RotateCcw,
-  ScanSearch,
-  Scissors,
   Send,
   TriangleAlert,
   X,
@@ -97,7 +95,7 @@ interface ChatMessage {
   source?: AssistantSource;
   /** Display only — which image engine produced `diagnosis` (from the API response). */
   analysisSource?: AnalysisSource | null;
-  /** Step 0 detection & cropping report (image requests only). */
+  /** Cropping report — always `skipped` now that the stage is removed. */
   preprocessing?: AssistantPreprocessing | null;
   error?: boolean;
   /** Loaded from storage, not just produced: render instantly, skip every entrance/reveal/result animation. */
@@ -195,11 +193,6 @@ export default function AssistantView() {
   const [busy, setBusy] = useState(false);
   /** Whether the in-flight request carries a photo (drives the thinking label). */
   const [busyWithImage, setBusyWithImage] = useState(false);
-  /**
-   * Two-phase thinking indicator for photo requests: the Detection & Cropping
-   * pre-step (Step 0) runs first on the server, then classification + the LLM.
-   */
-  const [visionPhase, setVisionPhase] = useState<0 | 1>(0);
   const [composerError, setComposerError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -420,17 +413,6 @@ export default function AssistantView() {
 
   const conversationGroups = useMemo(() => groupConversationsByRecency(conversationMetas), [conversationMetas]);
 
-  // Photo requests take visibly longer now (detect → crop → classify): walk
-  // the thinking label through the real pipeline phases so the farmer always
-  // sees what the server is doing. Phase 0 (detection) is typically 1–9 s,
-  // so after a short beat the label switches to the classification phase.
-  // (visionPhase itself is reset in `send`, an event handler.)
-  useEffect(() => {
-    if (!busyWithImage) return;
-    const timer = window.setTimeout(() => setVisionPhase(1), 2600);
-    return () => window.clearTimeout(timer);
-  }, [busyWithImage]);
-
   const wilayaCode = profile?.wilayaCode ?? authProfile?.wilayaCode ?? authProfile?.wilaya ?? null;
   const wilaya = wilayaCode ? getWilaya(wilayaCode) : null;
   // The onboarding farm step stores the explicit crop choice on the local
@@ -498,9 +480,6 @@ export default function AssistantView() {
       setComposerError(null);
       setBusy(true);
       setBusyWithImage(image !== null);
-      // Photo requests start over at the detection phase of the thinking
-      // indicator (Step 0 → classification), every single time.
-      setVisionPhase(0);
 
       let errorMessage = t.chat.error;
       try {
@@ -721,22 +700,6 @@ export default function AssistantView() {
                     )}
 
                     <div>
-                      {!isUser && msg.preprocessing?.status === "cropped" && (
-                        <p
-                          className="chat-note mb-2.5 flex items-start gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-emerald-800"
-                          title={msg.preprocessing.detector ?? undefined}
-                        >
-                          <Scissors size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
-                          {t.chat.cropApplied}
-                        </p>
-                      )}
-                      {!isUser && msg.preprocessing?.status === "no-leaf" && (
-                        <p className="chat-note-muted mb-2.5 flex items-start gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] font-bold leading-4 text-emerald-900/70">
-                          <ScanSearch size={11} strokeWidth={2.8} aria-hidden className="mt-[2px] shrink-0 text-emerald-600" />
-                          {t.chat.cropNotFound}
-                        </p>
-                      )}
-
                       {msg.diagnosis && (
                         <div className="mb-3">
                           <DiagnosisCard
@@ -788,13 +751,7 @@ export default function AssistantView() {
             {busy && (
               <TypingIndicator
                 key="typing"
-                label={
-                  busyWithImage
-                    ? visionPhase === 0
-                      ? t.chat.thinkingDetect
-                      : t.chat.thinkingVision
-                    : t.chat.thinking
-                }
+                label={busyWithImage ? t.chat.thinkingVision : t.chat.thinking}
               />
             )}
           </AnimatePresence>

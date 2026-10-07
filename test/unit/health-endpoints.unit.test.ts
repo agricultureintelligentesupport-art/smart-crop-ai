@@ -36,6 +36,12 @@ for (const [name, value] of Object.entries(process.env)) {
 beforeEach(() => {
   for (const name of Object.keys(process.env)) if (SCRUBBED.test(name)) delete process.env[name];
   geminiKeyState.reset();
+  // The probes list the pool in the SAME random draw a request would use
+  // (`shuffleGeminiKeyPool`). Pinning the generator to its maximum gives the
+  // identity draw, so the order assertions below are exact; the dedicated
+  // "shuffled" test at the end proves the order is a permutation, not a fixed
+  // sequence.
+  mock.method(Math, "random", () => 1 - Number.EPSILON);
 });
 
 afterEach(() => {
@@ -283,6 +289,32 @@ test("gemini probe: every key in rotation order, first item marked, first chain 
     assert.ok(entry.latencyMs >= 0);
     assert.equal(typeof entry.name, "string");
   }
+});
+
+test("gemini probe: the listing is a RANDOM draw — the same keys in a different order, first entry marked", async () => {
+  quiet();
+  process.env.HEALTH_SECRET = "s3cret";
+  process.env.GEMINI_API_KEY = "base-key-value";
+  process.env.GEMINI_API_KEY_2 = "second-key-value";
+  process.env.GEMINI_API_KEY_4 = "priority-key-value";
+  // A generator of 0 is the opposite extreme of the identity draw: the
+  // permutation it produces must still contain every key exactly once.
+  mock.restoreAll();
+  mock.method(Math, "random", () => 0);
+  quiet();
+  mock.method(globalThis, "fetch", async () => Response.json({ candidates: [] }));
+
+  const payload = (await (await geminiHealth(probe("s3cret"))).json()) as GeminiPayload[];
+  assert.deepEqual(
+    payload.map((entry) => entry.name).slice().sort(),
+    ["GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_4"],
+    "every configured key is listed exactly once",
+  );
+  assert.deepEqual(
+    payload.map((entry) => entry.firstInRotation),
+    [true, ...payload.slice(1).map(() => false)],
+    "the marker follows the draw, not a fixed name",
+  );
 });
 
 test("gemini probe: 429 parks the (key, model) quota mark so the next request skips it", async () => {

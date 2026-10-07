@@ -40,9 +40,10 @@ export interface AssistantImagePayload {
 }
 
 /**
- * Outcome of Step 0 — the leaf Detection & Cropping preprocessing stage that
- * runs before the PlantVillage classifier. Surfaced in the response body for
- * full transparency (the UI shows whether the photo was auto-cropped).
+ * Outcome of the (removed) leaf Detection & Cropping pre-step. The stage is
+ * gone from the pipeline, so the field now always reports `skipped` on image
+ * responses — it is kept on the wire so clients and stored history keep
+ * parsing, and so the stage can be restored without a format change.
  */
 export interface AssistantPreprocessing {
   /**
@@ -52,8 +53,9 @@ export interface AssistantPreprocessing {
    *                have kept the whole frame) — the original image was used;
    * unavailable  — the detection endpoint could not be reached (network,
    *                loading, unexpected payload) — the original image was used;
-   * skipped      — no Hugging Face token is configured, so detection cannot
-   *                run (mirrors the Step 1 skip).
+   * skipped      — the stage did not run: leaf cropping is removed from the
+   *                pipeline, Hugging Face is soft-blocked, or no token was
+   *                configured.
    */
   status: "cropped" | "no-leaf" | "unavailable" | "skipped";
   /** Detector model id, when a detection call was attempted. */
@@ -153,7 +155,7 @@ export interface AssistantResponseBody {
   reply: string;
   diagnosis?: AssistantDiagnosis | null;
   source: AssistantSource;
-  /** Step 0 detection & cropping outcome (image requests only). */
+  /** Leaf-cropping outcome — always `skipped` now (the stage is removed). */
   preprocessing?: AssistantPreprocessing | null;
   /**
    * Which image model produced `diagnosis` — `"gemini"` (primary) or

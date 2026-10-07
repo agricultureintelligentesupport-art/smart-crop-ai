@@ -4,13 +4,17 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * Step 0 (leaf detector), Step 1's MobileNetV2 fallback and Step 2 (the PRIMARY
- * text model) all authenticate to the Hugging Face router with ONE secret:
- * `process.env.HUGGINGFACE_API_KEY`. When that secret is missing, mistyped, or
- * belongs to an account with no credits left, the assistant degrades silently
- * (it still answers, from Gemini or the built-in formatter), and the only clue
- * is a warning buried in `warnings[]`. This probe turns that into a single
- * answerable question.
+ * Step 1's MobileNetV2 fallback and Step 2 (the text model) authenticate to
+ * the Hugging Face router with ONE secret: `process.env.HUGGINGFACE_API_KEY`.
+ * When that secret is missing, mistyped, or belongs to an account with no
+ * credits left, the assistant degrades silently (it still answers, from Gemini
+ * or the built-in formatter), and the only clue is a warning buried in
+ * `warnings[]`. This probe turns that into a single answerable question.
+ *
+ * NOTE: the assistant ships with Hugging Face SOFT-BLOCKED
+ * (`ENABLE_HUGGINGFACE = false`), so this probe answers "is the token usable?"
+ * for the day the flag is flipped back on. It is unaffected by the flag — the
+ * probe deliberately reports the credential, not the routing decision.
  *
  * THE PROBE
  * ---------

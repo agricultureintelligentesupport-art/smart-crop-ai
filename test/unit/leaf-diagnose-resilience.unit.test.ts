@@ -33,11 +33,17 @@ function clearTestEnv() {
   }
 }
 const POOL = ["route-secret-ALPHA", "route-secret-BRAVO", "route-secret-CHARLIE"] as const;
-beforeEach(() => {
+beforeEach((t) => {
   clearTestEnv();
   process.env.GEMINI_API_KEY = POOL[0];
   process.env.GEMINI_API_KEY_2 = POOL[1];
   process.env.GEMINI_API_KEYS = ` ${POOL[2]} , ${POOL[0]} `; // comma pool + a duplicate of the first key
+  // The rotation is a RANDOM draw per request (`shuffleGeminiKeyPool`). This
+  // suite asserts the exact rotation sequence, so the generator is pinned to
+  // its maximum, which yields the identity draw (the configured inventory
+  // order) — the randomization itself is covered in
+  // `providers.unit.test.ts` and `assistant-route.unit.test.ts`.
+  if ("mock" in t) t.mock.method(Math, "random", () => 1 - Number.EPSILON);
 });
 afterEach(() => {
   clearTestEnv();
@@ -161,7 +167,11 @@ test("route: rotates the env key pool after ~1 s, falls to the next shared-chain
   const response = await pending;
 
   const fallback = GEMINI_FALLBACK_MODELS[0];
-  assert.deepEqual(calls.map((call) => call.key), [POOL[0], POOL[1], POOL[2], POOL[0]], "pool order: base, _2, then the comma pool, duplicates removed");
+  assert.deepEqual(
+    calls.map((call) => call.key),
+    [POOL[0], POOL[1], POOL[2], POOL[0]],
+    "identity draw: base, _2, then the comma pool; the duplicate credential is tried once per cycle",
+  );
   assert.deepEqual(calls.map((call) => call.model), [GEMINI_MODEL_DEFAULT.id, GEMINI_MODEL_DEFAULT.id, GEMINI_MODEL_DEFAULT.id, fallback.id]);
   assert.deepEqual(calls.map((call) => call.at), [0, 1_000, 2_000, 2_000]);
   assert.deepEqual(calls[0].config.thinkingConfig, GEMINI_MODEL_DEFAULT.thinking);

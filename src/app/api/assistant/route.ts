@@ -2,114 +2,119 @@
  * `/api/assistant` — the fail-proof plant-diagnosis orchestrator. The route
  * NEVER returns HTTP 500.
  *
- * The pipeline runs a STRICT priority order with an explicit fallback chain.
- * An attached photo triggers the full orchestration; a text-only question
- * skips the image stage entirely and goes straight to the text stages.
+ * CURRENT PROVIDER SETUP — Gemini-only (Hugging Face soft-blocked)
+ *   `ENABLE_HUGGINGFACE = false` (`@/lib/assistant/providers`) bypasses every
+ *   Hugging Face stage BEFORE a token is read or a request is built. Gemini is
+ *   therefore BOTH the image model and the primary text model. Nothing was
+ *   deleted: flipping the flag (or setting `ENABLE_HUGGINGFACE=1`) restores the
+ *   Hugging Face image fallback and the Hugging Face primary text model
+ *   exactly as described under "WHEN HUGGING FACE IS ENABLED" below.
+ *
+ *   An attached photo triggers the full orchestration; a text-only question
+ *   skips the image stage and goes straight to the text stage.
  *
  *   STEP 1 — IMAGE ANALYSIS (photo requests)
  *     PRIMARY  · Google Gemini (`gemini-3.8-flash`, overridable with
  *               `GEMINI_MODEL` → `gemini-3.5-flash` → `gemini-3.5-flash-lite`
- *               on a retired
- *               id). A multimodal model that inspects the photo and is
- *               constrained by `responseMimeType: "application/json"` +
- *               `responseSchema` to answer with an `AnalysisData` object
- *               (`@/lib/assistant/analysis`). It receives the ORIGINAL
- *               frame, not the Step 0 crop, because it reasons over the whole
- *               scene.
- *     FALLBACK · MobileNetV2 PlantVillage
- *               (`linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`,
- *               overridable with `HF_VISION_MODEL`) on the free Hugging Face
- *               router, fed the Step 0 crop. Reached ONLY after the Gemini
- *               analysis failed; its raw `{ label, score }` is mapped into the
- *               SAME `AnalysisData` shape.
+ *               → `gemini-2.5-flash` → `gemini-flash-latest` on a retired id).
+ *               A multimodal model that inspects the photo and is constrained
+ *               by `responseMimeType: "application/json"` + `responseSchema` to
+ *               answer with an `AnalysisData` object
+ *               (`@/lib/assistant/analysis`). It receives the ORIGINAL frame.
+ *     FALLBACK · MobileNetV2 PlantVillage — ONLY while
+ *               `ENABLE_HUGGINGFACE=true`; with the flag off a failed Gemini
+ *               analysis goes straight to STEP 4.
  *     BOTH DOWN · STEP 4 — no text model is ever called with empty data: the
  *               user gets a pre-written, polite "retry with a clearer photo"
  *               message.
  *
- *     Gemini is considered to have FAILED — and only then is MobileNetV2
- *     called — on: (a) an API/network error or timeout; (b) Gemini refusing
- *     or returning no usable text; (c) a response that is not valid JSON or
- *     is missing a required field. A LOW `confidence` is deliberately NOT a
- *     failure: the orchestrator has no confidence threshold, and an unsure
- *     but well-formed verdict is passed straight through to the text stage.
+ *     Gemini is considered to have FAILED on: (a) an API/network error or
+ *     timeout; (b) Gemini refusing or returning no usable text; (c) a response
+ *     that is not valid JSON or is missing a required field. A LOW `confidence`
+ *     is deliberately NOT a failure: the orchestrator has no confidence
+ *     threshold, and an unsure but well-formed verdict is passed straight
+ *     through to the text stage.
  *
- *   STEP 2 — TEXT GENERATION (PRIMARY: Hugging Face)
- *     The open Qwen chain through the official Inference Providers router
- *     (`https://router.huggingface.co/v1/chat/completions`, Bearer
- *     `process.env.HUGGINGFACE_API_KEY` — ONE variable name, trimmed, no alias
- *     and no hardcoded fallback), led by
- *     `Qwen/Qwen3-4B-Instruct-2507`. Its ONLY job is to narrate ANALYSIS_DATA
- *     into a clear, user-facing explanation with a practical recommendation.
- *     A failure is: (a) an API/network error or timeout; (b) an empty,
- *     malformed or nonsensical reply; (c) a reply that does not correspond
- *     to ANALYSIS_DATA.
- *     HTTP 401/402/429/5xx are PROVIDER failures: the status and a SHORT
- *     (redacted) message are logged, then the next model/provider in the chain
- *     is tried — and Gemini gets its turn once the chain gives out. A 402
- *     (credits exhausted) additionally parks the WHOLE Hugging Face chain in
- *     memory for 10 minutes, because no model id can fix an empty account.
+ *   STEP 2 — TEXT GENERATION (Hugging Face — BYPASSED while the flag is off)
+ *     See "WHEN HUGGING FACE IS ENABLED".
  *
- *   STEP 3 — TEXT FALLBACK (Google Gemini, FORMAT-ONLY)
- *     Runs ONLY after Step 2 failed. The mandated Gemini chain
- *     (`gemini-3.8-flash` → `gemini-3.5-flash` → `gemini-3.5-flash-lite` →
- *     `gemini-2.5-flash` → `gemini-flash-latest`) is walked MODEL-first,
- *     KEY-second: for the current model every configured key is tried in
- *     rotation order (`GEMINI_API_KEY_4` FIRST, then the remaining
- *     `GEMINI_API_KEY*` variables in numeric order), because a different key
- *     usually belongs to a different Google project with its own daily quota.
- *     A 429 / RESOURCE_EXHAUSTED parks that (key, model) pair for 10 minutes; a
- *     400 `API_KEY_INVALID` or 403 parks the key itself for 60 minutes; a 503
- *     or a network error retries the same key once, then moves on. When every
- *     key is exhausted for a model, the next model is tried. This branch also
- *     covers the edge case where the analysis came from MobileNetV2 and Step 2
- *     then failed. NO image is attached here: Gemini must format the data, not
- *     re-analyse the photo.
+ *   STEP 3 — TEXT GENERATION (Google Gemini — the PRIMARY text model)
+ *     With Hugging Face soft-blocked this runs for EVERY request that has (or
+ *     needs) text. The mandated Gemini chain (`gemini-3.8-flash` →
+ *     `gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-2.5-flash` →
+ *     `gemini-flash-latest`) is walked MODEL-first, KEY-second: for the current
+ *     model every configured key is tried in this request's rotation order —
+ *     a RANDOM draw without replacement over the pool
+ *     (`GEMINI_API_KEY` + `GEMINI_API_KEY_N` + the legacy `GEMINI_API_KEYS`),
+ *     so no key is repeated inside one cycle and no single project's quota is
+ *     always spent first. A 429 / RESOURCE_EXHAUSTED parks that (key, model)
+ *     pair for 10 minutes; a 400 `API_KEY_INVALID` or 403 parks the key itself
+ *     for 60 minutes; a 503 or network error retries the same key once, then
+ *     moves on. When every key is exhausted for a model, the next model is
+ *     tried. NO image is attached here: Gemini formats ANALYSIS_DATA, it never
+ *     re-analyses the photo.
  *
- *   BUILT-IN FORMATTER (both text models down)
- *     Never fails: a concise Arabic diagnosis card built from the analysis,
- *     or a greeting-aware basic-mode reply for a text-only question.
+ *   BUILT-IN FORMATTER (Gemini unavailable)
+ *     Never fails: a concise Arabic diagnosis card built from the analysis, or
+ *     a greeting-aware basic-mode reply for a text-only question.
  *
- *   STEP 0 (pre-step, photo requests only) — leaf Detection & Cropping.
- *     The free Hugging Face router also runs an open-source object detector:
- *     the COCO `facebook/detr-resnet-50` (DETR-ResNet-50) with a plant-only
- *     label filter (chain overridable via `HF_LEAF_DETECT_MODELS`). The
- *     detected box is grown into a padded, clamped crop window and sharp
- *     crops the photo, so background noise (hands, soil, pots) never reaches
- *     the narrow classifier. The crop feeds the MobileNetV2 FALLBACK only —
- *     Gemini, the primary image model, sees the untouched frame. Strictly an
- *     accuracy pre-step: every failure mode (missing HF key, undecodable
- *     image, unreachable/loading detector, a non-detection payload, or "no
- *     leaf above threshold") is non-fatal and falls back to the original.
- *     The outcome is reported in `preprocessing` on the response.
+ *   LEAF CROPPING — REMOVED
+ *     The former Step 0 "Detection & Cropping" pre-step (DETR-ResNet-50 +
+ *     sharp) is gone from the pipeline: no detector round-trip, no crop, no
+ *     re-encode. Every stage sees the original frame, and `preprocessing`
+ *     still rides along on image responses reporting `status: "skipped"`.
  *
- *   Contract between the stages: `AnalysisData` is the single payload the
- *   text stage ever sees, so it cannot tell — and is never told — which image
- *   model produced it. `analysisSource` ("gemini" | "mobilenet") and
- *   `textSource` ("huggingface" | "gemini_fallback") ride along on every
- *   response purely for logging and analytics; the user only ever sees the
- *   final `reply`.
+ *   WHEN HUGGING FACE IS ENABLED (`ENABLE_HUGGINGFACE=true`)
+ *     · STEP 1 FALLBACK — MobileNetV2 PlantVillage
+ *       (`linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification`,
+ *       overridable with `HF_VISION_MODEL`) on the free Hugging Face router.
+ *       Reached ONLY after the Gemini analysis failed; its raw
+ *       `{ label, score }` is mapped into the SAME `AnalysisData` shape.
+ *     · STEP 2 PRIMARY TEXT — the open Qwen chain through the official
+ *       Inference Providers router
+ *       (`https://router.huggingface.co/v1/chat/completions`, Bearer
+ *       `process.env.HUGGINGFACE_API_KEY` — ONE variable name, trimmed, no
+ *       alias and no hardcoded fallback), led by
+ *       `Qwen/Qwen3-4B-Instruct-2507`. Its ONLY job is to narrate
+ *       ANALYSIS_DATA into a clear, user-facing explanation.
+ *       HTTP 401/402/429/5xx are PROVIDER failures: the status and a SHORT
+ *       (redacted) message are logged, then the next model/provider in the
+ *       chain is tried — and Gemini gets its turn once the chain gives out. A
+ *       402 (credits exhausted) additionally parks the WHOLE Hugging Face chain
+ *       in memory for 10 minutes, because no model id can fix an empty account.
+ *
+ *   Contract between the stages: `AnalysisData` is the single payload the text
+ *   stage ever sees, so it cannot tell — and is never told — which image model
+ *   produced it. `analysisSource` ("gemini" | "mobilenet") and `textSource`
+ *   ("huggingface" | "gemini_fallback") ride along on every response purely for
+ *   logging and analytics; the user only ever sees the final `reply`.
+ *   `textSource: "gemini_fallback"` is kept for wire compatibility: with
+ *   Hugging Face soft-blocked it is the PRIMARY text path.
  *
  * Credentials — the Gemini pool is every environment variable matching
- * `/^GEMINI_API_KEY(_\d+)?$/` (plus the legacy `GEMINI_API_KEYS` comma pool,
- * appended last): trimmed, comma-pools flattened, deduplicated, and ordered by
- * `@/lib/assistant/providers` with `GEMINI_API_KEY_4` first. The Hugging Face
+ * `/^GEMINI_API_KEY(_\d+)?$/` (plus the legacy `GEMINI_API_KEYS` comma pool):
+ * trimmed, comma-pools flattened, deduplicated, then SHUFFLED per request
+ * (`shuffleGeminiKeyPool()` in `@/lib/assistant/providers`). The Hugging Face
  * secret is read from ONE variable, `HUGGINGFACE_API_KEY`, trimmed, with no
- * alias and no hardcoded fallback. Both are read from `process.env` on the
- * server only, never shipped to the browser, and every message that can reach
- * a log line or a response body goes through `redactSecrets()` first.
+ * alias and no hardcoded fallback — and it is only read while
+ * `ENABLE_HUGGINGFACE` is on. Both are read from `process.env` on the server
+ * only, never shipped to the browser, and every message that can reach a log
+ * line or a response body goes through `redactSecrets()` first.
  *
  * Timeouts — EVERY upstream attempt is bounded by an 8 s per-attempt window and
- * the WHOLE request by one 45 s `AbortController` deadline
- * (`@/lib/assistant/providers`), so the function stays well inside Vercel's
- * 60 s limit. When that global deadline fires the route stops calling
- * upstreams and answers HTTP 503 with the Arabic "service is busy" message
- * instead of leaving the user with a hanging request.
+ * the WHOLE request by one 60 s `AbortController` deadline
+ * (`@/lib/assistant/providers`). When the global deadline fires the route stops
+ * calling upstreams and answers HTTP 503 (`code: "DEADLINE_EXCEEDED"`) with the
+ * Arabic "service is busy" message instead of leaving the user with a hanging
+ * request. Deployments should keep a little head-room above 60 s in the
+ * platform limit (`maxDuration = 65` where the plan allows it) so the 503 is
+ * always the response the user sees.
  *
  * Status contract: 200 for every AI outcome (including all upstream
  * failures); 400/413 only for invalid client input; 503 + code MISSING_KEYS
- * when NO provider key is configured at all (the explicit
- * server-misconfiguration signal); 503 + code DEADLINE_EXCEEDED when the 45 s
- * budget runs out. No HTTP 500 ever.
+ * when NO usable provider key is configured at all (with Hugging Face blocked,
+ * that means no Gemini key); 503 + code DEADLINE_EXCEEDED when the 60 s budget
+ * runs out. No HTTP 500 ever.
  *
  * Health — `GET /api/health/gemini` and `GET /api/health/hf` (both protected
  * by `?key=<HEALTH_SECRET>`) probe the same credential pool and model chain
@@ -128,7 +133,6 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import sharp from "sharp";
 import {
   GeminiModelHealthMonitor,
   formatGeminiHealthReport,
@@ -147,14 +151,8 @@ import {
   type TextSource,
 } from "@/lib/assistant/analysis";
 import {
-  LEAF_DETECT_DEFAULTS,
-  parseObjectDetections,
-  selectLeafCrop,
-  type CropRect,
-  type LeafDetection,
-} from "@/lib/assistant/leaf-detect";
-import {
   DeadlineExceededError,
+  ENABLE_HUGGINGFACE,
   GEMINI_LEGACY_POOL_NAME,
   GEMINI_PRIORITY_KEY_NAME,
   HF_CREDITS_SKIP_MS,
@@ -165,8 +163,10 @@ import {
   geminiKeyState,
   hfCreditCircuit,
   isAbortOrTimeoutError,
+  isHuggingFaceEnabled,
   isPriorityGeminiKeyMissing,
   resolveGeminiKeyPool,
+  shuffleGeminiKeyPool,
   resolveHuggingFaceToken,
   shortMessage,
   type GeminiKeyEntry,
@@ -186,6 +186,13 @@ import type {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 /** Vision + LLM round-trips; give slow cold starts room on hosted platforms. */
+/**
+ * Platform ceiling for this function. The route's OWN ceiling is the 60 s
+ * {@link GLOBAL_DEADLINE_MS} `AbortController`, which answers HTTP 503 instead
+ * of letting the invocation be killed — keep this value at or above that
+ * deadline (65 s where the hosting plan allows it) so the 503 always wins the
+ * race and the user never sees a bare platform timeout.
+ */
 export const maxDuration = 60;
 
 /* ------------------------------------------------------------------ */
@@ -214,262 +221,6 @@ export const HF_VISION_MODELS = [
 const HF_ENDPOINT = (model: string) =>
   `https://router.huggingface.co/hf-inference/models/${model}`;
 
-/* ------------------------------------------------------------------ */
-/*  Step 0 — leaf detection & smart cropping (open detector + sharp)   */
-/* ------------------------------------------------------------------ */
-
-/**
- * Step 0 model chain (object-detection), tried in order, through the SAME
- * hf-inference router endpoint as the Step 1 classifier:
- *
- *   • `facebook/detr-resnet-50` — PRIMARY detector: the open-source
- *     DETR-ResNet-50 trained on COCO. Only its plant-flavoured labels
- *     ("potted plant", …) are accepted, so a plant photo still crops while
- *     a photo of the farmer's hand never passes the label filter. The
- *     obsolete fine-tuned PlantDoc checkpoint
- *     (`suryanshgoel/detr-finetuned-plantdoc`) is REMOVED — it is not
- *     reliably served on the free router anymore and its failures only
- *     cost a round-trip before the COCO id answered anyway.
- *
- * Open-source and free — the weights live on Hugging Face's infrastructure,
- * the function only parses the returned boxes, so the serverless bundle and
- * the cold start stay untouched.
- */
-interface LeafDetectModel {
-  id: string;
-  /** Which detected labels count as leaf/plant material for this id. */
-  acceptLabel: (label: string) => boolean;
-}
-
-const DEFAULT_LEAF_DETECT_MODELS: LeafDetectModel[] = [
-  { id: "facebook/detr-resnet-50", acceptLabel: (label) => /plant|leaf/i.test(label) },
-];
-
-/**
- * `HF_LEAF_DETECT_MODELS="id1,id2"` overrides the chain (e.g. to pin a
- * self-hosted or newer detector). Custom ids have no known label space, so
- * their accepted labels are: clearly plant-flavoured words, or the unnamed
- * `LABEL_n` indices most fine-tuned checkpoints ship with.
- */
-function resolveLeafDetectModels(): LeafDetectModel[] {
-  const raw = process.env.HF_LEAF_DETECT_MODELS?.trim();
-  if (!raw) return DEFAULT_LEAF_DETECT_MODELS;
-  const ids = raw.split(",").map((id) => id.trim()).filter(Boolean);
-  if (ids.length === 0) return DEFAULT_LEAF_DETECT_MODELS;
-  return ids.map((id) => ({
-    id,
-    acceptLabel: (label: string) =>
-      /plant|leaf|weed|crop/i.test(label) || /^LABEL_\d+$/i.test(label),
-  }));
-}
-
-/*
- * Detection is a pre-step, not the main act: it gets exactly the shared 8 s
- * per-attempt window ({@link PER_ATTEMPT_TIMEOUT_MS}) so a sleepy detector can
- * never eat the request budget — and the shared 45 s deadline bounds the stage
- * on top of it. The window is passed explicitly at the call sites.
- */
-
-/** Re-encoded crop constraints — mirror the client's own downscale. */
-const LEAF_CROP_MAX_EDGE_PX = 1024;
-const LEAF_CROP_JPEG_QUALITY = 88;
-
-/** Smallest image worth cropping (below this, the frame IS the leaf). */
-const LEAF_CROP_MIN_DIMENSION_PX = 8;
-
-interface LeafDetectOutcome {
-  model: string;
-  detections: LeafDetection[];
-}
-
-/**
- * Strict Step 0 detection round-trip: POST the raw image bytes to the
- * object-detection endpoint (same auth + `X-Wait-For-Model` pattern as Step
- * 1), validate the payload shape, walk the model chain on loading/404/shape
- * errors. Throws (message prefixed "HF Error:") when every id failed — the
- * caller treats that as "stage unavailable" and keeps the full frame.
- */
-async function detectLeafStrict(
-  source: Buffer,
-  apiKey: string,
-  deadline: RequestDeadline,
-): Promise<LeafDetectOutcome> {
-  let lastDetail = "no detection model was attempted";
-
-  for (const model of resolveLeafDetectModels()) {
-    try {
-      const res = await timedFetch(
-        HF_ENDPOINT(model.id),
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "image/jpeg",
-            // Ask the HF router to wait for a cold model instead of 503ing.
-            "X-Wait-For-Model": "true",
-          },
-          body: new Uint8Array(source),
-        },
-        deadline,
-      );
-
-      if (res.status === 503 || res.status === 530) {
-        lastDetail = `${model.id}: model loading (HTTP ${res.status})`;
-        console.warn(`[Step 0: Detect Loading] ${lastDetail}`);
-        continue;
-      }
-
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => res.statusText);
-        let detail = `HTTP ${res.status}${bodyText ? ` — ${bodyText.slice(0, 200)}` : ""}`;
-        try {
-          const j = JSON.parse(bodyText) as { error?: string };
-          if (j?.error) detail = `HTTP ${res.status} — ${j.error}`;
-        } catch {
-          // keep the raw detail
-        }
-        lastDetail = `${model.id}: ${detail}`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
-
-      const json: unknown = await res.json();
-      if (!Array.isArray(json)) {
-        lastDetail = `${model.id}: payload is not a detection array`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
-      const parsed = parseObjectDetections(json);
-      if (parsed.length === 0 && json.length > 0) {
-        // A 200 whose items are not detection-shaped (e.g. a classification
-        // array) — this id is not serving object detection; walk the chain.
-        lastDetail = `${model.id}: ${json.length} payload items, none a valid detection`;
-        console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-        continue;
-      }
-
-      const detections = parsed.filter((det) => model.acceptLabel(det.label));
-      return { model: model.id, detections };
-    } catch (error) {
-      if (isDeadlineFailure(error)) throw error;
-      const detail = isAbortOrTimeoutError(error)
-        ? `timeout after ${PER_ATTEMPT_TIMEOUT_MS} ms`
-        : shortMessage(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
-      lastDetail = `${model.id}: ${detail}`;
-      console.warn(`[Step 0: Detect Warning] ${lastDetail}`);
-    }
-  }
-
-  throw new Error(`HF Error: leaf detection failed — ${lastDetail}`);
-}
-
-/** Crop the detected window out of the source photo and re-encode it. */
-async function cropLeafImage(source: Buffer, rect: CropRect): Promise<Buffer> {
-  return sharp(source)
-    .extract(rect)
-    .resize({
-      width: LEAF_CROP_MAX_EDGE_PX,
-      height: LEAF_CROP_MAX_EDGE_PX,
-      fit: "inside",
-      withoutEnlargement: true,
-    })
-    .jpeg({ quality: LEAF_CROP_JPEG_QUALITY })
-    .toBuffer();
-}
-
-/**
- * Step 0 orchestration: detect the leaf, crop to it, and return BOTH the
- * stage report (`AssistantPreprocessing`) and the image the classifier must
- * receive — the cropped pixels on success, the untouched original in every
- * other case. Never throws: any internal failure is converted into an
- * "unavailable" report plus a non-fatal warning.
- */
-async function runLeafDetectionStage(
-  image: AssistantImagePayload,
-  huggingfaceKey: string | null,
-  warnings: string[],
-  deadline: RequestDeadline,
-): Promise<{ preprocessing: AssistantPreprocessing; image: AssistantImagePayload }> {
-  const original: AssistantImagePayload = { data: image.data, mimeType: image.mimeType };
-
-  if (!huggingfaceKey) {
-    // Same configuration gap Step 1 reports; Step 0 stays silent in
-    // `warnings[]` to avoid a duplicated line — the Step 1 skip already
-    // warns with the exact reason.
-    console.warn("[Step 0: Detect Skipped] no Hugging Face token — leaf detection skipped.");
-    return {
-      preprocessing: { status: "skipped", detector: null, box: null, durationMs: 0 },
-      image: original,
-    };
-  }
-
-  const startedAt = Date.now();
-  try {
-    const source = Buffer.from(image.data, "base64");
-    const metadata = await sharp(source).metadata();
-    const width = metadata.width ?? 0;
-    const height = metadata.height ?? 0;
-    if (width < LEAF_CROP_MIN_DIMENSION_PX || height < LEAF_CROP_MIN_DIMENSION_PX) {
-      throw new Error(`image is not decodable or too small to crop (${width}×${height})`);
-    }
-
-    const { model, detections } = await detectLeafStrict(source, huggingfaceKey, deadline);
-    const decision = selectLeafCrop(detections, width, height, {
-      minScore: LEAF_DETECT_DEFAULTS.minScore,
-    });
-    if (!decision) {
-      console.log(
-        `[Step 0: Detect NoLeaf] model=${model} above-threshold=${detections.length} — the full frame goes to Step 1`,
-      );
-      return {
-        preprocessing: {
-          status: "no-leaf",
-          detector: model,
-          box: null,
-          durationMs: Date.now() - startedAt,
-        },
-        image: original,
-      };
-    }
-
-    const cropped = await cropLeafImage(source, decision.rect);
-    const durationMs = Date.now() - startedAt;
-    console.log(
-      `[Step 0: Detect Success] model=${model} box=${decision.rect.left},${decision.rect.top}+${decision.rect.width}x${decision.rect.height} coverage=${Math.round(decision.coverage * 100)}% top=${Math.round(decision.topScore * 100)}% ${durationMs}ms — ONLY the crop goes to Step 1`,
-    );
-    return {
-      preprocessing: {
-        status: "cropped",
-        detector: model,
-        box: [
-          decision.rect.left,
-          decision.rect.top,
-          decision.rect.width,
-          decision.rect.height,
-        ],
-        durationMs,
-      },
-      image: { data: cropped.toString("base64"), mimeType: "image/jpeg" },
-    };
-  } catch (error) {
-    // The global deadline is not a Step 0 degradation: it is the request's
-    // hard stop, and the handler turns it into HTTP 503.
-    if (isDeadlineFailure(error)) throw error;
-    const detail = shortMessage(error instanceof Error ? error.message : String(error));
-    console.warn(`[Step 0: Detect Unavailable] ${detail} — the full frame goes to Step 1`);
-    pushWarning(warnings, `Step 0 leaf detection unavailable — ${detail}`);
-    return {
-      preprocessing: {
-        status: "unavailable",
-        detector: null,
-        box: null,
-        durationMs: Date.now() - startedAt,
-      },
-      image: original,
-    };
-  }
-}
-
 /* ---- Google Gemini — shared by Step 1 (analysis) and Step 3 (text)  */
 
 /**
@@ -495,48 +246,60 @@ function resolveGeminiModels(): GeminiModel[] {
  * Gemini counts any internal reasoning tokens against `maxOutputTokens`;
  * the per-generation thinking payload (`thinkingLevel: "low"` on 3.x,
  * `thinkingBudget: 0` on 2.5, none on 1.5/2.0) keeps the model in fast,
- * answer-first mode so the 18 s budget is spent on the reply.
+ * answer-first mode so the request budget is spent on the reply.
  */
 const GEMINI_MAX_OUTPUT_TOKENS = 1024;
 
 /**
- * Resolve the Gemini rotation pool at request time (never at module load, so a
- * key added in Vercel is picked up without a redeploy). The order is owned by
- * `resolveGeminiKeyPool()` in `@/lib/assistant/providers`:
+ * Resolve THIS REQUEST's Gemini rotation order at request time (never at
+ * module load, so a key added in Vercel is picked up without a redeploy).
  *
- *   1. `GEMINI_API_KEY_4` — preferred FIRST (a different Google project usually
- *      means its own daily quota, i.e. fresh budget),
- *   2. `GEMINI_API_KEY` (base) and the remaining `GEMINI_API_KEY_N` variants in
- *      numeric order,
- *   3. the legacy comma-separated `GEMINI_API_KEYS` pool, last.
+ * The configured inventory is owned by `resolveGeminiKeyPool()`
+ * (`GEMINI_API_KEY_4`, then `GEMINI_API_KEY` and the numbered variants in
+ * numeric order, then the legacy pool) and is then SHUFFLED by
+ * `shuffleGeminiKeyPool()`: a random permutation without replacement, so
+ *
+ *   • every configured key is in the draw,
+ *   • no key is tried twice inside one request cycle, and
+ *   • consecutive requests do not always start on the same credential — the
+ *     daily quota of one Google project is no longer burned first.
  *
  * Only variable NAMES travel onward: the pool returned here is the only thing
  * the transport needs, and every log/warning/health response identifies a
  * credential by its `name`, never by its value.
  */
 function resolveGeminiApiKeys(): GeminiKeyEntry[] {
-  return resolveGeminiKeyPool();
+  return shuffleGeminiKeyPool(resolveGeminiKeyPool());
 }
 
 /**
- * Announce, once per process, the two configuration facts an operator must be
- * able to grep for — the preferred key's NAME when it is absent (task rule:
- * log the name as missing and continue) and the legacy pool's NAME when it is
- * still feeding the rotation. Names only; never a value.
+ * Announce, once per process, the configuration facts an operator must be able
+ * to grep for: the configured pool (NAMES only, in the stable inventory order —
+ * the live request order is a random draw), the preferred key's NAME when it is
+ * absent, the legacy pool's NAME when it still feeds the rotation, and whether
+ * the Hugging Face stages are enabled. Never a value.
  */
 let geminiKeyConfigLogged = false;
-function logGeminiKeyConfiguration(pool: readonly GeminiKeyEntry[]): void {
+function logGeminiKeyConfiguration(pool: readonly GeminiKeyEntry[], hfEnabled: boolean): void {
   if (geminiKeyConfigLogged) return;
   geminiKeyConfigLogged = true;
 
+  console.log(
+    `[Hugging Face] ENABLE_HUGGINGFACE=${hfEnabled} — ` +
+      (hfEnabled
+        ? "Step 1 fallback vision + Step 2 text model are enabled."
+        : "all Hugging Face stages are bypassed; Gemini is the only provider (image + text)."),
+  );
+
   if (isPriorityGeminiKeyMissing()) {
     console.warn(
-      `[Gemini Keys] ${GEMINI_PRIORITY_KEY_NAME} is missing — continuing with the remaining keys in numeric order ` +
-        `(rotation: ${pool.map((entry) => entry.name).join(" → ") || "none"}).`,
+      `[Gemini Keys] ${GEMINI_PRIORITY_KEY_NAME} is missing — continuing with the remaining keys ` +
+        `(configured pool: ${pool.map((entry) => entry.name).join(" → ") || "none"}).`,
     );
   } else {
     console.log(
-      `[Gemini Keys] rotation order: ${pool.map((entry) => entry.name).join(" → ")}`,
+      `[Gemini Keys] configured pool: ${pool.map((entry) => entry.name).join(" → ")} ` +
+        "(drawn in a RANDOM order per request; no key repeats inside one cycle).",
     );
   }
   if (pool.some((entry) => entry.name.startsWith(GEMINI_LEGACY_POOL_NAME))) {
@@ -619,7 +382,7 @@ function resolveVisionModels(): string[] {
 /**
  * Every upstream round-trip in this file goes through
  * {@link fetchWithAttemptTimeout}: an 8 s per-attempt window AND the request's
- * shared 45 s deadline. Both are explicit `AbortController` timers (not
+ * shared 60 s deadline. Both are explicit `AbortController` timers (not
  * `AbortSignal.timeout`), so the abort reason is inspectable, the platform
  * cannot leave a zombie round-trip behind, and the two windows compose.
  */
@@ -636,7 +399,7 @@ function bad(message: string, status = 400): NextResponse {
 }
 
 /**
- * The 45 s budget ran out mid-request: stop and answer 503 with the Arabic
+ * The 60 s budget ran out mid-request: stop and answer 503 with the Arabic
  * "service is busy" message. Called from every stage boundary so a deadline
  * abort can never be reported as an upstream failure, and so no stage starts
  * with less budget than {@link MIN_STAGE_BUDGET_MS} left.
@@ -644,7 +407,7 @@ function bad(message: string, status = 400): NextResponse {
 function serviceBusyResponse(): NextResponse {
   const message = "الخدمة مشغولة حالياً، حاول بعد قليل";
   console.warn(
-    "[Assistant] global 45 s deadline exceeded — answering 503 DEADLINE_EXCEEDED (no upstream left running)",
+    "[Assistant] global 60 s deadline exceeded — answering 503 DEADLINE_EXCEEDED (no upstream left running)",
   );
   return NextResponse.json(
     { error: message, code: "DEADLINE_EXCEEDED", reply: message },
@@ -671,12 +434,13 @@ function pushWarning(warnings: string[], message: string, max = 400): void {
 }
 
 /**
- * The Hugging Face user access token that authenticates Step 0 (detector),
- * Step 1 (fallback vision) and Step 2 (router LLM — the PRIMARY text model) is
- * resolved by `resolveHuggingFaceToken()` from
- * `@/lib/assistant/providers`: EXACTLY `process.env.HUGGINGFACE_API_KEY`,
- * whitespace/newlines trimmed, with no alias and no hardcoded fallback. A
- * missing/blank value lets the handler skip the vision step and the primary
+ * The Hugging Face user access token that would authenticate the (dormant)
+ * Step 1 fallback vision model and the Step 2 text model is resolved by
+ * `resolveHuggingFaceToken()` from `@/lib/assistant/providers`: EXACTLY
+ * `process.env.HUGGINGFACE_API_KEY`, whitespace/newlines trimmed, with no alias
+ * and no hardcoded fallback. It is only consulted while `ENABLE_HUGGINGFACE` is
+ * on — and even then a missing/blank value lets the handler skip the vision
+ * step and the primary
  * LLM synchronously — no request, no exception, no waiting.
  */
 
@@ -731,11 +495,11 @@ interface MobileNetClassification {
  * `linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification` — a clean
  * single-model pipeline, the obsolete field-trained ids and the 400-prone
  * cascade fallbacks are gone. `HF_VISION_MODEL` may pin a replacement id.
- * - Sends the raw image bytes (the Step 0 crop when available) to the model.
+ * - Sends the raw image bytes of the ORIGINAL frame to the model.
  * - Parses the returned array to extract the primary predicted class + confidence.
  * - Handles 503/530 model-loading responses with a clear message.
  * - Per-model timeout: {@link PER_ATTEMPT_TIMEOUT_MS} (8 s) inside the
- *   `X-Wait-For-Model: true` handshake, bounded again by the request's 45 s
+ *   `X-Wait-For-Model: true` handshake, bounded again by the request's 60 s
  *   deadline; a cold start that cannot answer in that window fails the stage
  *   and routes the request to STEP 4.
  * - Throws an Error prefixed with "HF Error:" on any failure so the caller can
@@ -874,11 +638,12 @@ async function classifyPlantImageStrict(
  * `responseMimeType: "application/json"` + `responseSchema` pin down — no
  * prose to parse, no label vocabulary to map.
  *
- * It deliberately receives the ORIGINAL frame, not the Step 0 crop: Gemini
- * reasons over the whole scene (leaf, stem, soil, neighbouring plants) the
- * way a human agronomist would, and losing that context to a tight crop
- * would make its own `affected_parts` / `notes` fields much weaker. The crop
- * exists to stop background noise polluting a narrow classifier, so it is
+ * It receives the ORIGINAL frame: Gemini reasons over the whole scene (leaf,
+ * stem, soil, neighbouring plants) the way a human agronomist would, and a
+ * tight crop would make its own `affected_parts` / `notes` fields much weaker.
+ * (The former leaf-cropping pre-step that produced such a crop is removed, so
+ * every model — MobileNetV2 included — now sees the untouched frame.) This is
+ * also why
  * kept for the MobileNetV2 fallback instead.
  *
  * The stage FAILS — and only then hands over to MobileNetV2 — on:
@@ -1008,19 +773,20 @@ function analysisFromMobileNet(
  * Never throws: every failure is converted into a warning plus a `null`
  * result, so a vision outage can never fail the HTTP request.
  *
- * `geminiImage` is the untouched original frame; `mobilenetImage` is the Step 0
- * crop when detection succeeded, the full frame otherwise.
+ * `geminiImage` is the untouched original frame, and the MobileNetV2 fallback
+ * receives those same bytes now that cropping is removed.
  */
 async function runImageAnalysisStage(options: {
   geminiImage: AssistantImagePayload;
-  mobilenetImage: AssistantImagePayload;
   geminiApiKeys: readonly GeminiKeyEntry[];
   huggingfaceKey: string | null;
+  /** `ENABLE_HUGGINGFACE` — false skips the MobileNetV2 fallback entirely. */
+  hfEnabled: boolean;
   lang: "ar" | "fr";
   warnings: string[];
   deadline: RequestDeadline;
 }): Promise<AnalysisResult | null> {
-  const { geminiImage, mobilenetImage, geminiApiKeys, huggingfaceKey, lang, warnings, deadline } =
+  const { geminiImage, geminiApiKeys, huggingfaceKey, hfEnabled, lang, warnings, deadline } =
     options;
 
   // ---- PRIMARY: Gemini -------------------------------------------------
@@ -1042,6 +808,16 @@ async function runImageAnalysisStage(options: {
   }
 
   // ---- FALLBACK: MobileNetV2 (only reachable after the primary failed) --
+  // Soft-block: with Hugging Face disabled the fallback does not run at all —
+  // no token check, no request, and NO client warning (this is configuration,
+  // not a degradation).
+  if (!hfEnabled) {
+    console.warn(
+      `[Step 1: MobileNetV2 Skipped] ENABLE_HUGGINGFACE=${ENABLE_HUGGINGFACE} — the Hugging Face fallback image model is disabled by configuration.`,
+    );
+    return null;
+  }
+
   if (!huggingfaceKey) {
     const detail =
       "HUGGINGFACE_API_KEY is not configured — the fallback image model is unavailable.";
@@ -1051,9 +827,11 @@ async function runImageAnalysisStage(options: {
   }
 
   try {
+    // The MobileNetV2 classifier always receives the ORIGINAL frame now: the
+    // leaf-cropping pre-step is removed from the pipeline.
     const classification = await classifyPlantImageStrict(
-      mobilenetImage.data,
-      mobilenetImage.mimeType,
+      geminiImage.data,
+      geminiImage.mimeType,
       huggingfaceKey,
       deadline,
     );
@@ -1622,7 +1400,7 @@ async function ensureGeminiModelHealth(
  *
  * When every key is parked or refused for a model, the outer loop simply moves
  * to the next model in the chain. The whole walk is bounded by the request's
- * single 45 s deadline; when it fires, {@link DeadlineExceededError} propagates
+ * single 60 s deadline; when it fires, {@link DeadlineExceededError} propagates
  * and the route answers 503 instead of overrunning Vercel's 60 s limit.
  *
  * Only credential NAMES are ever logged or echoed — the winning pair is
@@ -1662,7 +1440,7 @@ async function runGeminiWithKeyPool(
     for (const [keyIndex, entry] of keyPool.entries()) {
       if (deadline.remainingMs <= MIN_STAGE_BUDGET_MS) {
         throw new DeadlineExceededError(
-          `only ${Math.max(0, deadline.remainingMs)} ms left before the 45 s deadline`,
+          `only ${Math.max(0, deadline.remainingMs)} ms left before the 60 s deadline`,
         );
       }
 
@@ -2003,7 +1781,7 @@ async function generateWithHfLlmModel(
  *     unusable, so walk the chain exactly as before.
  *   • network error or the 8 s per-attempt timeout — fall through to Gemini
  *     (the next provider in the pipeline).
- *   • the global 45 s deadline — propagate, so the route answers 503.
+ *   • the global 60 s deadline — propagate, so the route answers 503.
  *
  * Any failure eventually throws an "LLM Error:" that the handler turns into the
  * Gemini fallback and then the built-in formatter, so a Step 2 outage never
@@ -2029,7 +1807,7 @@ async function askHfLlmStrict(
   for (const [index, model] of HF_LLM_MODELS.entries()) {
     if (deadline.remainingMs <= MIN_STAGE_BUDGET_MS) {
       throw new DeadlineExceededError(
-        `only ${Math.max(0, deadline.remainingMs)} ms left before the 45 s deadline`,
+        `only ${Math.max(0, deadline.remainingMs)} ms left before the 60 s deadline`,
       );
     }
 
@@ -2043,7 +1821,7 @@ async function askHfLlmStrict(
       );
       return text;
     } catch (error) {
-      // The 45 s deadline is terminal — never degrade it into a warning.
+      // The 60 s deadline is terminal — never degrade it into a warning.
       if (isDeadlineFailure(error)) throw error;
 
       const status = error instanceof HfLlmRequestError ? error.status : undefined;
@@ -2580,11 +2358,11 @@ function buildTextFallbackReply(message: string): string {
  *   built-in formatter.
  * - The only non-200 responses left are client input errors (400/413), the
  *   explicit server misconfiguration signal (503 + MISSING_KEYS, emitted only
- *   when NEITHER provider key is configured) and the 45 s deadline stop
+ *   when NEITHER provider key is configured) and the 60 s deadline stop
  *   (503 + DEADLINE_EXCEEDED, Arabic "service is busy" message) — never an
  *   HTTP 500.
  *
- * The handler owns the ONE {@link RequestDeadline} (45 s) and hands it to every
+ * The handler owns the ONE {@link RequestDeadline} (60 s) and hands it to every
  * stage; a `DeadlineExceededError` from anywhere below unwinds to the 503
  * branch, and `dispose()` always runs so no timer outlives the response.
  */
@@ -2647,11 +2425,21 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   //                           parks the key for 60 minutes, and 503/network
   //                           retries the same key once before rotating.
   //   HUGGINGFACE_API_KEY   → Step 1 FALLBACK image model (MobileNetV2) +
-  //                           Step 2 PRIMARY text model. ONE variable name:
-  //                           there is no HF_TOKEN alias and no fallback.
+  //                           Step 2 text model. ONE variable name: there is
+  //                           no HF_TOKEN alias and no fallback. Read ONLY
+  //                           while ENABLE_HUGGINGFACE is on — with the flag
+  //                           off the token is not even resolved and every
+  //                           Hugging Face stage is bypassed.
+  // Hugging Face is soft-blocked by default (ENABLE_HUGGINGFACE = false): the
+  // pipeline is Gemini-only. Flip the constant (or set ENABLE_HUGGINGFACE=1)
+  // to restore the previous Hugging Face stages — the code is untouched.
+  const hfEnabled = isHuggingFaceEnabled();
+  // Rotation order is a random draw per request: every configured key is in
+  // the draw, no key repeats inside one cycle.
   const geminiApiKeys = resolveGeminiApiKeys();
-  const huggingfaceKey = resolveHuggingFaceToken();
-  logGeminiKeyConfiguration(geminiApiKeys);
+  const huggingfaceKey = hfEnabled ? resolveHuggingFaceToken() : null;
+  // The log line prints the STABLE inventory order (names only), not the draw.
+  logGeminiKeyConfiguration(resolveGeminiKeyPool(), hfEnabled);
 
   if (geminiApiKeys.length === 0 && !huggingfaceKey) {
     // Explicit misconfiguration signal (503 Service Unavailable — the route
@@ -2668,33 +2456,37 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   /** Answer language, resolved once and shared by every stage. */
   const lang: "ar" | "fr" = context?.lang === "fr" ? "fr" : "ar";
   /**
-   * The ONE 45 s ceiling for everything below: leaf detection, both image
-   * models, the HF text chain and the Gemini fallback. Every attempt also
+   * The ONE 60 s ceiling for everything below: the image analysis, the Gemini
+   * text model and (while enabled) the Hugging Face stages. Every attempt also
    * carries its own 8 s window, so no single provider can spend the budget.
    */
   const deadline = new RequestDeadline();
 
   try {
-  /* ---- STEP 0: leaf Detection & Cropping (image requests only) ------ */
-  // An open-source object detector localises the leaf and sharp crops the
-  // photo. The crop exists to keep background noise (hands, soil, pots) out
-  // of a narrow classifier, so it feeds the MobileNetV2 FALLBACK in Step 1
-  // only — Gemini, the primary image model, reasons over the full scene and
-  // receives the original frame. Non-fatal by construction: every failure
-  // degrades to the untouched original.
+  // ---- LEAF CROPPING: REMOVED ---------------------------------------
+  // The Step 0 "Detection & Cropping" pre-step (DETR-ResNet-50 + sharp) is
+  // gone from the pipeline: no detector round-trip, no crop, no image
+  // re-encode. The ORIGINAL frame is what every remaining stage sees, which
+  // is what Gemini — the only image model now that Hugging Face is
+  // soft-blocked — always received anyway.
+  //
+  // `preprocessing` keeps its exact wire shape: present on IMAGE responses
+  // only, with `status: "skipped"` (the stage did not run) so the stored
+  // history and the client keep parsing it unchanged.
   let preprocessing: AssistantPreprocessing | null = null;
   let analysis: AnalysisResult | null = null;
 
   if (image) {
-      const detection = await runLeafDetectionStage(image, huggingfaceKey, warnings, deadline);
-      preprocessing = detection.preprocessing;
-
+      preprocessing = { status: "skipped", detector: null, box: null, durationMs: 0 };
       // ---- STEP 1: IMAGE ANALYSIS (Gemini → MobileNetV2 → give up) ----
+      // MobileNetV2 (the Hugging Face fallback) only participates while
+      // ENABLE_HUGGINGFACE is on; with the flag off a failed Gemini analysis
+      // goes straight to Step 4.
       analysis = await runImageAnalysisStage({
         geminiImage: image,
-        mobilenetImage: detection.image,
         geminiApiKeys,
         huggingfaceKey,
+        hfEnabled,
         lang,
         warnings,
         deadline,
@@ -2736,14 +2528,18 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   // data, it does not re-analyse pixels.
   const userContent = buildUserContent(message, context, analysis?.data ?? null, isFirstTurn);
 
-  // ---- STEP 2: Hugging Face text model (PRIMARY) --------------------
-  // Called FIRST: the open Qwen chain through the Inference Providers
-  // router, with the shared system prompt and the same user turn. Non-fatal:
-  // a transport failure, a missing token, an empty/degenerate reply, or a
-  // reply that is not about ANALYSIS_DATA all walk to Step 3.
+  // ---- STEP 2: Hugging Face text model (DISABLED by default) ---------
+  // Only runs while ENABLE_HUGGINGFACE is on. With the flag off (shipped
+  // default) the whole stage is bypassed BEFORE any request is built: Gemini
+  // is the primary text model and answers through Step 3 below. The Hugging
+  // Face implementation is untouched — flip the flag to restore it.
   let reply: string | null = null;
   let textSource: TextSource | null = null;
-  if (huggingfaceKey) {
+  if (!hfEnabled) {
+    console.log(
+      "[Step 2: HF LLM Skipped] ENABLE_HUGGINGFACE=false — Hugging Face is soft-blocked; Gemini handles the text (Step 3).",
+    );
+  } else if (huggingfaceKey) {
     try {
       reply = assertUsableTextReply(
         await askHfLlmStrict(huggingfaceKey, userContent, history, deadline),
@@ -2754,7 +2550,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
         `[Step 2: HF LLM Success] analysis=${analysis?.source ?? "none"} replyLength=${reply.length}`,
       );
     } catch (error) {
-      // The 45 s deadline is the request's hard stop, not an HF failure.
+      // The 60 s deadline is the request's hard stop, not an HF failure.
       if (isDeadlineFailure(error)) return serviceBusyResponse();
       const msg = error instanceof Error ? error.message : String(error);
       const detail = shortMessage(msg.startsWith("LLM Error:") ? msg.slice("LLM Error:".length).trim() : msg, 700);
@@ -2762,21 +2558,21 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
       pushWarning(warnings, `Step 2 HF text model unavailable — ${detail}`, 700);
     }
   } else {
-    // No Hugging Face token anywhere in the environment → skip the stage
-    // synchronously (no request, no throw, no timer) and let Step 3
-    // (Gemini) answer right away.
+    // Hugging Face is enabled but has no token → skip the stage synchronously
+    // (no request, no throw, no timer) and let Step 3 (Gemini) answer.
     const detail =
-      "HUGGINGFACE_API_KEY is not configured — skipping the primary text model.";
+      "HUGGINGFACE_API_KEY is not configured — skipping the Hugging Face text model.";
     console.warn(`[Step 2: HF LLM Skipped] ${detail} → Step 3 (Gemini formatter)`);
     pushWarning(warnings, `Step 2 HF text model unavailable — ${detail}`);
   }
 
-  // ---- STEP 3: Google Gemini (FALLBACK text model) -------------------
-  // Runs ONLY when the primary Hugging Face stage produced nothing.
-  // gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
-  // 3.5-flash-lite on a retired-id 404) via the Generative Language REST API,
-  // keyed with the full
-  // Gemini key pool and bounded by a shared 18 s AbortController.
+  // ---- STEP 3: Google Gemini (PRIMARY when Hugging Face is off) ------
+  // Runs when the Hugging Face stage produced nothing — which, with
+  // ENABLE_HUGGINGFACE=false, is EVERY request: Gemini is the primary text
+  // model. gemini-3.8-flash or the GEMINI_MODEL override (→ 3.5-flash →
+  // 3.5-flash-lite → 2.5-flash → flash-latest on a retired-id 404) via the
+  // Generative Language REST API, keyed with the shuffled Gemini pool and
+  // bounded by the shared request deadline.
   // Gemini is a FORMATTER here: the prompt is ANALYSIS_DATA and NO image is
   // attached, so it cannot re-analyse the photo even by accident. This also
   // covers the edge case where the analysis came from MobileNetV2 and the HF
@@ -2853,7 +2649,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   };
   return NextResponse.json(payload);
   } catch (error) {
-    // The 45 s ceiling fired inside ANY stage (leaf detection, either image
+    // The 60 s ceiling fired inside ANY stage (either image
     // model, the HF chain or the Gemini chain): stop everything and answer 503
     // with the Arabic "service is busy" message. Any other exception keeps
     // travelling to the outer safety net.
@@ -2862,7 +2658,7 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   } finally {
     // Always disarm the deadline timer — on success, on 4xx and on the 503
     // path. An armed timer would keep the serverless invocation alive past the
-    // response; disposing here is what guarantees the 45 s ceiling is the LAST
+    // response; disposing here is what guarantees the 60 s ceiling is the LAST
     // thing that can happen, never a leaked callback.
     deadline.dispose();
   }

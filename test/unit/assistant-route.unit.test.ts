@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
 import { dynamic, geminiModelHealth, POST } from "../../src/app/api/assistant/route";
+import sharp from "sharp";
 import { geminiKeyState, hfCreditCircuit } from "../../src/lib/assistant/providers";
 
 /** Provider keys used across the suite (values are deliberately padded). */
@@ -17,11 +18,10 @@ const CODECRAFT_URL_PATTERN = /codecraftapi\.com/i;
 /**
  * Timeout windows mirrored from `@/lib/assistant/providers`: EVERY upstream
  * attempt gets its own 8 s window, and the WHOLE request is bounded by one
- * 45 s deadline that answers HTTP 503 (the Arabic "service is busy" message)
- * well inside Vercel's 60 s limit.
+ * 60 s deadline that answers HTTP 503 (the Arabic "service is busy" message).
  */
 const PER_ATTEMPT_TIMEOUT_MS = 8_000;
-const GLOBAL_DEADLINE_MS = 45_000;
+const GLOBAL_DEADLINE_MS = 60_000;
 
 /**
  * Stage-3 (Gemini fallback) model chain, in order — must mirror the route's
@@ -46,7 +46,7 @@ const GEMINI_FALLBACK_ORDER = [
  * no longer read by the route) and the model-chain overrides.
  */
 const SCRUBBED_ENV_PATTERN =
-  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
+  /^(GEMINI_API_KEY|GEMINI_MODEL|HUGGINGFACE_API_KEY|HF_TOKEN|ENABLE_HUGGINGFACE|HF_LEAF_DETECT_MODELS|HF_VISION_MODEL|CODECRAFT_API_KEY|CODECRAFT_BASE_URL|CODECRAFT_VISION_MODEL|CODECRAFT_MODEL)/;
 // NOTE: the CODECRAFT_* variables stay in the scrub list on purpose — a
 // developer's shell may still export them from the pre-streamlining setup,
 // and the guard tests below rely on them being absent unless set explicitly.
@@ -60,6 +60,19 @@ beforeEach(() => {
   for (const name of Object.keys(process.env)) {
     if (SCRUBBED_ENV_PATTERN.test(name)) delete process.env[name];
   }
+  // SHIPPED DEFAULT vs. THIS SUITE: `ENABLE_HUGGINGFACE` is `false` in
+  // production (Gemini-only; see the "Hugging Face soft-block" block below,
+  // which asserts that default). The suite pins the override ON so the
+  // preserved-and-dormant Hugging Face stages — the MobileNetV2 fallback and
+  // the Qwen text chain — keep their regression coverage instead of rotting
+  // behind the flag.
+  process.env.ENABLE_HUGGINGFACE = "true";
+  // Rotation is a random draw per request (Fisher–Yates). Pinning the
+  // generator to its maximum yields the IDENTITY draw — the configured
+  // inventory order — so the order-sensitive assertions below stay exact. The
+  // shuffle itself is covered in providers.unit.test.ts and by the dedicated
+  // randomization test at the end of this file.
+  mock.method(Math, "random", () => 1 - Number.EPSILON);
   // The health verdict is cached per process for 6 h. Each test starts from a
   // known-clean verdict so an earlier test's dead-id set cannot leak forward;
   // the health-check tests below `reset()` to force a real ListModels call.
@@ -103,6 +116,53 @@ function textRequest(message: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
   });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Image fixtures & URL guards                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A real decodable JPEG (solid "leaf green" 64×48 frame).
+ *
+ * Declared at the TOP of the file, before any `test()` is registered: the
+ * fixtures used to live next to the Step 0 suite further down, which left them
+ * in their temporal dead zone while node:test was already running earlier
+ * cases (the intermittent "Cannot access 'LEAF_JPEG_B64' before
+ * initialization"). With the leaf-cropping step removed there is no Step 0
+ * suite any more, and the fixture must not be able to race the tests either.
+ */
+const LEAF_JPEG = await sharp({
+  create: { width: 64, height: 48, channels: 3, background: { r: 34, g: 120, b: 45 } },
+})
+  .jpeg()
+  .toBuffer();
+const LEAF_JPEG_B64 = LEAF_JPEG.toString("base64");
+
+function imageRequest(data: string, mimeType = "image/jpeg") {
+  return new NextRequest("http://localhost/api/assistant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: "شخّص هذه الورقة", image: { data, mimeType } }),
+  });
+}
+
+/**
+ * The object-detection endpoints of the REMOVED leaf-cropping pre-step. Kept
+ * purely as a guard: the pipeline must never call one again.
+ */
+const isDetectUrl = (url: string) =>
+  url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
+/** Step 1 classifier endpoints (MobileNetV2 PlantVillage — the sole default classifier). */
+const isClassifyUrl = (url: string) =>
+  url.includes("router.huggingface.co/hf-inference/models/") && /mobilenet|vit/i.test(url);
+
+/** The `preprocessing` block as it rides on an image response. */
+interface PreprocessingLike {
+  status: string;
+  detector: string | null;
+  box: [number, number, number, number] | null;
+  durationMs: number;
 }
 
 /** Configure the provider keys (padded, to prove the route trims them). */
@@ -313,9 +373,6 @@ const geminiImagePart = (body: GeminiRequestBody): GeminiImagePart | undefined =
  */
 const MOBILENET_MODEL =
   "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification";
-
-/** Step 0 — primary leaf detector (COCO DETR-ResNet-50), mirrors the route. */
-const LEAF_DETECTOR = "facebook/detr-resnet-50";
 
 /**
  * Stage 1 model chain, in order — must mirror the route's HF_LLM_MODELS:
@@ -1456,7 +1513,7 @@ test("Stage 1 network failure falls through to the Gemini fallback chain", async
   assert.equal(upstream.mock.callCount(), 2);
 });
 
-test("timeouts: a hanging Gemini round-trip is aborted after the 8 s per-attempt window, and the 45 s deadline answers 503", async () => {
+test("timeouts: a hanging Gemini round-trip is aborted after the 8 s per-attempt window, and the 60 s deadline answers 503", async () => {
   configureKeys();
   const calls: string[] = [];
   const abortedGeminiAttempts: number[] = [];
@@ -1501,7 +1558,7 @@ test("timeouts: a hanging Gemini round-trip is aborted after the 8 s per-attempt
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(abortedGeminiAttempts.length >= 1, "the 8 s per-attempt window must abort the round-trip");
 
-    // …and the walk cannot outlive the single 45 s request deadline: the
+    // …and the walk cannot outlive the single 60 s request deadline: the
     // route stops and answers 503 instead of drifting into Vercel's limit.
     mock.timers.tick(GLOBAL_DEADLINE_MS);
     response = await pending;
@@ -2572,302 +2629,21 @@ test("the MobileNetV2 fallback sorts the returned array and picks the top class"
 
 
 /* ------------------------------------------------------------------ */
-/*  Step 0 — leaf Detection & Cropping before the classifier           */
-/* ------------------------------------------------------------------ */
-
-import sharp from "sharp";
-
-/** A real decodable JPEG (solid "leaf green" 64×48 frame) for Step 0. */
-const LEAF_JPEG = await sharp({
-  create: { width: 64, height: 48, channels: 3, background: { r: 34, g: 120, b: 45 } },
-})
-  .jpeg()
-  .toBuffer();
-const LEAF_JPEG_B64 = LEAF_JPEG.toString("base64");
-
-function imageRequest(data: string, mimeType = "image/jpeg") {
-  return new NextRequest("http://localhost/api/assistant", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: "شخّص هذه الورقة", image: { data, mimeType } }),
-  });
-}
-
-/** Step 0 detector endpoints (DETR family on the hf-inference router). */
-const isDetectUrl = (url: string) =>
-  url.includes("router.huggingface.co/hf-inference/models/") && /detr/i.test(url);
-/** Step 1 classifier endpoints (MobileNetV2 PlantVillage — the sole default classifier). */
-const isClassifyUrl = (url: string) =>
-  url.includes("router.huggingface.co/hf-inference/models/") && /mobilenet|vit/i.test(url);
-
-/** Raw bytes body of an upstream call, base64-encoded for comparisons. */
-const bodyB64 = (init: RequestInit) => Buffer.from(init.body as Uint8Array).toString("base64");
-
-/**
- * The Step 0 mock answer: one high-confidence leaf box at (10,8)-(50,40).
- * The label must pass the facebook/detr-resnet-50 plant filter
- * (`/plant|leaf/i`) — "potted plant" is the COCO id's plant-flavoured label.
- */
-const leafDetection = () =>
-  Response.json([{ label: "potted plant", score: 0.87, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
-
-interface PreprocessingLike {
-  status: string;
-  detector: string | null;
-  box: [number, number, number, number] | null;
-  durationMs: number;
-}
-
-test("Step 0 crops for the MobileNetV2 fallback, while Gemini keeps the original frame", async () => {
-  configureKeys();
-  const urls: string[] = [];
-  let classifyBody = "";
-  let classifyContentType: string | null = null;
-  let geminiImage: GeminiImagePart | undefined;
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    urls.push(String(url));
-    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
-    if (isGeminiUrl(String(url))) {
-      const body = parseGeminiBody(init);
-      // Force the fallback so the crop is actually exercised, and capture the
-      // photo the PRIMARY image model was given.
-      if (body.generationConfig?.responseMimeType === "application/json") {
-        geminiImage = geminiImagePart(body);
-        return geminiBlocked();
-      }
-      return geminiReply(GROUNDED_REPLY);
-    }
-    if (isDetectUrl(String(url))) {
-      assert.equal(new Headers(init.headers).get("Authorization"), `Bearer ${HF_KEY}`);
-      return leafDetection();
-    }
-    assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
-    classifyBody = bodyB64(init);
-    classifyContentType = new Headers(init.headers).get("Content-Type");
-    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-
-  // Pipeline order: detect → Gemini (primary) → MobileNetV2 (fallback) → chat.
-  assert.equal(urls.length, 4, `expected detect + Gemini + classify + HF, got ${urls.join(", ")}`);
-  assert.ok(isDetectUrl(urls[0]));
-  // The PRIMARY detector is the COCO facebook/detr-resnet-50 — the obsolete
-  // fine-tuned PlantDoc checkpoint is gone from the default chain.
-  assert.match(urls[0], /facebook\/detr-resnet-50/);
-  assert.doesNotMatch(urls[0], /detr-finetuned-plantdoc/);
-  assert.ok(isGeminiUrl(urls[1]), "Gemini is the PRIMARY image model");
-  assert.ok(isClassifyUrl(urls[2]));
-  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
-
-  // The PRIMARY image model reasons over the whole scene: it gets the
-  // untouched original frame, never the crop.
-  assert.equal(geminiImage?.data, LEAF_JPEG_B64);
-  assert.equal(geminiImage?.mimeType, "image/jpeg");
-
-  // The narrow FALLBACK classifier saw the re-encoded CROP instead.
-  assert.notEqual(classifyBody, LEAF_JPEG_B64);
-  assert.equal(classifyContentType, "image/jpeg");
-
-  // Crop window: 40×32 box + 12% padding (5,4) → (5,4) 50×40 on the 64×48 frame.
-  assert.equal(payload.preprocessing?.status, "cropped");
-  assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
-  assert.deepEqual(payload.preprocessing?.box, [5, 4, 50, 40]);
-  assert.equal(typeof payload.preprocessing?.durationMs, "number");
-
-  assert.equal(payload.source, "hybrid");
-  assert.equal(payload.analysisSource, "mobilenet");
-  assert.doesNotMatch(JSON.stringify(payload), new RegExp(`${GEMINI_KEY}|${HF_KEY}`));
-});
-
-test("Step 0 with no usable detection keeps the full frame for Step 1", async () => {
-  configureKeys();
-  let classifyBody = "";
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    // The primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("الصورة كاملة.");
-    if (isDetectUrl(String(url))) return Response.json([]);
-    assert.ok(isClassifyUrl(String(url)));
-    classifyBody = bodyB64(init);
-    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  // The untouched original reached the classifier.
-  assert.equal(classifyBody, LEAF_JPEG_B64);
-  assert.equal(payload.preprocessing?.status, "no-leaf");
-  assert.equal(payload.preprocessing?.box, null);
-  // A no-leaf outcome is a normal result, not a pipeline warning.
-  assert.doesNotMatch(warningText(payload), /Step 0/);
-  assert.equal(payload.source, "hybrid");
-});
-
-test("Step 0 outage (detector loading) degrades to the full frame with a warning", async () => {
-  configureKeys();
-  let classifyBody = "";
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
-    if (isGeminiUrl(String(url))) return geminiBlocked(); // force the fallback
-    if (isDetectUrl(String(url))) return Response.json({ error: "Model is loading" }, { status: 503 });
-    assert.ok(isClassifyUrl(String(url)));
-    classifyBody = bodyB64(init);
-    return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  assert.equal(payload.preprocessing?.status, "unavailable");
-  // The crop could not be produced, so the fallback classifier got the
-  // original frame — the exact pre-Step-0 behaviour.
-  assert.equal(classifyBody, LEAF_JPEG_B64);
-  assert.match(warningText(payload), /Step 0 leaf detection unavailable/);
-  assert.equal(payload.source, "hybrid");
-});
-
-test("Step 0 without an HF key is skipped silently and Step 1 reports its own skip", async () => {
-  // Gemini-only deployment: Step 0 cannot run (no detector token) and stays
-  // silent so it does not duplicate the Step 1 / Step 2 skip messages.
-  process.env.GEMINI_API_KEY = GEMINI_KEY;
-  const geminiBodies: GeminiRequestBody[] = [];
-  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    assert.ok(isGeminiUrl(String(url)), `no HF endpoint is reachable: ${url}`);
-    const body = parseGeminiBody(init);
-    geminiBodies.push(body);
-    return body.generationConfig?.responseMimeType === "application/json"
-      ? geminiAnalysis()
-      : geminiReply(GROUNDED_REPLY);
-  });
-  const response = await POST(imageRequest("aW1hZ2U="));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  assert.equal(payload.preprocessing?.status, "skipped");
-  assert.equal(payload.analysisSource, "gemini");
-  // The skip is a graceful degradation, not an error: no analysis-stage
-  // warning for MobileNetV2, because the primary model handled the photo.
-  assert.doesNotMatch(warningText(payload), /Step 0/);
-  assert.doesNotMatch(warningText(payload), /MobileNetV2/);
-  assert.match(warningText(payload), /Step 2 HF text model unavailable/);
-  assert.equal(geminiImagePart(geminiBodies[0])?.data, "aW1hZ2U=");
-});
-
-test("Step 0 label filter: only plant/leaf boxes are accepted (a person box never crops)", async () => {
-  configureKeys();
-  mock.method(globalThis, "fetch", async (url: string) => {
-    // The primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("تم.");
-    if (isDetectUrl(String(url))) {
-      // The higher-scoring "person" box (full frame) must be REJECTED by the
-      // facebook/detr-resnet-50 plant label filter; the potted-plant box crops.
-      return Response.json([
-        { label: "potted plant", score: 0.8, box: { xmin: 5, ymin: 5, xmax: 45, ymax: 35 } },
-        { label: "person", score: 0.99, box: { xmin: 0, ymin: 0, xmax: 64, ymax: 48 } },
-      ]);
-    }
-    assert.ok(isClassifyUrl(String(url)));
-    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
-  });
-
-  const response = await POST(imageRequest(LEAF_JPEG_B64));
-  assert.equal(response.status, 200);
-  const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-  // The plant box was accepted — the "person" box (which would crop to the
-  // full frame) was filtered out by label.
-  assert.equal(payload.preprocessing?.status, "cropped");
-  assert.equal(payload.preprocessing?.detector, LEAF_DETECTOR);
-});
-
-test("Step 0 walks the HF_LEAF_DETECT_MODELS override chain when the primary id 404s", async () => {
-  configureKeys();
-  process.env.HF_LEAF_DETECT_MODELS = "first/leaf-detector,second/leaf-detector";
-  const detectUrls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
-    // The primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("تم.");
-    // Custom override ids are not necessarily "detr" — any router URL that is
-    // not the classifier is a detection call.
-    if (
-      /router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) &&
-      !isClassifyUrl(String(url))
-    ) {
-      detectUrls.push(String(url));
-      // First id 404s (checkpoint gone) — the chain must walk to the second.
-      if (detectUrls.length === 1) return Response.json({ error: "Model not found" }, { status: 404 });
-      return Response.json([
-        { label: "potted plant", score: 0.8, box: { xmin: 5, ymin: 5, xmax: 45, ymax: 35 } },
-      ]);
-    }
-    assert.ok(isClassifyUrl(String(url)));
-    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
-  });
-
-  try {
-    const response = await POST(imageRequest(LEAF_JPEG_B64));
-    assert.equal(response.status, 200);
-    const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-    assert.deepEqual(detectUrls.map((url) => /models\/(.+)$/.exec(url)?.[1]), [
-      "first/leaf-detector",
-      "second/leaf-detector",
-    ]);
-    assert.equal(payload.preprocessing?.status, "cropped");
-    assert.equal(payload.preprocessing?.detector, "second/leaf-detector");
-  } finally {
-    delete process.env.HF_LEAF_DETECT_MODELS;
-  }
-});
-
-test("HF_LEAF_DETECT_MODELS overrides the Step 0 detector chain", async () => {
-  configureKeys();
-  process.env.HF_LEAF_DETECT_MODELS = "custom/leaf-detector";
-  const detectUrls: string[] = [];
-  mock.method(globalThis, "fetch", async (url: string) => {
-    // The primary HF LLM is down → the Gemini fallback answers.
-    if (isChatUrl(String(url))) return new Response(null, { status: 503 });
-    if (isGeminiUrl(String(url))) return geminiReply("تم.");
-    if (/router\.huggingface\.co\/hf-inference\/models\//.test(String(url)) && !isClassifyUrl(String(url))) {
-      detectUrls.push(String(url));
-      return Response.json([{ label: "LABEL_0", score: 0.9, box: { xmin: 10, ymin: 8, xmax: 50, ymax: 40 } }]);
-    }
-    assert.ok(isClassifyUrl(String(url)));
-    return Response.json([{ label: "Tomato___healthy", score: 0.9 }]);
-  });
-
-  try {
-    const response = await POST(imageRequest(LEAF_JPEG_B64));
-    assert.equal(response.status, 200);
-    const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
-    assert.match(detectUrls[0], /models\/custom\/leaf-detector$/);
-    assert.equal(payload.preprocessing?.status, "cropped");
-    assert.equal(payload.preprocessing?.detector, "custom/leaf-detector");
-  } finally {
-    delete process.env.HF_LEAF_DETECT_MODELS;
-  }
-});
-
-
-/* ------------------------------------------------------------------ */
 /*  Step 1 — streamlined vision chain: MobileNetV2 DIRECT (no CodeCraft) */
 /* ------------------------------------------------------------------ */
 
 /**
- * The streamlined pipeline locks three contracts:
- *   1. Step 1 routes EVERY photo DIRECTLY to the MobileNetV2 PlantVillage
- *      classifier — the removed CodeCraft engine is never called, whatever
- *      its (legacy) environment variables say;
- *   2. the upstream order is exactly: Step 0 detect → Step 1 MobileNetV2
- *      classify → Stage 1 HF LLM → (on failure) Stage 2 Gemini;
- *   3. the Stage 1 → Stage 2 LLM fallback chain (HF Qwen primary, Gemini
- *      fallback) is intact and unchanged.
+ * The streamlined pipeline locks three contracts (Hugging Face enabled, which
+ * this suite pins; the shipped default bypasses the two HF stages):
+ *   1. Step 1 routes a photo to MobileNetV2 ONLY as a fallback — the removed
+ *      CodeCraft engine is never called, whatever its legacy env vars say;
+ *   2. the upstream order is exactly: Step 1 Gemini (primary) → MobileNetV2
+ *      (fallback) → Step 2 HF text → (on failure) Step 3 Gemini text. Leaf
+ *      cropping is GONE: no detector round-trip is ever made;
+ *   3. the HF-primary → Gemini-fallback LLM chain is intact and unchanged.
  */
 
-test("orchestrated Step 1: detect → Gemini (primary) → MobileNetV2 (fallback) → HF text, no CodeCraft", async () => {
+test("orchestrated Step 1: Gemini (primary) → MobileNetV2 (fallback) → HF text, no detector, no CodeCraft", async () => {
   configureKeys();
   const urls: string[] = [];
   mock.method(globalThis, "fetch", async (url: string) => {
@@ -2878,7 +2654,6 @@ test("orchestrated Step 1: detect → Gemini (primary) → MobileNetV2 (fallback
     if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
     // The primary image model fails, so the fallback classifier runs.
     if (isGeminiUrl(String(url))) return geminiBlocked();
-    if (isDetectUrl(String(url))) return leafDetection();
     assert.ok(isClassifyUrl(String(url)), `unexpected upstream: ${url}`);
     return Response.json([{ label: "Tomato___Early_blight", score: 0.95 }]);
   });
@@ -2887,19 +2662,24 @@ test("orchestrated Step 1: detect → Gemini (primary) → MobileNetV2 (fallback
   assert.equal(response.status, 200);
   const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
 
-  // Exactly four round-trips: detect → Gemini → MobileNetV2 → HF text.
-  assert.equal(urls.length, 4, `expected detect + Gemini + classify + HF, got ${urls.join(" | ")}`);
-  assert.ok(isDetectUrl(urls[0]));
-  assert.ok(isGeminiUrl(urls[1]), "Gemini is the PRIMARY image model");
-  assert.ok(isClassifyUrl(urls[2]), "MobileNetV2 only runs after the primary failed");
-  assert.ok(urls[2].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[2]}`);
-  assert.equal(urls[3], HF_ROUTER_CHAT_URL);
+  // Exactly three round-trips: Gemini → MobileNetV2 → HF text. The leaf
+  // detector of the removed cropping step is never called.
+  assert.equal(urls.length, 3, `expected Gemini + classify + HF, got ${urls.join(" | ")}`);
+  assert.ok(isGeminiUrl(urls[0]), "Gemini is the PRIMARY image model");
+  assert.ok(isClassifyUrl(urls[1]), "MobileNetV2 only runs after the primary failed");
+  assert.ok(urls[1].includes(MOBILENET_MODEL), `expected the MobileNetV2 endpoint, got ${urls[1]}`);
+  assert.equal(urls[2], HF_ROUTER_CHAT_URL);
+  assert.equal(urls.filter(isDetectUrl).length, 0, "leaf detection is removed from the pipeline");
 
   // The MobileNetV2 verdict flows through the shared AnalysisData schema.
   assert.equal(payload.analysisSource, "mobilenet");
   assert.equal(payload.diagnosis?.label, "Tomato___Early_blight");
   assert.equal(Math.round((payload.diagnosis?.confidence ?? 0) * 100), 95);
-  assert.equal(payload.preprocessing?.status, "cropped");
+  // The cropping step is gone: the response still carries `preprocessing`,
+  // but only ever as "skipped" (wire format preserved, no crop claimed).
+  assert.equal(payload.preprocessing?.status, "skipped");
+  assert.equal(payload.preprocessing?.detector, null);
+  assert.equal(payload.preprocessing?.box, null);
   assert.equal(payload.source, "hybrid");
   // No CodeCraft degradation ever surfaces in the pipeline.
   assert.doesNotMatch(warningText(payload), /CodeCraft/i);
@@ -2919,7 +2699,6 @@ test("orchestrated Step 1: legacy CODECRAFT_* env vars are ignored — no reques
     assert.doesNotMatch(String(url), CODECRAFT_URL_PATTERN, "the removed CodeCraft engine must never be called");
     if (isChatUrl(String(url))) return chatReply(GROUNDED_REPLY);
     if (isGeminiUrl(String(url))) return geminiAnalysis();
-    if (isDetectUrl(String(url))) return leafDetection();
     throw new Error(`unexpected upstream: ${url}`);
   });
 
@@ -2933,8 +2712,10 @@ test("orchestrated Step 1: legacy CODECRAFT_* env vars are ignored — no reques
     assert.equal(payload.source, "hybrid");
     // …and the HF primary text model answered the reply.
     assert.equal(payload.reply, GROUNDED_REPLY);
-    // Exactly: detect → Gemini → HF text. No classifier, no CodeCraft.
-    assert.equal(urls.length, 3, urls.join(" | "));
+    // Exactly: Gemini image analysis → HF text. No detector, no classifier,
+    // no CodeCraft.
+    assert.equal(urls.length, 2, urls.join(" | "));
+    assert.equal(urls.filter(isDetectUrl).length, 0);
     assert.ok(urls.every((url) => !CODECRAFT_URL_PATTERN.test(url)));
     assert.equal(urls.filter(isClassifyUrl).length, 0);
     assert.doesNotMatch(warningText(payload), /CodeCraft/i);
@@ -3026,5 +2807,247 @@ test("LLM fallback chain intact: HF failure, timeout-shaped error or empty reply
     assert.equal(urls[0], HF_ROUTER_CHAT_URL);
     assert.ok(isGeminiUrl(urls[urls.length - 1]));
     mock.restoreAll();
+  }
+});
+
+
+/* ------------------------------------------------------------------ */
+/*  SHIPPED DEFAULT — Hugging Face soft-block + removed leaf cropping  */
+/*                                                                     */
+/*  The block above pins ENABLE_HUGGINGFACE=true so the dormant HF      */
+/*  stages stay covered. These tests drive the REAL default: the flag   */
+/*  is off, the pipeline is Gemini-only, and the leaf-cropping step no  */
+/*  longer exists.                                                      */
+/* ------------------------------------------------------------------ */
+
+/** Run `fn` with the flag off, restoring the suite's override afterwards. */
+async function withHuggingFaceDisabled(fn: () => Promise<void>): Promise<void> {
+  process.env.ENABLE_HUGGINGFACE = "false";
+  mock.restoreAll();
+  mock.method(Math, "random", () => 1 - Number.EPSILON);
+  try {
+    await fn();
+  } finally {
+    process.env.ENABLE_HUGGINGFACE = "true";
+    mock.restoreAll();
+    mock.method(Math, "random", () => 1 - Number.EPSILON);
+  }
+}
+
+test("soft-block: the shipped default is ENABLE_HUGGINGFACE=false", async () => {
+  const { ENABLE_HUGGINGFACE } = await import("../../src/lib/assistant/providers");
+  assert.equal(ENABLE_HUGGINGFACE, false, "the feature flag ships OFF (Gemini-only)");
+  assert.equal(dynamic, "force-dynamic");
+});
+
+test("soft-block: with the flag off a text question goes straight to Gemini — no Hugging Face request at all", async () => {
+  await withHuggingFaceDisabled(async () => {
+    // Even a perfectly valid token must be ignored: it is never read.
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    process.env.HUGGINGFACE_API_KEY = HF_KEY;
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(String(url));
+      assert.ok(isGeminiUrl(String(url)), `Hugging Face must be bypassed, got ${url}`);
+      return geminiReply("إجابة Gemini.");
+    });
+
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    // Gemini is the PRIMARY text model in this configuration.
+    assert.equal(payload.source, "llm");
+    assert.equal(payload.reply, "إجابة Gemini.");
+    assert.equal(payload.textSource, "gemini_fallback");
+    assert.equal(urls.length, 1, urls.join(" | "));
+    assert.doesNotMatch(JSON.stringify(payload), new RegExp(HF_KEY));
+    // The bypass is a configuration fact, not a degradation: no warning.
+    assert.equal(payload.warnings, undefined);
+    // `preprocessing` keeps its wire contract: image requests only.
+    assert.equal(
+      (payload as AssistantPayload & { preprocessing?: unknown }).preprocessing,
+      undefined,
+    );
+  });
+});
+
+test("soft-block: a photo uses Gemini for the image AND the text, with no detector and no MobileNetV2", async () => {
+  await withHuggingFaceDisabled(async () => {
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    process.env.HUGGINGFACE_API_KEY = HF_KEY;
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+      urls.push(String(url));
+      assert.ok(isGeminiUrl(String(url)), `Hugging Face must be bypassed, got ${url}`);
+      // First call = image analysis (responseMimeType: application/json),
+      // second = text formatting (no responseMimeType, grounded reply).
+      const wantsJson = /"responseMimeType"\s*:\s*"application\/json"/.test(String(init.body ?? ""));
+      return wantsJson ? geminiAnalysis() : geminiReply(GROUNDED_REPLY);
+    });
+
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+    assert.equal(payload.analysisSource, "gemini");
+    assert.equal(payload.textSource, "gemini_fallback");
+    assert.equal(payload.source, "hybrid");
+    assert.equal(payload.reply, GROUNDED_REPLY);
+    assert.equal(urls.length, 2, urls.join(" | "));
+    assert.equal(urls.filter(isDetectUrl).length, 0);
+    assert.equal(urls.filter(isClassifyUrl).length, 0);
+    // The response format is unchanged: `preprocessing` is present and says
+    // "skipped" (the cropping stage no longer runs at all).
+    assert.equal(payload.preprocessing?.status, "skipped");
+  });
+});
+
+test("soft-block: with the flag off and NO token, a request still answers — the token is not required", async () => {
+  await withHuggingFaceDisabled(async () => {
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      assert.ok(isGeminiUrl(String(url)));
+      return geminiReply("تم.");
+    });
+    const response = await POST(request());
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.reply, "تم.");
+    // No "HUGGINGFACE_API_KEY is not configured" noise: the stage does not run.
+    assert.doesNotMatch(warningText(payload), /HUGGINGFACE_API_KEY/);
+  });
+});
+
+test("soft-block: with the flag off, Gemini failing a photo lands on STEP 4 — MobileNetV2 is never consulted", async () => {
+  await withHuggingFaceDisabled(async () => {
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    process.env.HUGGINGFACE_API_KEY = HF_KEY;
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(String(url));
+      assert.ok(isGeminiUrl(String(url)), `Hugging Face must be bypassed, got ${url}`);
+      return geminiBlocked();
+    });
+
+    const response = await POST(imageRequest(LEAF_JPEG_B64));
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as AssistantPayload;
+    assert.equal(payload.source, "direct");
+    assert.equal(payload.analysisSource, null);
+    assert.match(payload.reply, /تعذّر تحليل صورة النبتة/);
+    // No fallback classifier was attempted for any model id.
+    assert.equal(urls.filter(isClassifyUrl).length, 0);
+    assert.equal(urls.filter(isDetectUrl).length, 0);
+  });
+});
+
+test("soft-block: MISSING_KEYS is decided by the GEMINI key once Hugging Face is off", async () => {
+  await withHuggingFaceDisabled(async () => {
+    // A Hugging Face token alone is NOT a usable configuration any more.
+    process.env.HUGGINGFACE_API_KEY = HF_KEY;
+    mock.method(globalThis, "fetch", async () => {
+      throw new Error("no upstream may be called");
+    });
+    const response = await POST(request());
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "API keys missing on server",
+      code: "MISSING_KEYS",
+    });
+  });
+});
+
+test("leaf cropping: the detector is never called and preprocessing is 'skipped' even with a token configured", async () => {
+  await withHuggingFaceDisabled(async () => {
+    process.env.GEMINI_API_KEY = GEMINI_KEY;
+    process.env.HUGGINGFACE_API_KEY = HF_KEY;
+    process.env.HF_LEAF_DETECT_MODELS = "custom/leaf-detector";
+    const urls: string[] = [];
+    mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(String(url));
+      return geminiAnalysis();
+    });
+    try {
+      const response = await POST(imageRequest(LEAF_JPEG_B64));
+      const payload = (await response.json()) as AssistantPayload & { preprocessing?: PreprocessingLike };
+      assert.equal(payload.preprocessing?.status, "skipped");
+      assert.equal(payload.preprocessing?.detector, null);
+      assert.equal(urls.filter(isDetectUrl).length, 0, "leaf cropping is removed");
+      assert.equal(urls.filter((url) => /leaf-detector/.test(url)).length, 0);
+    } finally {
+      delete process.env.HF_LEAF_DETECT_MODELS;
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Randomized key rotation                                            */
+/* ------------------------------------------------------------------ */
+
+test("rotation is randomized: repeated requests start on DIFFERENT keys of the pool", async () => {
+  configureKeys();
+  // Real randomness for this test (the suite's identity draw is restored in
+  // the `finally` below).
+  mock.restoreAll();
+  process.env.GEMINI_API_KEY = "k-one";
+  process.env.GEMINI_API_KEY_2 = "k-two";
+  process.env.GEMINI_API_KEY_3 = "k-three";
+  process.env.GEMINI_API_KEY_4 = "k-four";
+
+  try {
+    const firstKeys = new Set<string>();
+    for (let round = 0; round < 24; round += 1) {
+      let firstKey: string | null = null;
+      mock.method(globalThis, "fetch", async (url: string) => {
+        // Only a generateContent round-trip counts; the per-key ListModels
+        // catalog probes hit the same host on a different path.
+        if (firstKey === null && isGeminiUrl(String(url))) {
+          firstKey = requestedGeminiKey(String(url)) ?? "";
+        }
+        return geminiReply("تم.");
+      });
+      const response = await POST(request());
+      assert.equal(response.status, 200);
+      assert.ok(firstKey, "the request must call Gemini");
+      firstKeys.add(firstKey);
+      mock.restoreAll();
+    }
+    // A fixed order would always start on the same key; a shuffle spread the
+    // 24 requests over at least two of the four configured credentials.
+    assert.ok(
+      firstKeys.size >= 2,
+      `expected a spread over the pool, always started on ${[...firstKeys].join(", ")}`,
+    );
+  } finally {
+    mock.restoreAll();
+    mock.method(Math, "random", () => 1 - Number.EPSILON);
+  }
+});
+
+test("rotation: every key of the pool is used exactly once per request cycle (429s walk the draw, no repeats)", async () => {
+  configureKeys();
+  process.env.GEMINI_API_KEY = "cycle-a";
+  process.env.GEMINI_API_KEY_2 = "cycle-b";
+  process.env.GEMINI_API_KEY_3 = "cycle-c";
+  const attempted: { key: string; model: string }[] = [];
+  mock.method(globalThis, "fetch", async (url: string) => {
+    // Quietly answer the per-key ListModels catalog probes; the rotation is
+    // only visible in the generateContent calls.
+    if (!isGeminiUrl(String(url))) return Response.json({ models: [] });
+    attempted.push({
+      key: requestedGeminiKey(String(url)) ?? "",
+      model: requestedGeminiModel(String(url)) ?? "",
+    });
+    // Quota-fail every key so the cycle walks the whole draw.
+    return geminiHttpError(429, "RESOURCE_EXHAUSTED");
+  });
+
+  const response = await POST(request());
+  assert.equal(response.status, 200);
+  // Three keys configured: within each MODEL cycle every credential is tried
+  // exactly once (a permutation, never a repeat) — 5 models × 3 keys.
+  assert.equal(attempted.length, GEMINI_FALLBACK_ORDER.length * 3, JSON.stringify(attempted));
+  for (const model of GEMINI_FALLBACK_ORDER) {
+    const keysForModel = attempted.filter((call) => call.model === model).map((call) => call.key);
+    assert.deepEqual(keysForModel.slice().sort(), ["cycle-a", "cycle-b", "cycle-c"], model);
   }
 });

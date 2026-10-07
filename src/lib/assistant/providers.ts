@@ -8,15 +8,21 @@
  * route and in the two health probes, because a drift between them is exactly
  * how "the health check says OK but the assistant degrades" incidents happen:
  *
- *   • CREDENTIAL RESOLUTION — the Gemini key pool is ordered
- *     `GEMINI_API_KEY_4` FIRST, then the remaining `GEMINI_API_KEY*` variables
- *     in numeric order; the Hugging Face token is read from ONE variable name,
- *     `HUGGINGFACE_API_KEY` (trimmed), with no alias and no hardcoded fallback.
+ *   • CREDENTIAL RESOLUTION — the Gemini key pool is collected from
+ *     `GEMINI_API_KEY` and its numbered variants (`GEMINI_API_KEY_N`), then
+ *     SHUFFLED per request (see {@link shuffleGeminiKeyPool}): a random draw
+ *     without replacement, so no key is tried twice in one request cycle and
+ *     no request always starts on the same credential. The Hugging Face token
+ *     is read from ONE variable name, `HUGGINGFACE_API_KEY` (trimmed), with no
+ *     alias and no hardcoded fallback.
+ *   • FEATURE FLAG — {@link ENABLE_HUGGINGFACE} (shipped `false`) bypasses
+ *     every Hugging Face stage: the pipeline is Gemini-only. The Hugging Face
+ *     code is untouched and comes back by flipping the flag.
  *   • IN-MEMORY STATE — per (key NAME, model) quota exhaustion (10 min),
  *     per key invalidity (60 min) and the Hugging Face 402 credit circuit
  *     (10 min). Names, never values, are the map keys.
- *   • TIMEOUTS — one 8 s per-attempt window and ONE 45 s `AbortController`
- *     deadline for the whole request, safely under Vercel's 60 s limit.
+ *   • TIMEOUTS — one 8 s per-attempt window and ONE 60 s `AbortController`
+ *     deadline for the whole request.
  *   • REDACTION — every message that can reach a log line or the client is
  *     passed through {@link redactSecrets}, so a credential can never leak
  *     through an upstream error body, a URL echoed by `fetch` or a warning.
@@ -31,18 +37,26 @@
 
 /**
  * Per-attempt budget for a single upstream round-trip (Gemini generateContent,
- * HF chat-completions, HF classification, leaf detection, ListModels). An
+ * HF chat-completions, HF classification, ListModels). An
  * attempt that blows it is a "network / timeout" failure — Gemini retries the
  * SAME key once, Hugging Face falls through to the next provider.
  */
 export const PER_ATTEMPT_TIMEOUT_MS = 8_000;
 
 /**
- * Hard ceiling for the WHOLE request. When it fires, the route stops calling
- * upstreams and answers HTTP 503 with the Arabic "service is busy" message,
- * so the function can never drift into Vercel's 60 s limit.
+ * Hard ceiling for the WHOLE request: 60 s, armed as ONE `AbortController` at
+ * the top of the handler. When it fires, the route stops calling upstreams and
+ * answers HTTP 503 (`code: "DEADLINE_EXCEEDED"`) with the Arabic "service is
+ * busy" message — never a hang, never a 500.
+ *
+ * OPERATIONAL NOTE: 60 s is exactly Vercel's default function ceiling, so the
+ * deployment must allow a little more head-room for the 503 to be produced
+ * (`maxDuration = 65` on Pro/Enterprise; the Hobby plan is capped at 60 s and
+ * will kill the invocation at the same instant the timer fires). The route
+ * itself is already correct: the deadline is armed first, every attempt is
+ * bounded by {@link PER_ATTEMPT_TIMEOUT_MS}, and the timer is always disposed.
  */
-export const GLOBAL_DEADLINE_MS = 45_000;
+export const GLOBAL_DEADLINE_MS = 60_000;
 
 /**
  * A stage needs at least this much budget left to be worth starting (one
@@ -64,14 +78,44 @@ export const GEMINI_INVALID_TTL_MS = 60 * 60 * 1000;
 export const GEMINI_CATALOG_TTL_MS = 60 * 60 * 1000;
 
 /**
+ * FEATURE FLAG — Hugging Face inference (the MobileNetV2 vision fallback and
+ * the text model; the leaf-cropping detector of the old Step 0 is gone).
+ *
+ * `false` = the assistant is Gemini-only: every Hugging Face stage is skipped
+ * BEFORE a token is read or a request is built (no latency, no warnings, no
+ * quota spent), and Gemini handles both the image analysis and the text. The
+ * Hugging Face implementation is deliberately NOT deleted — flipping this
+ * constant to `true` restores the exact previous pipeline.
+ *
+ * `HUGGINGFACE_API_KEY` becomes optional while the flag is off (it is not even
+ * resolved, so an unset variable can no longer degrade a request), and the
+ * route's `MISSING_KEYS` guard now requires a Gemini key.
+ */
+export const ENABLE_HUGGINGFACE = false;
+
+/**
+ * `ENABLE_HUGGINGFACE`, overridable per deployment/process with the
+ * `ENABLE_HUGGINGFACE` environment variable (`true`/`1` to force on,
+ * `false`/`0` to force off). The constant is the shipped default; the override
+ * exists so the preserved Hugging Face paths stay testable and so an operator
+ * can re-enable the stage without a code change.
+ */
+export function isHuggingFaceEnabled(env: EnvLike = process.env): boolean {
+  const override = env.ENABLE_HUGGINGFACE?.trim().toLowerCase();
+  if (override === "true" || override === "1") return true;
+  if (override === "false" || override === "0") return false;
+  return ENABLE_HUGGINGFACE;
+}
+
+/**
  * Server-only variables this pipeline expects in production. NAMES ONLY — the
  * list is documentation/validation, never a place to read a value from.
- * `GEMINI_API_KEY_4` is the preferred rotation leader (a different Google
- * project usually means a separate quota), `GEMINI_API_KEY` keeps a minimal
- * deployment working, and `HEALTH_SECRET` protects the two health endpoints.
+ * `GEMINI_API_KEY` (plus the numbered variants) is what every stage needs,
+ * `HUGGINGFACE_API_KEY` is the Hugging Face credential — REQUIRED only while
+ * {@link ENABLE_HUGGINGFACE} is on, since the flag makes the pipeline
+ * Gemini-only — and `HEALTH_SECRET` protects the two health endpoints.
  */
 export const REQUIRED_ENV_VARS = [
-  "GEMINI_API_KEY_4",
   "GEMINI_API_KEY",
   "HUGGINGFACE_API_KEY",
   "HEALTH_SECRET",
@@ -114,7 +158,7 @@ export function shortMessage(input: string, max = 200): string {
 /*  Deadlines                                                          */
 /* ------------------------------------------------------------------ */
 
-/** Raised when the single 45 s request deadline fires. Maps to HTTP 503. */
+/** Raised when the single 60 s request deadline fires. Maps to HTTP 503. */
 export class DeadlineExceededError extends Error {
   constructor(message = `global request deadline of ${GLOBAL_DEADLINE_MS} ms exceeded`) {
     super(message);
@@ -133,7 +177,7 @@ export function isAbortOrTimeoutError(error: unknown): boolean {
 }
 
 /**
- * ONE `AbortController` per request, armed with the 45 s global deadline.
+ * ONE `AbortController` per request, armed with the 60 s global deadline.
  *
  * Every upstream round-trip races its own {@link PER_ATTEMPT_TIMEOUT_MS} timer
  * against this signal, so the two guarantees hold independently: a single slow
@@ -167,7 +211,7 @@ export class RequestDeadline {
     return this.controller.signal;
   }
 
-  /** Milliseconds left before the 45 s ceiling (may be ≤ 0 once exceeded). */
+  /** Milliseconds left before the 60 s ceiling (may be ≤ 0 once exceeded). */
   get remainingMs(): number {
     return this.expiresAt - this.now();
   }
@@ -185,7 +229,7 @@ export class RequestDeadline {
 
 /**
  * `fetch` bounded by BOTH windows: this attempt's {@link PER_ATTEMPT_TIMEOUT_MS}
- * and the request's shared 45 s deadline.
+ * and the request's shared 60 s deadline.
  *
  * A deadline abort is re-thrown as {@link DeadlineExceededError} so callers can
  * tell "this provider is slow" (retry the next key/provider) from "we are out
@@ -300,10 +344,11 @@ export const hfCreditCircuit = new HfCreditCircuit();
 export const GEMINI_KEY_NAME_PATTERN = /^GEMINI_API_KEY(_\d+)?$/;
 
 /**
- * The preferred FIRST key of the rotation. It usually belongs to a different
- * Google project than `GEMINI_API_KEY`, which means a separate daily quota —
- * so the request starts where the freshest budget is. When it is absent the
- * pipeline logs its NAME as missing and continues with the remaining keys.
+ * The variable usually holding a key from a DIFFERENT Google project (hence a
+ * separate daily quota). It keeps the head of the stable inventory order that
+ * the log line and the health probe print — the live request order is a random
+ * draw (see {@link shuffleGeminiKeyPool}) — and when it is absent the pipeline
+ * logs its NAME as missing and continues with the remaining keys.
  */
 export const GEMINI_PRIORITY_KEY_NAME = "GEMINI_API_KEY_4";
 
@@ -327,7 +372,7 @@ export interface GeminiKeyEntry {
   key: string;
 }
 
-/** Rotation rank: `_4` first, then the base variable, then `_1`, `_2`, … */
+/** Inventory rank: `_4` first, then the base variable, then `_1`, `_2`, … */
 function geminiKeyRank(name: string): number {
   if (name === GEMINI_PRIORITY_KEY_NAME) return 0;
   if (name === "GEMINI_API_KEY") return 1;
@@ -337,15 +382,20 @@ function geminiKeyRank(name: string): number {
 }
 
 /**
- * Resolve the rotation order once per request:
+ * Resolve the CONFIGURED key inventory — the set a request draws from:
  *
- *   1. `GEMINI_API_KEY_4` (preferred project / quota),
+ *   1. `GEMINI_API_KEY_4`,
  *   2. `GEMINI_API_KEY` and the remaining `GEMINI_API_KEY_N` in numeric order,
  *   3. the legacy `GEMINI_API_KEYS` pool last.
  *
  * Values are trimmed, comma-separated pools are flattened (`#1`, `#2`, … in the
  * entry name) and duplicates are dropped first-wins, so the same credential is
  * never billed twice in one request. Blank entries are ignored.
+ *
+ * The order returned here is the STABLE inventory/dev order (used by the
+ * `/api/health/gemini` probe, the CLI and the log line). It is NOT the order a
+ * request uses: {@link shuffleGeminiKeyPool} draws a random permutation per
+ * request cycle.
  */
 export function resolveGeminiKeyPool(env: EnvLike = process.env): GeminiKeyEntry[] {
   const ranked: { name: string; rank: number; raw: string }[] = [];
@@ -376,6 +426,34 @@ export function resolveGeminiKeyPool(env: EnvLike = process.env): GeminiKeyEntry
   if (legacyRaw.trim()) absorb(GEMINI_LEGACY_POOL_NAME, legacyRaw);
 
   return entries;
+}
+
+/**
+ * Draw this request's rotation order: a Fisher–Yates shuffle of the configured
+ * pool — a random permutation WITHOUT replacement, so
+ *
+ *   • every configured key stays in the draw (no key is dropped),
+ *   • no key is tried twice in the same request cycle, and
+ *   • consecutive requests no longer start on the same credential (the fixed
+ *     `GEMINI_API_KEY_4` → base → `_N` order is gone from the request path),
+ *
+ * which spreads the load across projects instead of concentrating every
+ * request on one key's daily quota.
+ *
+ * `random` is injectable for tests and for a deterministic replay: a generator
+ * returning values ≥ `1 - Number.EPSILON` yields the configured order.
+ */
+export function shuffleGeminiKeyPool(
+  pool: readonly GeminiKeyEntry[],
+  random: () => number = Math.random,
+): GeminiKeyEntry[] {
+  const drawn = [...pool];
+  for (let i = drawn.length - 1; i > 0; i -= 1) {
+    // `Math.min` guards a stubbed/rogue generator returning exactly 1.
+    const j = Math.min(Math.floor(random() * (i + 1)), i);
+    [drawn[i], drawn[j]] = [drawn[j], drawn[i]];
+  }
+  return drawn;
 }
 
 /** True when the preferred first key is absent, blank or whitespace-only. */
