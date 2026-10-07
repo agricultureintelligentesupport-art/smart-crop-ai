@@ -2,14 +2,20 @@
  * Demo-mock contract (`@/lib/assistant/demo-mock` + the `/api/assistant`
  * wiring).
  *
- * Two things must stay true:
- *   1. the scripted answers are served exactly as written, in script order,
- *      with a simulated ~600 ms round-trip, and
- *   2. the mock is ON BY DEFAULT — a deployment with no configuration at all
+ * Three things must stay true:
+ *   1. the scripted answers are served exactly as written — headings, the
+ *      `**نسبة الثقة:** \`…\`` chip and the numbered badges the UI colours —
+ *      in script order (first photo Leaf Scorch, second Dieback);
+ *   2. the timings are the demo's: ~600 ms for a text turn, a full ~5 s for a
+ *      photo turn (the beat that shows both vision phases), and neither is
+ *      paid by a turn the script does not recognise;
+ *   3. the mock is ON BY DEFAULT — a deployment with no configuration at all
  *      (the Vercel recording environment, which has no `.env.local`) must
  *      answer `مرحبا` with the script, never with the old basic-mode reply —
- *      while an explicit `DEMO_MOCK=0` restores the real pipeline, and any
- *      turn outside the script always falls through to it.
+ *      while an explicit `DEMO_MOCK=0` restores the real pipeline.
+ *
+ * Note on cost: photo turns really wait 5 s here — that is the contract being
+ * tested, so this file is deliberately the slowest in the suite.
  */
 
 import assert from "node:assert/strict";
@@ -22,14 +28,16 @@ import {
 } from "../../src/lib/assistant/demo-mock";
 import { POST } from "../../src/app/api/assistant/route";
 
+/** Mirrors the route's split timings: fast text answers, a slow vision beat. */
+const SIMULATED_TEXT_DELAY_MS = 600;
+const SIMULATED_IMAGE_DELAY_MS = 5000;
+
 /** Every environment variable this suite touches. */
 const TOUCHED_ENV = /^(DEMO_MOCK|PHYTOSCAN_DEMO_MOCK|GEMINI_API_KEY|HUGGINGFACE_API_KEY|HF_TOKEN)/;
 const originalEnv: Record<string, string | undefined> = {};
 for (const [name, value] of Object.entries(process.env)) {
   if (TOUCHED_ENV.test(name)) originalEnv[name] = value;
 }
-
-const SIMULATED_DELAY_MS = 600;
 
 function scrubEnv() {
   for (const name of Object.keys(process.env)) {
@@ -52,8 +60,10 @@ const user = (content: string, image?: string) => ({
   ...(image ? { image } : {}),
 });
 
+const IMAGE_B64 = "aW1hZ2U=";
+
 /* ------------------------------------------------------------------ */
-/*  The opt-in switch                                                  */
+/*  The switch                                                         */
 /* ------------------------------------------------------------------ */
 
 test("the mock is ON by default — only an explicit DEMO_MOCK=0 disables it", () => {
@@ -75,63 +85,99 @@ test("the mock is ON by default — only an explicit DEMO_MOCK=0 disables it", (
 });
 
 /* ------------------------------------------------------------------ */
-/*  Script order                                                       */
+/*  Script order + markdown fidelity                                   */
 /* ------------------------------------------------------------------ */
 
-test("script: greeting / identity / explain / French", async () => {
-  const greeting = await getDemoMockResponse([user("مرحبا")]);
-  assert.ok(greeting?.includes("مرحباً بك! 👋"));
-  assert.ok(greeting?.includes("يمكنك إرسال صورة مباشرة"));
-  // The typed variants a presenter may use all land on the same answer.
-  for (const variant of ["أهلاً", "أهلاً وسهلاً", "سلام", "السلام عليكم", "السلام عليكم ورحمة الله"]) {
+test("script: greeting / identity / explain / French, byte-for-byte", async () => {
+  const greeting = (await getDemoMockResponse([user("مرحبا")])) ?? "";
+  assert.ok(greeting.startsWith("مرحباً بك! 👋"));
+  for (const paragraph of [
+    "أنا هنا لمساعدتك في إدارة محاصيلك وصحة نباتاتك في الميدان الزراعي.",
+    "إذا كان لديك أي سؤال حول صحة النبات، التسميد، السقي، أو ظهور أعراض مرضية، فأخبرني بالتفصيل.",
+    "أو يمكنك إرسال صورة مباشرة للحالة لتشخيصها فوراً.",
+  ]) {
+    assert.ok(greeting.includes(paragraph), `missing paragraph: ${paragraph.slice(0, 30)}`);
+  }
+
+  // The variants a presenter may type all land on the same answer (the matcher
+  // folds tashkeel and the alef/hamza forms).
+  for (const variant of ["اهلا", "أهلاً", "أهلاً وسهلاً", "سلام", "السلام عليكم", "السلام عليكم ورحمة الله"]) {
     const reply = await getDemoMockResponse([user(variant)]);
     assert.ok(reply?.includes("مرحباً بك! 👋"), `greeting missed for "${variant}"`);
   }
 
-  const identity = await getDemoMockResponse([user("عرف بنفسك")]);
-  assert.ok(identity?.includes("**PhytoScan AI**"));
-  assert.ok(identity?.includes("المتعاملين الزراعيين في الجزائر"));
+  const identity = (await getDemoMockResponse([user("عرف بنفسك")])) ?? "";
+  assert.ok(identity.startsWith("أنا **PhytoScan AI** — مستشارك الزراعي الذكي المطور خصيصاً"));
+  assert.ok(identity.includes("• **مهامي الأساسية:**"));
+  assert.ok(identity.includes("• تشخيص أمراض النباتات والآفات فوراً من خلال تحليل الصور."));
+  assert.ok(identity.includes("• تقديم استشارات في الري، التسميد، وحماية المحاصيل"));
   assert.ok((await getDemoMockResponse([user("شكون انت؟")]))?.includes("**PhytoScan AI**"));
 
-  const explain = await getDemoMockResponse([user("لم أفهم، اشرحلي")]);
-  assert.ok(explain?.includes("يُقصد باحتراق الحواف"));
-  assert.ok(explain?.includes("**الخطوات العملية التوضيحية:**"));
+  const explain = (await getDemoMockResponse([user("لم أفهم، اشرحلي")])) ?? "";
+  assert.ok(explain.startsWith("أفهمك، يُقصد باحتراق الحواف"));
+  assert.ok(explain.includes("**الخطوات العملية التوضيحية:**"));
+  assert.ok(explain.includes("• **السقي:** اسقِ النبات في الصباح الباكر فقط"));
+  assert.ok(explain.includes("• **التقليم:** قم بقص الحواف الجافة والميتة بمقلم معقم"));
+  assert.ok(explain.includes("• **الرش:** استعمل المحلول المذكور لحماية الأوراق المتبقية"));
   assert.ok((await getDemoMockResponse([user("ما هي التفاصيل؟")]))?.includes("يُقصد باحتراق الحواف"));
 
   const french = await getDemoMockResponse([user("اشرحلي بالفرنسية")]);
   // The explain branch precedes the French branch, in script order.
   assert.ok(french?.includes("يُقصد باحتراق الحواف"));
-  const frenchOnly = await getDemoMockResponse([user("Français s'il vous plaît")]);
-  assert.ok(frenchOnly?.includes(".Oui, bien sûr"));
-  assert.ok(frenchOnly?.includes("**: Pour traiter**"));
-  assert.ok(frenchOnly?.includes("**: Prévention**"));
+  const frenchOnly = (await getDemoMockResponse([user("Français s'il vous plaît")])) ?? "";
+  // Scripted byte-for-byte: the answer opens with the period (RTL markdown)
+  // and keeps the two `**: …**` headings the renderer bolds.
+  assert.ok(frenchOnly.startsWith(".Oui, bien sûr"));
+  assert.ok(frenchOnly.includes("**: Pour traiter**"));
+  assert.ok(frenchOnly.includes("• Appliquez du **copper oxychloride 50 %**"));
+  assert.ok(frenchOnly.includes("• Taillez les parties sèches et désinfectez les outils."));
+  assert.ok(frenchOnly.includes("**: Prévention**"));
+  assert.ok(frenchOnly.includes("• Évitez les blessures mécaniques et contrôlez l'arrosage."));
 });
 
-test("script: the first photo answers Leaf Scorch 88 %, the second Dieback 85 %", async () => {
-  const first = await getDemoMockResponse([user("شخّص هذه الورقة", "aW1hZ2U=")]);
-  assert.ok(first?.includes("### **احتراق حواف الأوراق (Leaf Scorch)**"));
-  assert.ok(first?.includes("`88% · ثقة مرتفعة`"));
-  assert.ok(first?.includes("أكسي كلورور النحاس 50%"));
+test("photos: 1st = Leaf Scorch 88 %, 2nd = Dieback 85 %, badges and chips intact", async () => {
+  const first = (await getDemoMockResponse([user("شخّص هذه الورقة", IMAGE_B64)])) ?? "";
+  assert.ok(first.startsWith("[ 🔍 لم يُعثر على ورقة واحدة — شُخِّصت الصورة كاملة. ]"));
+  // `### ` heading, `**bold**` and the inline-code chip the UI colours.
+  assert.ok(first.includes("### **احتراق حواف الأوراق (Leaf Scorch)**"));
+  assert.ok(first.includes("**نسبة الثقة:** `88% · ثقة مرتفعة`"));
+  assert.ok(first.includes("**خطة علاج ووقاية:**"));
+  assert.ok(first.includes("`1` **اسم المنتج:** أكسي كلورور النحاس 50%"));
+  assert.ok(first.includes("• **الجرعة:** 1.5 غرام لكل لتر ماء"));
+  assert.ok(first.includes("• **الطريقة:** رش ورقي على الأجزاء المتضررة في الصباح الباكر"));
+  assert.ok(first.includes("• **البدائل:** إذا لم يتوفر، استخدم مبيد مانكوزيب 80% كبديل وقائي"));
+  assert.ok(first.includes("`1` **الوقاية:**"));
 
   // Second photo: the first scripted answer rides along as history — the UI
-  // never resends the base64 payloads.
-  const second = await getDemoMockResponse([
-    user("شخّص هذه الورقة", "aW1hZ2U="),
-    { role: "assistant", content: first ?? "" },
+  // never resends the base64 payloads, so the marker in the assistant turn is
+  // what makes this the SECOND diagnosis.
+  const second = (await getDemoMockResponse([
+    user("شخّص هذه الورقة", IMAGE_B64),
+    { role: "assistant", content: first },
     user("وهذه الصورة الثانية؟", "c2Vjb25k"),
-  ]);
-  assert.ok(second?.includes("### **تيبس الأغصان والموت الخلفي (Dieback)**"));
-  assert.ok(second?.includes("`85% · ثقة مرتفعة`"));
-  assert.ok(second?.includes("الكلوروثالونيل 50%"));
+  ])) ?? "";
+  assert.ok(second.includes("### **تيبس الأغصان والموت الخلفي (Dieback)**"));
+  assert.ok(second.includes("**نسبة الثقة:** `85% · ثقة مرتفعة`"));
+  assert.ok(second.includes("`1` **اسم المنتج:** مانكوزيب 80%"));
+  assert.ok(second.includes("• **الطريقة:** قص الأغصان الميتة حتى الخشب الحي"));
+  assert.ok(second.includes("• **ملاحظة:** حرق الأغصان المقصوصة فوراً وتطهير أدوات التقليم بالكحول"));
+  assert.ok(second.includes("`1` **الوقاية:**"));
 
   // A legacy `imageUrl` turn counts as a photo too.
   assert.ok(
-    (await getDemoMockResponse([{ role: "user", content: "", imageUrl: "data:image/jpeg;base64,x" }]))
-      ?.includes("Leaf Scorch"),
+    (
+      await getDemoMockResponse([
+        { role: "user", content: "", imageUrl: "data:image/jpeg;base64,x" },
+      ])
+    )?.includes("Leaf Scorch"),
   );
 });
 
-test("script: an unrecognised turn returns null (the real pipeline takes over)", async () => {
+/* ------------------------------------------------------------------ */
+/*  Matching misses + timings                                          */
+/* ------------------------------------------------------------------ */
+
+test("an unrecognised TEXT turn returns null so the real pipeline takes over", async () => {
   assert.equal(await getDemoMockResponse([]), null);
   assert.equal(await getDemoMockResponse([{ role: "assistant", content: "…" }]), null);
   assert.equal(await getDemoMockResponse([user("كيف أسقي الطماطم؟")]), null);
@@ -142,15 +188,32 @@ test("script: an unrecognised turn returns null (the real pipeline takes over)",
   );
 });
 
-test("the 600 ms simulated round-trip is paid only by a scripted turn", async () => {
-  const started = Date.now();
+test("a text turn waits ~600 ms, a photo turn a full ~5 s (the vision beat)", async () => {
+  const textStart = Date.now();
   await getDemoMockResponse([user("مرحبا")]);
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed >= SIMULATED_DELAY_MS - 5, `greeting answered too fast: ${elapsed} ms`);
+  const textElapsed = Date.now() - textStart;
+  assert.ok(
+    textElapsed >= SIMULATED_TEXT_DELAY_MS - 5 && textElapsed < SIMULATED_IMAGE_DELAY_MS / 2,
+    `text turn should wait ~600 ms, waited ${textElapsed} ms`,
+  );
 
-  const missStart = Date.now();
+  const photoStart = Date.now();
+  const photoReply = await getDemoMockResponse([user("شخّص هذه الورقة", IMAGE_B64)]);
+  const photoElapsed = Date.now() - photoStart;
+  assert.ok(photoReply?.includes("Leaf Scorch"));
+  // The UI walks its thinking label at 2.6 s (detection → vision analysis), so
+  // the 5 s beat is what shows both phases on camera.
+  assert.ok(
+    photoElapsed >= SIMULATED_IMAGE_DELAY_MS - 20,
+    `photo turn should wait ~5000 ms, waited ${photoElapsed} ms`,
+  );
+});
+
+test("a miss is never held behind the mock's timing", async () => {
+  const start = Date.now();
   assert.equal(await getDemoMockResponse([user("كيف أسقي الطماطم؟")]), null);
-  assert.ok(Date.now() - missStart < SIMULATED_DELAY_MS, "a non-scripted turn must not be delayed");
+  assert.equal(await getDemoMockResponse([user("ما هو أفضل سماد للزيتون؟")]), null);
+  assert.ok(Date.now() - start < SIMULATED_TEXT_DELAY_MS, "no simulated delay on a miss");
 });
 
 test("buildDemoMockMessages appends the current turn after the history", () => {
@@ -177,7 +240,7 @@ function request(body: Record<string, unknown>) {
   });
 }
 
-const IMAGE = { data: "aW1hZ2U=", mimeType: "image/jpeg" };
+const IMAGE = { data: IMAGE_B64, mimeType: "image/jpeg" };
 
 test("route: on a server with NO configuration a greeting is answered by the script", async () => {
   // The reported regression: a deployment without DEMO_MOCK (Vercel has no
@@ -208,47 +271,44 @@ test("route: DEMO_MOCK=0 restores the real pipeline for scripted turns", async (
   const response = await POST(request({ message: "مرحبا" }));
   assert.equal(response.status, 503);
   assert.equal((await response.json()).code, "MISSING_KEYS");
-
-  const photo = await POST(request({ message: "شخّص هذه الورقة", image: IMAGE }));
-  assert.equal(photo.status, 503);
-  assert.equal((await photo.json()).code, "MISSING_KEYS");
 });
 
-test("route: with DEMO_MOCK=1 a greeting is answered 200 llm with no keys at all", async () => {
+test("route: with the mock on, a text turn is 200 llm with no keys at all", async () => {
   scrubEnv();
-  process.env.DEMO_MOCK = "1";
   // No test may reach a provider: any upstream call fails loudly.
   mock.method(globalThis, "fetch", async () => {
     throw new Error("Unexpected upstream request");
   });
 
-  const response = await POST(request({ message: "مرحبا" }));
+  const response = await POST(request({ message: "عرف بنفسك" }));
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.source, "llm");
   assert.equal(payload.diagnosis, null);
-  assert.match(payload.reply, /مرحباً بك! 👋/);
+  assert.match(payload.reply, /\*\*PhytoScan AI\*\*/);
   assert.match(payload.warnings.join(" "), /Demo mock/);
 });
 
-test("route: with DEMO_MOCK=1 a photo is answered 200 hybrid (no provider, no quota)", async () => {
+test("route: with the mock on, a photo is 200 hybrid (no provider, no quota)", async () => {
   scrubEnv();
-  process.env.DEMO_MOCK = "1";
   mock.method(globalThis, "fetch", async () => {
     throw new Error("Unexpected upstream request");
   });
 
+  const started = Date.now();
   const response = await POST(request({ message: "شخّص هذه الورقة", image: IMAGE }));
+  const elapsed = Date.now() - started;
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.source, "hybrid");
   assert.equal(payload.diagnosis, null);
   assert.match(payload.reply, /احتراق حواف الأوراق \(Leaf Scorch\)/);
+  // The 5 s vision beat survives the route (build + JSON round-trip included).
+  assert.ok(elapsed >= SIMULATED_IMAGE_DELAY_MS, `photo reply came back in ${elapsed} ms`);
 });
 
-test("route: with DEMO_MOCK=1 an unknown turn still reaches the real pipeline", async () => {
+test("route: with the mock on, an unknown text turn still reaches the real pipeline", async () => {
   scrubEnv();
-  process.env.DEMO_MOCK = "1";
   const response = await POST(request({ message: "كيف أسقي الطماطم؟" }));
   // Still the unconfigured-server signal — the mock never swallowed it.
   assert.equal(response.status, 503);
@@ -257,7 +317,6 @@ test("route: with DEMO_MOCK=1 an unknown turn still reaches the real pipeline", 
 
 test("route: validation still runs before the mock", async () => {
   scrubEnv();
-  process.env.DEMO_MOCK = "1";
   const empty = await POST(request({ message: "مرحبا", image: { data: "x", mimeType: "text/plain" } }));
   assert.equal(empty.status, 400);
 

@@ -61,7 +61,8 @@
  *     `getDemoMockResponse` (@/lib/assistant/demo-mock) answers the SCRIPTED
  *     demo prompts (greeting, self-introduction, "explain more", French,
  *     first photo, second photo) from a canned script after a simulated
- *     600 ms round-trip, and it does so BEFORE any provider key is read — so a
+ *     simulated round-trip (600 ms for text, 5 s for a photo), and it does so
+ *     BEFORE any provider key is read — so a
  *     demo/pitch recording cannot burn or hit a quota, whatever the provider
  *     state is, and cannot fall back to the old basic-mode reply just because
  *     a deployment lacks `.env.local`. Any turn outside the script returns
@@ -2341,7 +2342,8 @@ async function handleAssistant(request: NextRequest): Promise<NextResponse> {
   /* ---- DEMO MOCK (ON by default; `DEMO_MOCK=0` restores the pipeline) - */
   // First thing the pipeline does, BEFORE any provider key is read: a scripted
   // turn is answered straight from `@/lib/assistant/demo-mock` after a
-  // simulated 600 ms round-trip, so the demo recording can never burn a quota,
+  // simulated round-trip (600 ms text / 5 s photo), so the recording can never
+  // burn a quota,
   // hit a rate limit, wait on a cold model — or silently fall back to the old
   // basic-mode reply because a flag was missing on the server. A turn that is
   // not part of the script returns null and every stage below runs exactly as

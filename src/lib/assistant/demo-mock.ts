@@ -6,7 +6,9 @@
  *   immune to provider problems (API quotas, credits, rate limits, cold
  *   starts, network hiccups). This module holds the SCRIPTED answers of the
  *   demo: the route recognises the presenter's prompts and replies with the
- *   text below after a simulated 600 ms network round-trip, so every turn
+ *   text below after a simulated network round-trip — 600 ms for a text
+ *   turn, a full 5 s for a photo turn (the beat a real vision diagnosis
+ *   needs) — so every turn
  *   looks exactly like a real answer while NO provider call is ever made.
  *
  * HOW IT IS WIRED
@@ -47,21 +49,34 @@ export interface DemoMockMessage {
 }
 
 /**
- * Simulated network round-trip. 600 ms sits in the sweet spot for a demo:
- * fast enough to keep the recording tight, slow enough that the thinking
- * indicator is visible and the answer does not look suspiciously canned.
+ * Simulated network round-trip for a TEXT turn. 600 ms sits in the sweet spot
+ * for a demo: fast enough to keep the recording tight, slow enough that the
+ * thinking indicator is visible and the answer does not look suspiciously
+ * canned.
  */
-const DEMO_MOCK_DELAY_MS = 600;
+const DEMO_MOCK_TEXT_DELAY_MS = 600;
 
 /**
- * Sentence that identifies the FIRST scripted photo answer. Because the UI
- * strips photos but keeps the assistant's text when a conversation is sent
- * back as `history`, seeing this line in an earlier assistant turn is how the
- * mock knows the presenter already showed the first leaf — so the next photo
- * gets the SECOND scripted diagnosis (Dieback), in the same order as the
- * demo script.
+ * Simulated round-trip for a PHOTO turn: a full 5 s, because that is the beat
+ * a real vision diagnosis needs. The chat walks its thinking label through
+ * the pipeline phases while a photo is in flight (`جارٍ تحديد الورقة
+ * واقتصاص الخلفية…` for the first 2.6 s, then `جارٍ تحليل الصورة وتشخيص
+ * المرض…`), so 5 s lets the on-camera viewer see BOTH phases before the
+ * diagnosis card lands. Still far below every timeout in play: the client
+ * sets none, and this is a single serverless response well inside Vercel's
+ * function window.
  */
-const FIRST_IMAGE_REPLY_MARKER = "احتراق حواف الأوراق (Leaf Scorch)";
+const DEMO_MOCK_IMAGE_DELAY_MS = 5000;
+
+/**
+ * Line that identifies a SCRIPTED photo answer. The UI strips photos but keeps
+ * the assistant's text when a conversation is sent back as `history`, so this
+ * header (carried by every photo reply) is how the mock counts the photos the
+ * presenter has already shown — which is what makes the second leaf of the
+ * recording get the SECOND scripted diagnosis (Dieback) instead of repeating
+ * the first one.
+ */
+const PHOTO_REPLY_MARKER = "نتيجة تشخيص الصورة";
 
 /** Explicit opt-OUT values: `DEMO_MOCK=0` (or any of these) restores the real
  *  pipeline; an unset/unknown value leaves the demo script in charge. */
@@ -266,17 +281,17 @@ function resolveScriptedReply(text: string, hasImage: boolean, totalImages: numb
  * Count the photos in this conversation.
  *
  * `messages` carries the photos attached to the CURRENT turn (the UI doesn't
- * resend earlier base64 payloads). An earlier SCRIPTED photo answer
- * ({@link FIRST_IMAGE_REPLY_MARKER}) is therefore counted as one additional
- * photo already shown, which is what makes the second photo of the recording
- * return {@link SECOND_IMAGE_REPLY} instead of repeating the first one.
+ * resend earlier base64 payloads), so counting user turns alone would always
+ * yield 1 and the second photo would repeat the first diagnosis. Every earlier
+ * SCRIPTED photo answer ({@link PHOTO_REPLY_MARKER}) is therefore counted as
+ * one photo already shown.
  */
 function countImages(messages: readonly DemoMockMessage[]): number {
   const markerInAssistantTurns = messages.filter(
     (message) =>
       message.role === "assistant" &&
       typeof message.content === "string" &&
-      normalize(message.content).includes(normalize(FIRST_IMAGE_REPLY_MARKER)),
+      normalize(message.content).includes(normalize(PHOTO_REPLY_MARKER)),
   ).length;
 
   const attachedNow = messages.filter(
@@ -316,7 +331,8 @@ export function buildDemoMockMessages(
  * parameter is the {@link DemoMockMessage} contract (both photo fields are
  * understood, see {@link countImages}).
  *
- * The simulated 600 ms delay is applied ONLY when a match was found, so a
+ * The simulated delay (600 ms text / 5 s photo) is applied ONLY when a match
+ * was found, so a
  * non-scripted turn never pays for it before reaching the real pipeline.
  */
 export async function getDemoMockResponse(messages: DemoMockMessage[]): Promise<string | null> {
@@ -339,7 +355,13 @@ export async function getDemoMockResponse(messages: DemoMockMessage[]): Promise<
   );
   if (reply === null) return null;
 
-  // Simulated network round-trip — keeps the demo pace natural.
-  await new Promise((resolve) => setTimeout(resolve, DEMO_MOCK_DELAY_MS));
+  // Simulated round-trip, split by turn type so the recording feels field-real:
+  // 5 s when a photo is being "analysed" (the UI's detection → vision phases
+  // both get their beat), 600 ms for a text answer. Paid ONLY by a scripted
+  // turn — a prompt outside the script reaches the real pipeline immediately
+  // instead of waiting behind a mock that will not answer it.
+  await new Promise((resolve) =>
+    setTimeout(resolve, hasImage ? DEMO_MOCK_IMAGE_DELAY_MS : DEMO_MOCK_TEXT_DELAY_MS),
+  );
   return reply;
 }
